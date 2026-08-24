@@ -119,6 +119,26 @@ function toBqFields(fields: BqSchemaField[]): BqField[] {
   }));
 }
 
+/**
+ * JavaScript exposes every JSON number as the same double-precision `number`
+ * type. An integer-looking first event therefore cannot prove that a field
+ * will stay integral. Creating an INT64 column from that single sample makes
+ * the table reject the first later fractional value, even though FLOAT64 can
+ * represent both shapes.
+ *
+ * Keep the per-row schema exact for diagnostics, but use FLOAT64 for inferred
+ * numeric columns that Axel creates or adds in typed_records mode. Existing
+ * INT64 columns continue accepting integral rows unchanged; a real fractional
+ * mismatch still gets the precise repair guidance below.
+ */
+function managedTypedRecordsSchema(fields: BqField[]): BqField[] {
+  return fields.map((field) => ({
+    ...field,
+    type: field.type === "INT64" ? "FLOAT64" : field.type,
+    ...(field.fields ? { fields: managedTypedRecordsSchema(field.fields) } : {}),
+  }));
+}
+
 function attemptOf(
   context: DeliveryContext | undefined,
   destination: Destination,
@@ -1051,6 +1071,9 @@ export function createBigQueryConnector(): Connector<BigQueryConfig> {
         payloadColumn,
         built.schemaFields,
       );
+      const managedSchemaFields = mode === "typed_records"
+        ? managedTypedRecordsSchema(desiredSchemaFields)
+        : desiredSchemaFields;
 
       // Mint (or reuse) an access token for the service account.
       let sa: ServiceAccountKey;
@@ -1125,7 +1148,7 @@ export function createBigQueryConnector(): Connector<BigQueryConfig> {
               projectId,
               dataset,
               binding.table,
-              desiredSchemaFields,
+              managedSchemaFields,
             );
           } catch {
             created = "retry";
@@ -1142,7 +1165,7 @@ export function createBigQueryConnector(): Connector<BigQueryConfig> {
                 projectId,
                 dataset,
                 binding.table,
-                desiredSchemaFields,
+                managedSchemaFields,
               );
             } catch {
               repairOutcome = "retry";
@@ -1157,7 +1180,7 @@ export function createBigQueryConnector(): Connector<BigQueryConfig> {
               projectId,
               dataset,
               binding.table,
-              desiredSchemaFields,
+              managedSchemaFields,
             );
           } catch {
             repairOutcome = "retry";

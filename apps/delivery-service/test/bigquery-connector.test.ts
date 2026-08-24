@@ -132,15 +132,71 @@ describe("bigquery connector", () => {
     const row = (lastInsertBody as { rows: Array<{ json: Record<string, unknown> }> }).rows[0];
     expect(row.json).toEqual({ id: 42, active: true, ratio: 0.5, data: { lead_score: 9 } });
 
-    // The auto-created table used inferred BigQuery types, not all-STRING.
+    // Boolean/string types stay native. Integer-looking JSON numbers are
+    // created as FLOAT64 because one event cannot prove they remain integral.
     const createCall = calls.find((c) => c.url.endsWith("/tables") && c.method === "POST");
     const created = JSON.parse(createCall!.body!) as {
-      schema: { fields: Array<{ name: string; type: string }> };
+      schema: { fields: Array<{ name: string; type: string; fields?: Array<{ name: string; type: string }> }> };
     };
     const byName = Object.fromEntries(created.schema.fields.map((f) => [f.name, f.type]));
-    expect(byName.id).toBe("INT64");
+    expect(byName.id).toBe("FLOAT64");
     expect(byName.active).toBe("BOOL");
     expect(byName.ratio).toBe("FLOAT64");
+    expect(created.schema.fields.find((field) => field.name === "data")?.fields).toEqual([
+      { name: "lead_score", type: "FLOAT64", mode: "NULLABLE" },
+    ]);
+  });
+
+  it("adds integer-looking typed fields as FLOAT64 to prevent later numeric drift", async () => {
+    insertSeq = [
+      makeRes(200, {
+        insertErrors: [{
+          index: 0,
+          errors: [{ reason: "invalid", message: "no such field: data.properties.total_taxes." }],
+        }],
+      }),
+      makeRes(200, {}),
+    ];
+    getTableSeq = [makeRes(200, {
+      etag: "etag-typed-v1",
+      schema: {
+        fields: [{
+          name: "data",
+          type: "RECORD",
+          mode: "NULLABLE",
+          fields: [{
+            name: "properties",
+            type: "RECORD",
+            mode: "NULLABLE",
+            fields: [],
+          }],
+        }],
+      },
+    })];
+
+    const out = await deliver(
+      encode({ data: { properties: { total_taxes: 1 } } }),
+      destination(),
+      { eventId: "evt-typed-add", binding: { table: "events", mode: "typed_records" } },
+    );
+
+    expect(out.status).toBe("success");
+    const patchCall = calls.find((call) => call.method === "PATCH");
+    expect(JSON.parse(patchCall!.body!)).toEqual({
+      schema: {
+        fields: [{
+          name: "data",
+          type: "RECORD",
+          mode: "NULLABLE",
+          fields: [{
+            name: "properties",
+            type: "RECORD",
+            mode: "NULLABLE",
+            fields: [{ name: "total_taxes", type: "FLOAT64", mode: "NULLABLE" }],
+          }],
+        }],
+      },
+    });
   });
 
   it("uses the route binding dataset instead of the destination default", async () => {
