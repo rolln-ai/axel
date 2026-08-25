@@ -11,6 +11,7 @@ import {
   escapeHtml,
   renderBrandedEmail,
 } from "../email-layout";
+import { failedDeliveriesPath } from "../delivery-stream";
 
 /**
  * Email digest of recent Data Contract notifications. Runs from a cron
@@ -462,6 +463,21 @@ function buildDigestSections(notifications: DigestNotification[]): DigestSection
               : "Axel retries after each cooldown; check the destination if it keeps failing."),
         linkPath: first.link_path,
         linkLabel: "Open delivery controls →",
+      });
+    } else if (first.kind === "replay_job_complete") {
+      const stillFailing = /\bstill failing\b/i.test(first.title);
+      items.push({
+        section: stillFailing ? "attention" : "updates",
+        severity: stillFailing ? "warning" : "info",
+        groupBy: "replays",
+        title: first.title,
+        body: stillFailing
+          ? "Those deliveries are still unresolved."
+          : cleanBody(first),
+        linkPath: stillFailing
+          ? failedDeliveriesPath(first.link_path)
+          : first.link_path,
+        linkLabel: stillFailing ? "Review failed deliveries →" : "View deliveries →",
       });
     } else {
       items.push({

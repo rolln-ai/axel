@@ -32,6 +32,16 @@ export function replayJobCompletionNotice(
   return { severity, title };
 }
 
+/**
+ * Inbox / digest CTA for a finished replay job. Failures deep-link to the
+ * deliveries failed stream (workspace-scoped so a multi-workspace recipient
+ * doesn't land on the wrong tenant). All-succeeded jobs still open the log.
+ */
+export function replayJobCompletionLink(workspaceId: string, failed: number): string {
+  const path = `/workspaces/${encodeURIComponent(workspaceId)}/deliveries`;
+  return failed > 0 ? `${path}?status=failed` : path;
+}
+
 /** Stable dedup key for a job's completion notification (one per job, ever). */
 export function replayJobCompletionDedupKey(jobId: string): string {
   return `replay_job_complete:${jobId}`;

@@ -391,6 +391,44 @@ describe("runDigestJob", () => {
     expect(output.text).toContain("Open delivery controls");
   });
 
+  it("deep-links a failed replay-complete notice to the failed deliveries stream", async () => {
+    let rendered: { subject: string; html: string; text: string } | null = null;
+    await runDigestJob({
+      ...claimStore(),
+      listRecipients: async () => [
+        {
+          user_id: "u1",
+          email: "a@example.com",
+          workspace_id: "ws_demo_publishing",
+          workspace_name: "Acme Publishing",
+          prefs: null,
+        },
+      ],
+      listNotifications: async () => [
+        notification({
+          kind: "replay_job_complete",
+          severity: "warning",
+          title: "Replay finished: 0 succeeded, 100 still failing",
+          body_md: null,
+          link_path: "/deliveries",
+        }),
+      ],
+      send: async (args) => {
+        rendered = args;
+        return { ok: true };
+      },
+    });
+
+    const output = rendered!;
+    expect(output.subject).toBe("Acme Publishing — 1 item needs your attention");
+    expect(output.text).toContain("NEEDS YOUR ATTENTION");
+    expect(output.text).toContain("Replay finished: 0 succeeded, 100 still failing");
+    expect(output.text).toContain("Those deliveries are still unresolved.");
+    expect(output.text).toContain("/deliveries?status=failed");
+    expect(output.html).toContain('href="https://app.axelapp.ai/deliveries?status=failed"');
+    expect(output.html).toContain("Review failed deliveries");
+  });
+
   it("mails nobody twice when the cron fires again the same day", async () => {
     const claims = claimStore();
     const keys: Array<string | undefined> = [];

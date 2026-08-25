@@ -14,6 +14,7 @@ import {
   bumpReplayJobCounter,
   finishReplayJobIfComplete,
 } from "../src/replay-job-completion.ts";
+import { replayJobCompletionLink } from "../src/replay-job-completion-helpers.ts";
 
 interface PgCall {
   sql: string;
@@ -59,11 +60,12 @@ describe("finishReplayJobIfComplete — atomic finish-once + notification", () =
     const notifs = notifCalls(calls);
     expect(notifs).toHaveLength(1);
     const notif = notifs[0];
-    // kind literal + link_path live in the SQL; severity is a param.
+    // kind literal lives in the SQL; severity + filtered link are params.
     expect(notif?.sql).toMatch(/'replay_job_complete'/);
-    expect(notif?.sql).toMatch(/'\/deliveries'/);
-    // failed>0 => 'warning'; dedup_key namespaced by job id.
+    expect(notif?.sql).not.toMatch(/'\/deliveries'/);
+    // failed>0 => 'warning'; deep-link the failed stream; dedup_key namespaced by job id.
     expect(notif?.params).toContain("warning");
+    expect(notif?.params).toContain("/workspaces/ws_1/deliveries?status=failed");
     expect(notif?.params).toContain("replay_job_complete:rpyjob_1");
     // The recomputed authoritative numbers feed the title (40 succeeded, 2 failing).
     const titleParam = notif?.params.find(
@@ -99,10 +101,30 @@ describe("finishReplayJobIfComplete — atomic finish-once + notification", () =
     await finishReplayJobIfComplete(pool, "rpyjob_1");
     const notif = notifCalls(calls)[0];
     expect(notif?.params).toContain("info");
+    expect(notif?.params).toContain("/workspaces/ws_1/deliveries");
+    expect(notif?.params).not.toContain("/workspaces/ws_1/deliveries?status=failed");
     const titleParam = notif?.params.find(
       (p) => typeof p === "string" && p.startsWith("Replay finished:"),
     );
     expect(titleParam).toBe("Replay finished: 1,850 succeeded");
+  });
+});
+
+describe("replayJobCompletionLink", () => {
+  it("filters to failed deliveries when the job still has failures", () => {
+    expect(replayJobCompletionLink("ws_1", 76)).toBe(
+      "/workspaces/ws_1/deliveries?status=failed",
+    );
+  });
+
+  it("opens the deliveries log without a status filter when everything succeeded", () => {
+    expect(replayJobCompletionLink("ws_1", 0)).toBe("/workspaces/ws_1/deliveries");
+  });
+
+  it("encodes unusual workspace ids", () => {
+    expect(replayJobCompletionLink("ws/with spaces", 1)).toBe(
+      "/workspaces/ws%2Fwith%20spaces/deliveries?status=failed",
+    );
   });
 });
 

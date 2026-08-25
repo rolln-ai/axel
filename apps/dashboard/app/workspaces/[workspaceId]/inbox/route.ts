@@ -1,5 +1,4 @@
-import { NextResponse } from "next/server";
-import { requireSession, setActiveWorkspaceId } from "../../../../lib/session";
+import { handoffToWorkspacePath } from "../../../../lib/workspace-handoff-route";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,14 +14,6 @@ export async function GET(
   request: Request,
   { params }: { params: Promise<{ workspaceId: string }> },
 ): Promise<Response> {
-  const session = await requireSession();
   const { workspaceId } = await params;
-  const membership = session.memberships.find((item) => item.workspace_id === workspaceId);
-
-  if (!membership) {
-    return NextResponse.redirect(new URL("/dashboard", request.url), 303);
-  }
-
-  await setActiveWorkspaceId(membership.workspace_id);
-  return NextResponse.redirect(new URL("/inbox", request.url), 303);
+  return handoffToWorkspacePath(request, workspaceId, "/inbox");
 }

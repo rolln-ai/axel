@@ -23,6 +23,7 @@ import { withPgRetry } from "@axel/observability";
 import {
   isDuplicateNotificationError,
   replayJobCompletionDedupKey,
+  replayJobCompletionLink,
   replayJobCompletionNotice,
 } from "./replay-job-completion-helpers.js";
 
@@ -137,12 +138,13 @@ async function emitReplayJobCompleteNotification(
   try {
     await pool.query(
       `INSERT INTO notifications (id, workspace_id, user_id, kind, severity, title, body_md, link_path, dedup_key, created_at)
-       VALUES ($1, $2, NULL, 'replay_job_complete', $3, $4, NULL, '/deliveries', $5, now())`,
+       VALUES ($1, $2, NULL, 'replay_job_complete', $3, $4, NULL, $5, $6, now())`,
       [
         `notif_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
         workspaceId,
         severity,
         title,
+        replayJobCompletionLink(workspaceId, failed),
         replayJobCompletionDedupKey(jobId),
       ],
     );

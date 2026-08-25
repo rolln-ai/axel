@@ -895,7 +895,7 @@ function ReasonActions({ row }: { row: UnresolvedReasonRow }) {
   // page so the operator can see the actual response if it doesn't).
   const inspectHref =
     guidance.href ??
-    `/deliveries?status=dead&q=${encodeURIComponent(row.reason)}`;
+    `/deliveries?status=failed&q=${encodeURIComponent(row.reason)}`;
   const inspectLabel = guidance.label ?? "Inspect →";
   return (
     <div className="flex shrink-0 flex-col items-end gap-1">

@@ -25,6 +25,14 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
+      # Node 22.12.0 ships a corepack whose npm signing keys cannot verify
+      # current pnpm releases (`Cannot find matching keyid`). `vercel build`
+      # then runs vercel.json's `corepack enable && pnpm install` and dies
+      # before the preview even starts. Refresh corepack first so the
+      # installCommand sees current keys. Same reason render.yaml skips
+      # corepack entirely.
+      - name: Refresh corepack signing keys
+        run: npm install -g corepack@latest && corepack enable && corepack prepare pnpm@9.12.0 --activate
 
       - name: Skip draft PRs
         if: ${{ github.event.pull_request.draft }}

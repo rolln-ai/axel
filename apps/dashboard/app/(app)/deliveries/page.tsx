@@ -16,6 +16,13 @@ import {
   usageEnabled,
   type WorkspaceDeliveryAttemptRow,
 } from "../../../lib/usage";
+import {
+  clickhouseStatusForFilter,
+  countActiveDeliveryFilters,
+  filterDeliveryRows,
+  parseDeliveryFilters,
+  type DeliveryFilters,
+} from "../../../lib/delivery-stream";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -31,19 +38,12 @@ export const dynamic = "force-dynamic";
 const ATTEMPT_LIMIT = 100;
 const DELIVERIES_PAGE_TIMEOUT_MS = 2_500;
 
-interface DeliveryFilters {
-  status: "all" | "success" | "retry" | "failed";
-  source: string;
-  destination: string;
-  q: string;
-}
-
 export default async function DeliveriesPage({
   searchParams,
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  const filters = parseFilters(await searchParams);
+  const filters = parseDeliveryFilters(await searchParams);
   const session = await requireSession();
   const workspaceId = session.activeWorkspace.workspace_id;
   const canReplay = session.activeWorkspace.role === "owner" || session.activeWorkspace.role === "admin";
@@ -52,7 +52,11 @@ export default async function DeliveriesPage({
   let attemptsError: string | null = null;
   if (usageEnabled()) {
     const attemptsResult = await settleWithin(
-      listWorkspaceDeliveryAttempts(workspaceId, null, ATTEMPT_LIMIT),
+      listWorkspaceDeliveryAttempts(
+        workspaceId,
+        clickhouseStatusForFilter(filters.status),
+        ATTEMPT_LIMIT,
+      ),
       DELIVERIES_PAGE_TIMEOUT_MS,
       "Delivery stream took too long to load.",
     );
@@ -91,7 +95,7 @@ export default async function DeliveriesPage({
   const rows = buildDeliveryRows(attempts, deadLetters, meta);
   const filteredRows = filterDeliveryRows(rows, filters);
   const filterOptions = buildFilterOptions(rows);
-  const activeFilterCount = countActiveFilters(filters);
+  const activeFilterCount = countActiveDeliveryFilters(filters);
 
   return (
     <>
@@ -249,7 +253,7 @@ function DeliveryFiltersForm({
       </label>
 
       <Button type="submit" variant="outline">Filter</Button>
-      {countActiveFilters(filters) > 0 ? (
+      {countActiveDeliveryFilters(filters) > 0 ? (
         <Button asChild variant="ghost">
           <Link href="/deliveries">Clear</Link>
         </Button>
@@ -311,7 +315,11 @@ function buildDeliveryRows(
   const rows: DeliveryStreamRow[] = attempts.map((attempt) => {
     const key = deadLetterKey(originalEventId(attempt.event_id), attempt.route_id);
     const deadLetter = deadLettersByRoute.get(key) ?? null;
-    if (deadLetter) seenDeadLetterKeys.add(key);
+    // Only a dead attempt represents the unresolved letter in the stream.
+    // Matching it onto a later success (same event + route, e.g. a prior
+    // attempt still inside the latest-N window) would hide the failure
+    // when the operator filters to Failed.
+    if (deadLetter && attempt.status === "dead") seenDeadLetterKeys.add(key);
 
     const dest = attempt.destination_id ? meta.destById.get(attempt.destination_id) : undefined;
     return {
@@ -385,58 +393,6 @@ function clickhouseToIso(raw: string): string {
   return raw.includes("T") ? raw : `${raw.replace(" ", "T")}Z`;
 }
 
-function parseFilters(searchParams: Record<string, string | string[] | undefined>): DeliveryFilters {
-  const status = firstValue(searchParams.status);
-  return {
-    status: status === "success" || status === "retry" || status === "failed" ? status : "all",
-    source: normalizeSelectFilter(firstValue(searchParams.source)),
-    destination: normalizeSelectFilter(firstValue(searchParams.destination)),
-    q: (firstValue(searchParams.q) ?? "").trim(),
-  };
-}
-
-function firstValue(value: string | string[] | undefined): string | undefined {
-  return Array.isArray(value) ? value[0] : value;
-}
-
-function normalizeSelectFilter(value: string | undefined): string {
-  if (!value || value === "all") return "";
-  return value.trim();
-}
-
-function filterDeliveryRows(rows: DeliveryStreamRow[], filters: DeliveryFilters): DeliveryStreamRow[] {
-  const q = filters.q.toLowerCase();
-  return rows.filter((row) => {
-    if (filters.status !== "all") {
-      if (filters.status === "failed" && row.status !== "dead") return false;
-      if (filters.status !== "failed" && row.status !== filters.status) return false;
-    }
-    if (filters.source && row.source_id !== filters.source) return false;
-    if (filters.destination && row.destination_id !== filters.destination) return false;
-    if (q && !rowSearchText(row).includes(q)) return false;
-    return true;
-  });
-}
-
-function rowSearchText(row: DeliveryStreamRow): string {
-  return [
-    row.event_id,
-    row.source_id,
-    row.route_id,
-    row.destination_id,
-    row.status,
-    row.dead_letter?.reason,
-    row.dead_letter?.message,
-    row.dead_letter?.replay?.state,
-    row.response.http_status,
-    row.response.error,
-    row.response.destination_type,
-  ]
-    .filter((value) => value !== null && value !== undefined)
-    .join(" ")
-    .toLowerCase();
-}
-
 function buildFilterOptions(rows: DeliveryStreamRow[]): { sources: string[]; destinations: string[] } {
   return {
     sources: uniqueSorted(rows.map((row) => row.source_id)),
@@ -446,13 +402,4 @@ function buildFilterOptions(rows: DeliveryStreamRow[]): { sources: string[]; des
 
 function uniqueSorted(values: Array<string | null>): string[] {
   return Array.from(new Set(values.filter((value): value is string => Boolean(value)))).sort((a, b) => a.localeCompare(b));
-}
-
-function countActiveFilters(filters: DeliveryFilters): number {
-  return [
-    filters.status !== "all",
-    Boolean(filters.source),
-    Boolean(filters.destination),
-    Boolean(filters.q),
-  ].filter(Boolean).length;
 }

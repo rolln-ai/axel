@@ -6,6 +6,7 @@ import {
 } from "../../../lib/notifications";
 import { LocalTime } from "../../_components/LocalTime";
 import { SeverityBadge } from "../../_components/StatusBadges";
+import { notificationLinkPath } from "../../../lib/delivery-stream";
 import { MarkAllReadButton } from "./MarkAllReadButton";
 import { NotificationRow } from "./NotificationRow";
 
@@ -57,7 +58,7 @@ function NotificationItem({ notification }: { notification: NotificationRecord }
     <li>
       <NotificationRow
         id={notification.id}
-        linkPath={notification.link_path}
+        linkPath={notificationLinkPath(notification.kind, notification.title, notification.link_path)}
         isUnread={notification.read_at === null}
       >
         <div className="flex items-center gap-3 px-4 py-3">
