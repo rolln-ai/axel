@@ -6,6 +6,7 @@ import {
   writeParquetBuffer,
   type S3ParquetRow,
 } from "./parquet-format.js";
+import { createSafeNodeHttpHandler } from "../safe-node-http-handler.js";
 
 /**
  * S3 destination connector. Writes each event as a JSON object under a
@@ -98,6 +99,7 @@ interface ParquetBatchGroup {
 }
 
 const parquetBatchGroups = new Map<string, ParquetBatchGroup>();
+let parquetDrainMode = false;
 
 function getClient(config: S3DestinationConfig): S3Client {
   // Include the secret in the cache key so a rotated/revoked secret yields a
@@ -108,6 +110,7 @@ function getClient(config: S3DestinationConfig): S3Client {
   if (!client) {
     client = new S3Client({
       region: config.region,
+      requestHandler: createSafeNodeHttpHandler(),
       credentials: {
         accessKeyId: config.access_key_id,
         secretAccessKey: config.secret_access_key,
@@ -311,10 +314,12 @@ function enqueueParquetDelivery(
       timer: null,
     };
     parquetBatchGroups.set(groupKey, group);
-    group.timer = setTimeout(() => {
-      void flushParquetGroup(groupKey);
-    }, flushIntervalMs);
-    group.timer.unref?.();
+    if (!parquetDrainMode) {
+      group.timer = setTimeout(() => {
+        void flushParquetGroup(groupKey);
+      }, flushIntervalMs);
+      group.timer.unref?.();
+    }
   }
 
   const estimatedBytes = event.byteLength + PARQUET_ROW_OVERHEAD_BYTES;
@@ -332,7 +337,11 @@ function enqueueParquetDelivery(
     group.bufferedBytes += estimatedBytes;
     // Flush as soon as we hit the size target or the row safety cap; the
     // timer handles the low-volume case where neither is reached.
-    if (group.entries.length >= group.maxRows || group.bufferedBytes >= group.targetBytes) {
+    if (
+      parquetDrainMode ||
+      group.entries.length >= group.maxRows ||
+      group.bufferedBytes >= group.targetBytes
+    ) {
       void flushParquetGroup(groupKey);
     }
   });
@@ -499,7 +508,18 @@ export async function flushAllS3ParquetBatches(): Promise<void> {
   await Promise.all([...parquetBatchGroups.keys()].map((groupKey) => flushParquetGroup(groupKey)));
 }
 
+/**
+ * Enter a persistent shutdown mode before waiting on delivery poll loops.
+ * Existing batches flush now, and entries enqueued later during the drain
+ * flush immediately instead of installing a timer that can deadlock shutdown.
+ */
+export async function beginS3ParquetDrain(): Promise<void> {
+  parquetDrainMode = true;
+  await flushAllS3ParquetBatches();
+}
+
 export function closeAllS3Clients(): void {
   for (const c of clients.values()) c.destroy();
   clients.clear();
+  parquetDrainMode = false;
 }

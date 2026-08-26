@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Destination } from "@axel/shared";
-import { createS3Connector, closeAllS3Clients, flushAllS3ParquetBatches } from "../src/connectors/s3.ts";
+import {
+  beginS3ParquetDrain,
+  createS3Connector,
+  closeAllS3Clients,
+  flushAllS3ParquetBatches,
+} from "../src/connectors/s3.ts";
 
 const sendMock = vi.hoisted(() => vi.fn());
 const clientConfigMock = vi.hoisted(() => vi.fn());
@@ -178,6 +183,52 @@ describe("delivery-service S3 connector", () => {
     expect(Buffer.isBuffer(input.Body)).toBe(true);
     expect(input.Body.subarray(0, 4).toString("utf8")).toBe("PAR1");
     expect(input.Body.subarray(input.Body.length - 4).toString("utf8")).toBe("PAR1");
+  });
+
+  it("keeps Parquet in immediate-flush mode throughout shutdown drain", async () => {
+    let finishFirstSend: ((value: object) => void) | undefined;
+    sendMock
+      .mockImplementationOnce(
+        () =>
+          new Promise<object>((resolve) => {
+            finishFirstSend = resolve;
+          }),
+      )
+      .mockResolvedValue({});
+    vi.stubEnv("S3_PARQUET_BATCH_MAX_ROWS", "50000");
+    vi.stubEnv("S3_PARQUET_FLUSH_MS", "900000");
+    const connector = createS3Connector();
+    const context = {
+      workspaceId: "ws-1",
+      sourceId: "src-1",
+      routeId: "rt-1",
+      receivedAt: "2026-05-02T12:00:00.000Z",
+      binding: { key_prefix: "lake/", format: "parquet" as const },
+    };
+
+    const buffered = connector.deliver(encode({ first: true }), destination(), {
+      ...context,
+      eventId: "evt-before-drain",
+    });
+    expect(sendMock).not.toHaveBeenCalled();
+
+    const drain = beginS3ParquetDrain();
+    await vi.waitFor(() => expect(sendMock).toHaveBeenCalledTimes(1));
+
+    // This entry arrives while the original flush (and therefore shutdown's
+    // drain promise) is still active. Persistent drain mode must not buffer it.
+    await expect(
+      connector.deliver(encode({ later: true }), destination(), {
+        ...context,
+        eventId: "evt-during-drain",
+      }),
+    ).resolves.toMatchObject({ status: "success" });
+    expect(sendMock).toHaveBeenCalledTimes(2);
+
+    finishFirstSend?.({});
+    await expect(buffered).resolves.toMatchObject({ status: "success" });
+    await drain;
+    expect(sendMock).toHaveBeenCalledTimes(2);
   });
 
   it("flushes a parquet batch when the byte target is reached", async () => {

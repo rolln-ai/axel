@@ -27,11 +27,10 @@ import {
 } from "./password-reset";
 import {
   findValidEmailVerificationToken,
-  issueEmailVerificationToken,
   markEmailVerificationUsed,
 } from "./email-verification";
 import { safeReturnTo } from "./return-to";
-import { createSession, destroySession, requireAuthenticatedUser } from "./session";
+import { createSession, destroySession } from "./session";
 import { CURRENT_TERMS_VERSION, acceptedDocumentVersions } from "./legal";
 import { captureServerEvent } from "./posthog-server";
 import { enforceAuthRateLimits, rateLimitMessage } from "./rate-limit";
@@ -42,6 +41,7 @@ import { appBaseUrl } from "./app-url";
 import { requestIpFromHeaders } from "./request-ip";
 import { normalizeEmail, tokenHash, detectWorkspaceTimezone } from "./account-shared";
 import type { ActionState } from "./action-data";
+import { sendVerificationEmail } from "./email-verification-resend";
 
 /**
  * Returned for EVERY non-invite signup submission — whether the address was
@@ -54,42 +54,6 @@ import type { ActionState } from "./action-data";
  */
 const SIGNUP_GENERIC_NOTICE =
   "Check your email — we sent the next step to that address. New-account verification links expire in 24 hours.";
-
-/**
- * Issue a fresh verification token and email its link. Same storage/hashing/
- * expiry conventions as the password-reset flow (see lib/email-verification.ts).
- * Callers treat this as best-effort: a send failure must never undo a
- * committed account.
- */
-async function sendVerificationEmail(userId: string, email: string): Promise<void> {
-  const { token } = await issueEmailVerificationToken(userId, await getRequestIp());
-  const link = `${appBaseUrl()}/verify?token=${encodeURIComponent(token)}`;
-  const subject = "Verify your email for Axel";
-  const text = [
-    "Confirm this is your email address to finish setting up your Axel account.",
-    "",
-    "Open this link to verify — it expires in 24 hours:",
-    link,
-    "",
-    "If you didn't create an Axel account, you can ignore this email.",
-    emailTextSignature(),
-  ].join("\n");
-  const html = renderBrandedEmail({
-    preheader: "Confirm your email address — this link expires in 24 hours.",
-    contentHtml: [
-      emailHeading("Verify your email"),
-      emailParagraph("Confirm this is your email address to finish setting up your Axel account."),
-      emailParagraph("Use the button below — the link expires in 24 hours."),
-      emailButton(link, "Verify email"),
-      emailLinkFallback(link),
-      emailNote("If you didn't create an Axel account, you can ignore this email."),
-    ].join(""),
-  });
-  const sent = await sendEmail({ to: email, subject, html, text });
-  if (!sent.ok) {
-    console.error("[sendVerificationEmail] email failed:", sent.error);
-  }
-}
 
 /**
  * Sent to the EXISTING account owner when someone submits their address on
@@ -604,35 +568,4 @@ export async function verifyEmail(_state: ActionState, formData: FormData): Prom
     await setSignupConversionCookie();
   }
   redirect("/dashboard");
-}
-
-/**
- * Re-send the verification link to the signed-in user's own address — backs
- * the persistent "verify your email" banner. Requires only an authenticated
- * user (not a workspace), and is per-user rate-limited so the banner button
- * can't be used to flood a mailbox.
- */
-export async function resendVerificationEmail(_state: ActionState, _formData: FormData): Promise<ActionState> {
-  const auth = await requireAuthenticatedUser();
-
-  const resendBreach = await enforceAuthRateLimits([
-    [`verify-resend:user:${auth.user.id}`, 3, 60 * 60_000],
-  ]);
-  if (resendBreach) return { error: rateLimitMessage(resendBreach) };
-
-  const result = await db().query<{ email: string; email_verified_at: string | null }>(
-    "SELECT email, email_verified_at::text AS email_verified_at FROM users WHERE id = $1 LIMIT 1",
-    [auth.user.id],
-  );
-  const user = result.rows[0];
-  if (!user) return { error: "Account not found." };
-  if (user.email_verified_at) return { notice: "Your email is already verified." };
-
-  try {
-    await sendVerificationEmail(auth.user.id, user.email);
-  } catch (err) {
-    console.error("[resendVerificationEmail] failed:", err);
-    return { error: "Could not send the verification email. Try again." };
-  }
-  return { notice: `Verification email sent to ${user.email}. The link expires in 24 hours.` };
 }

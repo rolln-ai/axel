@@ -48,7 +48,8 @@ export function WorkspaceListRowActions({
         <DialogHeader>
           <DialogTitle>Delete {workspaceName}</DialogTitle>
           <DialogDescription>
-            Schedules deletion: sources are disabled immediately and the teardown cron cancels
+            Schedules deletion: source edge-cache deletion is confirmed before the change; cache
+            propagation or a lookup already in flight can persist for up to five minutes. The teardown cron cancels
             billing, wipes ClickHouse + R2, and hard-deletes everything. Cannot be undone.
           </DialogDescription>
         </DialogHeader>

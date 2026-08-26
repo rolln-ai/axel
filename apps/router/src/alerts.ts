@@ -101,6 +101,7 @@ export function webhookAlertSink(options: WebhookAlertSinkOptions): AlertSink {
       try {
         await fetchImpl(options.url, {
           method: "POST",
+          redirect: "manual",
           signal: ac.signal,
           headers: {
             "content-type": "application/json",

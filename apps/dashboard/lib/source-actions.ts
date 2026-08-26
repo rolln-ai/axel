@@ -2,18 +2,19 @@
 
 // Source lifecycle server actions (control-plane API surfaced through the dashboard).
 
-import { db, withTransaction } from "./db";
+import { db, withTransaction, type Queryable } from "./db";
 import { generateSourceToken } from "./source-tokens";
 import { RETENTION_BOUNDS } from "./retention-bounds";
 import {
   invalidateEdgeSourceCache,
-  pushSourceToEdge,
-  loadSourceForEdge,
-  rowToEdgePayload,
+  requireEdgeSourceCacheInvalidation,
 } from "./edge-invalidation";
 import { runDashboardPullSync } from "./pull-sync";
 import { entityNameError } from "./entity-name";
-import { validateSubjectKeyPaths } from "@axel/shared";
+import {
+  sanitizeConnectorDiagnosticForStorage,
+  validateSubjectKeyPaths,
+} from "@axel/shared";
 import { withWorkspaceMutation } from "./with-mutation";
 import { formValue } from "./form";
 import type { ActionState } from "./action-data";
@@ -35,10 +36,50 @@ function _isValidSourceName(name: string): boolean {
 }
 
 /**
+ * Existing-source auth and privacy policy changes must not commit while a
+ * stale edge entry can remain live. The pre-delete proves the edge is
+ * reachable before mutation; the post-delete removes lookups that repopulated
+ * before it. Distributed KV propagation or a lookup already in flight can
+ * still expose an old row, so the five-minute TTL is the residual bound.
+ */
+async function withRequiredSourceCacheInvalidation<T>(
+  sourceId: string,
+  mutate: () => Promise<T>,
+): Promise<T> {
+  await requireEdgeSourceCacheInvalidation(sourceId);
+  try {
+    return await mutate();
+  } finally {
+    await requireEdgeSourceCacheInvalidation(sourceId);
+  }
+}
+
+async function sourceExistsInWorkspace(sourceId: string, workspaceId: string): Promise<boolean> {
+  const result = await db().query(
+    "SELECT 1 FROM sources WHERE id = $1 AND workspace_id = $2 LIMIT 1",
+    [sourceId, workspaceId],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+async function sourceDeletionWasAudited(sourceId: string, workspaceId: string): Promise<boolean> {
+  const result = await db().query(
+    `SELECT 1
+       FROM audit_log
+      WHERE workspace_id = $1
+        AND target_type = 'source'
+        AND target_id = $2
+        AND action = 'source.deleted'
+      LIMIT 1`,
+    [workspaceId, sourceId],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+/**
  * AXE-34 — operator updates the inbound IP allowlist for a source.
  * Parses a textarea of CIDRs (one per line, # comments allowed),
- * validates shape, writes to DB, pushes the fresh row to edge KV
- * so the ingest worker picks up the new list within a few seconds.
+ * validates shape, and writes to DB behind required edge invalidation.
  */
 export async function updateSourceIpAllowlistAction(
   _state: ActionState,
@@ -58,19 +99,25 @@ export async function updateSourceIpAllowlistAction(
         return { error: `"${entry}" isn't a valid IPv4 CIDR (e.g. 3.18.12.63/32).` };
       }
     }
-    await db().query(
-      `UPDATE sources SET inbound_ip_allowlist = $1, updated_at = now()
-        WHERE id = $2 AND workspace_id = $3`,
-      [entries, sourceId, workspaceId],
-    );
-    const fresh = await loadSourceForEdge(sourceId, workspaceId);
-    if (fresh) await pushSourceToEdge(await rowToEdgePayload(fresh));
-    await audit({
-      action: "source.ip_allowlist_updated",
-      targetType: "source",
-      targetId: sourceId,
-      metadata: { entries: entries.length },
+    if (!await sourceExistsInWorkspace(sourceId, workspaceId)) {
+      return { error: "Source not found in this workspace." };
+    }
+    const updated = await withRequiredSourceCacheInvalidation(sourceId, async () => {
+      const result = await db().query(
+        `UPDATE sources SET inbound_ip_allowlist = $1, updated_at = now()
+          WHERE id = $2 AND workspace_id = $3`,
+        [entries, sourceId, workspaceId],
+      );
+      if (!result.rowCount) return false;
+      await audit({
+        action: "source.ip_allowlist_updated",
+        targetType: "source",
+        targetId: sourceId,
+        metadata: { entries: entries.length },
+      });
+      return true;
     });
+    if (!updated) return { error: "Source not found in this workspace." };
     tags("sources");
     return {
       notice: entries.length === 0
@@ -98,29 +145,36 @@ export async function updateSourceSubjectKeysAction(
     if (!result.ok) return { error: result.error };
     const keys = result.value;
 
+    if (!await sourceExistsInWorkspace(sourceId, workspaceId)) {
+      return { error: "Source not found in this workspace." };
+    }
+
     // Stamp subject_indexing_active_since the first time keys are set — the finder
     // uses it to disclose the pre-config window it cannot cover. Clearing keys
     // does NOT reset it, so events indexed during an earlier active window stay
     // covered. (The fixed SQL fragment is chosen by keys.length, not user input.)
     const value = keys.length > 0 ? JSON.stringify(keys) : null;
-    await db().query(
-      `UPDATE sources
-          SET subject_key_paths = $1::jsonb,
-              subject_indexing_active_since = ${
-                keys.length > 0 ? "COALESCE(subject_indexing_active_since, now())" : "subject_indexing_active_since"
-              },
-              updated_at = now()
-        WHERE id = $2 AND workspace_id = $3`,
-      [value, sourceId, workspaceId],
-    );
-    const fresh = await loadSourceForEdge(sourceId, workspaceId);
-    if (fresh) await pushSourceToEdge(await rowToEdgePayload(fresh));
-    await audit({
-      action: "source.subject_keys_updated",
-      targetType: "source",
-      targetId: sourceId,
-      metadata: { keys: keys.length },
+    const updated = await withRequiredSourceCacheInvalidation(sourceId, async () => {
+      const result = await db().query(
+        `UPDATE sources
+            SET subject_key_paths = $1::jsonb,
+                subject_indexing_active_since = ${
+                  keys.length > 0 ? "COALESCE(subject_indexing_active_since, now())" : "subject_indexing_active_since"
+                },
+                updated_at = now()
+          WHERE id = $2 AND workspace_id = $3`,
+        [value, sourceId, workspaceId],
+      );
+      if (!result.rowCount) return false;
+      await audit({
+        action: "source.subject_keys_updated",
+        targetType: "source",
+        targetId: sourceId,
+        metadata: { keys: keys.length },
+      });
+      return true;
     });
+    if (!updated) return { error: "Source not found in this workspace." };
     tags("sources");
     return {
       notice: keys.length === 0
@@ -159,7 +213,12 @@ export async function triggerPullSourceSync(_state: ActionState, formData: FormD
       if (err instanceof Error && err.message === "pull_ingest_source_unavailable") return { error: "Enable the source before syncing, or recreate it if it was deleted." };
       if (err instanceof Error && err.message === "pull_sync_already_running") return { error: "This source is already syncing. Try again after the current run finishes." };
       if (err instanceof Error && err.message === "pull_source_type_unsupported") return { error: "Manual sync is not supported for this source type yet." };
-      return { error: err instanceof Error ? err.message : "Could not run sync." };
+      return {
+        error: sanitizeConnectorDiagnosticForStorage(
+          err instanceof Error ? err.message : err,
+          400,
+        ) || "Could not run sync.",
+      };
     }
   });
 }
@@ -171,31 +230,59 @@ export async function setSourceStatus(_state: ActionState, formData: FormData): 
     if (!sourceId || (status !== "active" && status !== "disabled")) {
       return { error: "Pick a valid source and a valid status." };
     }
+    if (!await sourceExistsInWorkspace(sourceId, workspaceId)) {
+      return { error: "Source not found in this workspace." };
+    }
 
-    const result = await db().query(
-      `UPDATE sources
-          SET status = $1, updated_at = now()
-        WHERE id = $2 AND workspace_id = $3`,
-      [status, sourceId, workspaceId],
-    );
-    if (!result.rowCount) return { error: "Source not found in this workspace." };
-
-    await audit({
-      action: "source.status_changed",
-      targetType: "source",
-      targetId: sourceId,
-      metadata: { status },
-    });
-    // Re-push the updated row to the edge so the worker sees the new status
-    // immediately. Falls back to invalidate-only if the row vanished underneath us.
-    const fresh = await loadSourceForEdge(sourceId, workspaceId);
-    if (fresh) {
-      await pushSourceToEdge(await rowToEdgePayload(fresh));
-    } else {
+    const updateStatus = async (client: Queryable) => {
+      const result = await client.query(
+        `UPDATE sources
+            SET status = $1, updated_at = now()
+          WHERE id = $2 AND workspace_id = $3`,
+        [status, sourceId, workspaceId],
+      );
+      if (!result.rowCount) return false;
+      await audit({
+        action: "source.status_changed",
+        targetType: "source",
+        targetId: sourceId,
+        metadata: { status },
+      }, client);
+      return true;
+    };
+    const outcome = status === "disabled"
+      ? (await withRequiredSourceCacheInvalidation(sourceId, () => updateStatus(db()))
+          ? "updated" as const
+          : "not_found" as const)
+      : await withTransaction(async (client) => {
+          // Serialize re-enable with workspace suspension/deletion and wipe-time
+          // source enumeration. The session liveness check happened before this
+          // transaction and can otherwise go stale before the UPDATE.
+          const workspace = await client.query<{ status: string }>(
+            "SELECT COALESCE(status, 'active') AS status FROM workspaces WHERE id = $1 FOR UPDATE",
+            [workspaceId],
+          );
+          if (workspace.rows[0]?.status !== "active") {
+            return "workspace_inactive" as const;
+          }
+          return await updateStatus(client) ? "updated" as const : "not_found" as const;
+        });
+    if (outcome === "workspace_inactive") {
+      return { error: "This workspace is no longer active. The source was not enabled." };
+    }
+    if (outcome === "not_found") return { error: "Source not found in this workspace." };
+    if (status === "active") {
+      // Enabling only affects availability. Best-effort invalidation avoids
+      // blocking recovery when edge admin is down; the short TTL clears an old
+      // cached disabled row without weakening auth.
       await invalidateEdgeSourceCache(sourceId);
     }
     tags("sources");
-    return { notice: `Source ${status === "active" ? "enabled" : "disabled"}.` };
+    return {
+      notice: status === "active"
+        ? "Source enabled. A cached disabled state can take up to five minutes to expire if edge refresh is unavailable."
+        : "Source disabled. Edge cache deletion was confirmed; distributed cache propagation or a lookup already in flight can retain the old state for up to five minutes.",
+    };
   });
 }
 
@@ -203,37 +290,33 @@ export async function rotateSourceToken(_state: ActionState, formData: FormData)
   return withWorkspaceMutation({}, async ({ workspaceId, audit, tags }) => {
     const sourceId = formValue(formData, "source_id");
     if (!sourceId) return { error: "Pick a source to rotate." };
+    if (!await sourceExistsInWorkspace(sourceId, workspaceId)) {
+      return { error: "Source not found in this workspace." };
+    }
 
     const token = generateSourceToken();
-    const result = await db().query(
-      `UPDATE sources
-          SET secret_token_hash = $1, updated_at = now()
-        WHERE id = $2 AND workspace_id = $3`,
-      [token.hash, sourceId, workspaceId],
-    );
-    if (!result.rowCount) return { error: "Source not found in this workspace." };
-
-    await audit({
-      action: "source.token_rotated",
-      targetType: "source",
-      targetId: sourceId,
-      metadata: {},
+    const updated = await withRequiredSourceCacheInvalidation(sourceId, async () => {
+      const result = await db().query(
+        `UPDATE sources
+            SET secret_token_hash = $1, updated_at = now()
+          WHERE id = $2 AND workspace_id = $3`,
+        [token.hash, sourceId, workspaceId],
+      );
+      if (!result.rowCount) return false;
+      await audit({
+        action: "source.token_rotated",
+        targetType: "source",
+        targetId: sourceId,
+        metadata: {},
+      });
+      return true;
     });
-    // Push the new hash to the edge so the new token works immediately and the
-    // old one fails on the very next request. We could just invalidate, but
-    // invalidate would let the next request fall through to upstream lookup
-    // which doesn't have this source — better to atomically replace.
-    const fresh = await loadSourceForEdge(sourceId, workspaceId);
-    if (fresh) {
-      await pushSourceToEdge(await rowToEdgePayload(fresh, { secretTokenHash: token.hash }));
-    } else {
-      await invalidateEdgeSourceCache(sourceId);
-    }
+    if (!updated) return { error: "Source not found in this workspace." };
 
     tags("sources");
 
     return {
-      notice: "Token rotated. Copy the new token now — the old one stops working immediately and the new one won't be shown again.",
+      notice: "Token rotated. Copy the new token now — it won't be shown again. Edge cache deletion was confirmed; distributed cache propagation or a lookup already in flight can retain the old token for up to five minutes.",
       data: {
         sourceId,
         plaintextToken: token.plaintext,
@@ -251,6 +334,18 @@ export async function deleteSource(_state: ActionState, formData: FormData): Pro
 
     const sourceId = formValue(formData, "source_id");
     if (!sourceId) return { error: "Pick a source to delete." };
+    if (!await sourceExistsInWorkspace(sourceId, workspaceId)) {
+      // A previous attempt may have committed the delete and then failed its
+      // post-delete cache call. The workspace-scoped audit row proves this
+      // caller owned the deleted source, allowing a safe idempotent retry
+      // without opening cross-tenant cache eviction.
+      if (await sourceDeletionWasAudited(sourceId, workspaceId)) {
+        await requireEdgeSourceCacheInvalidation(sourceId);
+        tags("sources", "routes");
+        return { notice: "Source was already deleted. Edge cache deletion is now confirmed." };
+      }
+      return { error: "Source not found in this workspace." };
+    }
 
     // Pull sources share their id with the `sources` shadow row (see
     // createGenericPullSource: pull_sources.id === sources.id). Deleting only the
@@ -259,29 +354,28 @@ export async function deleteSource(_state: ActionState, formData: FormData): Pro
     // Delete BOTH in one transaction; the ON DELETE CASCADE FKs on
     // pull_source_credentials / pull_source_stream_state / pull_sync_runs clean up
     // the rest. The pull_sources delete is a no-op for plain webhook sources.
-    const deleted = await withTransaction(async (client) => {
-      const result = await client.query(
-        `DELETE FROM sources WHERE id = $1 AND workspace_id = $2`,
-        [sourceId, workspaceId],
-      );
-      if (!result.rowCount) return false;
-      await client.query(
-        `DELETE FROM pull_sources WHERE id = $1 AND workspace_id = $2`,
-        [sourceId, workspaceId],
-      );
-      return true;
+    const deleted = await withRequiredSourceCacheInvalidation(sourceId, async () => {
+      const removed = await withTransaction(async (client) => {
+        const result = await client.query(
+          `DELETE FROM sources WHERE id = $1 AND workspace_id = $2`,
+          [sourceId, workspaceId],
+        );
+        if (!result.rowCount) return false;
+        await client.query(
+          `DELETE FROM pull_sources WHERE id = $1 AND workspace_id = $2`,
+          [sourceId, workspaceId],
+        );
+        await audit({
+          action: "source.deleted",
+          targetType: "source",
+          targetId: sourceId,
+          metadata: {},
+        }, client);
+        return true;
+      });
+      return removed;
     });
     if (!deleted) return { error: "Source not found in this workspace." };
-
-    await audit({
-      action: "source.deleted",
-      targetType: "source",
-      targetId: sourceId,
-      metadata: {},
-    });
-    // Drop the edge cache so the deleted source returns 404 immediately, not
-    // 5 minutes from now.
-    await invalidateEdgeSourceCache(sourceId);
 
     tags("sources", "routes");
 
@@ -315,35 +409,32 @@ export async function updateSourceFieldSelection(
     if (errors.length > 0) {
       return { error: `${errors.length} invalid path${errors.length === 1 ? "" : "s"}: ${errors[0]!.message}` };
     }
+    if (!await sourceExistsInWorkspace(sourceId, workspaceId)) {
+      return { error: "Source not found in this workspace." };
+    }
 
     // null when empty so the router code can do `field_selection !== null` to
     // decide whether to project at all.
     const value = paths.length > 0 ? JSON.stringify(paths) : null;
 
-    const result = await db().query(
-      `UPDATE sources
-          SET field_selection = $1::jsonb,
-              updated_at = now()
-        WHERE id = $2 AND workspace_id = $3`,
-      [value, sourceId, workspaceId],
-    );
-    if (!result.rowCount) return { error: "Source not found in this workspace." };
-
-    await audit({
-      action: "source.field_selection_updated",
-      targetType: "source",
-      targetId: sourceId,
-      metadata: { paths_count: paths.length, paths },
+    const updated = await withRequiredSourceCacheInvalidation(sourceId, async () => {
+      const result = await db().query(
+        `UPDATE sources
+            SET field_selection = $1::jsonb,
+                updated_at = now()
+          WHERE id = $2 AND workspace_id = $3`,
+        [value, sourceId, workspaceId],
+      );
+      if (!result.rowCount) return false;
+      await audit({
+        action: "source.field_selection_updated",
+        targetType: "source",
+        targetId: sourceId,
+        metadata: { paths_count: paths.length, paths },
+      });
+      return true;
     });
-
-    // Re-push the full source to the edge so the router worker sees the new
-    // selection. fall back to invalidate if the row vanished out from under us.
-    const fresh = await loadSourceForEdge(sourceId, workspaceId);
-    if (fresh) {
-      await pushSourceToEdge(await rowToEdgePayload(fresh));
-    } else {
-      await invalidateEdgeSourceCache(sourceId);
-    }
+    if (!updated) return { error: "Source not found in this workspace." };
 
     tags("sources");
 
@@ -366,8 +457,8 @@ export async function updateSourceFieldSelection(
  *   - "default" → null the column so the worker uses the platform default
  *   - integer string → write the parsed integer (clamped to a sane ceiling)
  *
- * After update we re-push the full source to the edge KV so the ingest
- * worker sees the new caps immediately rather than waiting on the 5-min TTL.
+ * Required cache invalidation makes the worker fetch the new caps from the
+ * authenticated control plane instead of serving a stale edge entry.
  */
 const SOURCE_LIMIT_CEILINGS = {
   // 1M events/minute = ~16.6k events/sec. Absurd ceiling deliberately — the
@@ -439,34 +530,33 @@ export async function updateSourceLimits(
       return { error: "No changes — leave a field blank to keep its current value, type 'default' to revert to platform default." };
     }
 
+    if (!await sourceExistsInWorkspace(sourceId, workspaceId)) {
+      return { error: "Source not found in this workspace." };
+    }
+
     setParts.push(`updated_at = now()`);
     values.push(sourceId);
     values.push(workspaceId);
 
-    const result = await db().query(
-      `UPDATE sources SET ${setParts.join(", ")} WHERE id = $${pIdx++} AND workspace_id = $${pIdx++}`,
-      values,
-    );
-    if (!result.rowCount) return { error: "Source not found in this workspace." };
-
-    await audit({
-      action: "source.limits_updated",
-      targetType: "source",
-      targetId: sourceId,
-      metadata: {
-        max_events_per_minute: rate.kind === "set" ? rate.value : rate.kind,
-        max_body_bytes: body.kind === "set" ? body.value : body.kind,
-        max_body_depth: depth.kind === "set" ? depth.value : depth.kind,
-      },
+    const updated = await withRequiredSourceCacheInvalidation(sourceId, async () => {
+      const result = await db().query(
+        `UPDATE sources SET ${setParts.join(", ")} WHERE id = $${pIdx++} AND workspace_id = $${pIdx++}`,
+        values,
+      );
+      if (!result.rowCount) return false;
+      await audit({
+        action: "source.limits_updated",
+        targetType: "source",
+        targetId: sourceId,
+        metadata: {
+          max_events_per_minute: rate.kind === "set" ? rate.value : rate.kind,
+          max_body_bytes: body.kind === "set" ? body.value : body.kind,
+          max_body_depth: depth.kind === "set" ? depth.value : depth.kind,
+        },
+      });
+      return true;
     });
-
-    // Re-push to edge KV so the ingest worker sees the new caps immediately.
-    const fresh = await loadSourceForEdge(sourceId, workspaceId);
-    if (fresh) {
-      await pushSourceToEdge(await rowToEdgePayload(fresh));
-    } else {
-      await invalidateEdgeSourceCache(sourceId);
-    }
+    if (!updated) return { error: "Source not found in this workspace." };
 
     tags("sources");
 

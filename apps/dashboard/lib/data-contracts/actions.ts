@@ -10,6 +10,7 @@ import {
   approvePatch as approveExplainPatch,
   explainFailure,
   FixturesFailedError,
+  InvalidApprovalReplayTargetsError,
   type ApprovalInput,
   type ApprovalResult,
   type FailureContext,
@@ -467,6 +468,9 @@ export async function approvePatchImpl(
           total: err.result.total,
         },
       };
+    }
+    if (err instanceof InvalidApprovalReplayTargetsError) {
+      return { error: err.message };
     }
     return {
       error: `Approval failed: ${err instanceof Error ? err.message : String(err)}`,

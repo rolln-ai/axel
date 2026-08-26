@@ -51,8 +51,14 @@ class ShopifyStream implements PullStream<ShopifyConfig & Partial<ShopifyCredent
     // follow the cursor when it stays on the source's own myshopify.com host —
     // otherwise a crafted Link header would exfiltrate the token (audit).
     if (input.pageCursor) assertShopifyHost(input.pageCursor, input.source.config.shop);
-    const request: { method: "GET"; headers: Record<string, string>; signal?: AbortSignal } = {
+    const request: {
+      method: "GET";
+      headers: Record<string, string>;
+      signal?: AbortSignal;
+      redirect: "manual";
+    } = {
       method: "GET",
+      redirect: "manual",
       headers: {
         "x-shopify-access-token": requireAccessToken(input.source),
         accept: "application/json",
@@ -60,11 +66,17 @@ class ShopifyStream implements PullStream<ShopifyConfig & Partial<ShopifyCredent
     };
     if (input.signal) request.signal = input.signal;
     const response = await this.fetchImpl(url, request);
-    const text = await response.text();
     if (response.status < 200 || response.status >= 300) {
-      throw new Error(`HTTP ${response.status}: ${text.slice(0, 500)}`);
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(`HTTP ${response.status}`);
     }
-    const body = JSON.parse(text) as Record<string, unknown[] | undefined>;
+    const text = await response.text();
+    let body: Record<string, unknown[] | undefined>;
+    try {
+      body = JSON.parse(text) as Record<string, unknown[] | undefined>;
+    } catch {
+      throw new Error("invalid JSON response");
+    }
     const entries = body[this.name] ?? [];
 
     let highWatermark = input.state?.cursor ?? null;

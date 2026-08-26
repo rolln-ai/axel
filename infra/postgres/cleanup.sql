@@ -9,8 +9,9 @@
 -- All statements are idempotent and bounded to a 5,000-row batch so a single
 -- run never holds locks for more than a few seconds at modest scale.
 
--- Idempotency rows expire 14 days after the delivery completes. After that
--- they're not used by the delivery worker; keeping them only consumes disk.
+-- In-flight idempotency rows carry a renewable claim deadline. Completed and
+-- failed rows expire 14 days after settlement. Once either deadline passes the
+-- worker can atomically create or reclaim the row; keeping it consumes disk.
 DELETE FROM delivery_idempotency
  WHERE ctid IN (
    SELECT ctid FROM delivery_idempotency

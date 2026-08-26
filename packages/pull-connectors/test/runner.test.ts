@@ -3,6 +3,7 @@ import {
   InMemoryPullRecordSink,
   InMemoryPullStateStore,
   runPullSync,
+  sanitizePullRunSummaryForStorage,
   type PullConnector,
   type PullPage,
   type PullRecord,
@@ -76,6 +77,50 @@ describe("pull runner safety caps", () => {
     );
 
     expect(result.streams[0]).toMatchObject({ status: "success", records: 1, cursor: { value: 1 } });
+  });
+
+  it("sanitizes connector errors before returning a diagnostic summary", async () => {
+    const result = await runPullSync({
+      source: SOURCE,
+      connector: pagedConnector(() => {
+        throw new Error(
+          'HTTP 502: payload={"email":"victim@example.com","api_key":"sk_live_response_secret"}',
+        );
+      }),
+      stateStore: new InMemoryPullStateStore(),
+      sink: new InMemoryPullRecordSink(),
+    });
+
+    expect(result.streams[0]).toMatchObject({
+      status: "failed",
+      error: "HTTP 502: [REDACTED]",
+    });
+    expect(JSON.stringify(result)).not.toContain("victim@example.com");
+    expect(JSON.stringify(result)).not.toContain("sk_live_response_secret");
+  });
+
+  it("omits customer cursor values from the persistence-safe summary", () => {
+    const stored = sanitizePullRunSummaryForStorage({
+      source_id: SOURCE.source_id,
+      source_type: SOURCE.type,
+      started_at: fixedNow().toISOString(),
+      finished_at: fixedNow().toISOString(),
+      streams: [{
+        stream: "records",
+        records: 1,
+        pages: 1,
+        cursor: { value: "victim@example.com" },
+        status: "failed",
+        error: "HTTP 400: password=hunter2",
+      }],
+    });
+    const serialized = JSON.stringify(stored);
+
+    expect(serialized).not.toContain("victim@example.com");
+    expect(serialized).not.toContain("hunter2");
+    expect(stored).toMatchObject({
+      streams: [{ cursor_present: true, error: "HTTP 400: [REDACTED]" }],
+    });
   });
 });
 

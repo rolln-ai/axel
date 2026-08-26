@@ -69,6 +69,18 @@ describe("validateDestinationUrl (AXE-34)", () => {
     expect(validateDestinationUrl("http://metadata.google.internal/computeMetadata/v1/")).toMatch(/private/i);
   });
 
+  it("rejects private IPv4 addresses in canonical IPv4-mapped IPv6 form", () => {
+    expect(validateDestinationUrl("http://[::ffff:127.0.0.1]/")).toMatch(/private/i);
+    expect(validateDestinationUrl("http://[::ffff:7f00:1]/")).toMatch(/private/i);
+    expect(validateDestinationUrl("http://[::ffff:a9fe:a9fe]/latest/meta-data/")).toMatch(/private/i);
+  });
+
+  it("rejects the full fe80::/10 IPv6 link-local range", () => {
+    expect(validateDestinationUrl("http://[fe80::1]/")).toMatch(/private/i);
+    expect(validateDestinationUrl("http://[fe90::1]/")).toMatch(/private/i);
+    expect(validateDestinationUrl("http://[febf:ffff::1]/")).toMatch(/private/i);
+  });
+
   it("rejects DNS-rebinding tricks like 127-0-0-1.nip.io", () => {
     expect(validateDestinationUrl("https://127-0-0-1.nip.io/")).toMatch(/loopback|private/i);
   });
@@ -97,6 +109,20 @@ describe("isPrivateOrUnsafeIp", () => {
     expect(isPrivateOrUnsafeIp("::1")).toBe(true);
     expect(isPrivateOrUnsafeIp("fd00::1")).toBe(true);
     expect(isPrivateOrUnsafeIp("2001:4860:4860::8888")).toBe(false);
+  });
+
+  it("decodes dotted and hexadecimal IPv4-mapped IPv6 addresses", () => {
+    expect(isPrivateOrUnsafeIp("::ffff:127.0.0.1")).toBe(true);
+    expect(isPrivateOrUnsafeIp("::ffff:7f00:1")).toBe(true);
+    expect(isPrivateOrUnsafeIp("0:0:0:0:0:ffff:a9fe:a9fe")).toBe(true);
+    expect(isPrivateOrUnsafeIp("::ffff:808:808")).toBe(false);
+  });
+
+  it("blocks link-local and deprecated site-local IPv6 space", () => {
+    expect(isPrivateOrUnsafeIp("fe80::")).toBe(true);
+    expect(isPrivateOrUnsafeIp("fe90::1")).toBe(true);
+    expect(isPrivateOrUnsafeIp("febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff")).toBe(true);
+    expect(isPrivateOrUnsafeIp("fec0::")).toBe(true);
   });
 });
 

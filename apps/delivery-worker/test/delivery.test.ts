@@ -1,12 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createConnectorRegistry, type Connector } from "@axel/connectors";
 import type { DeliveryAttempt, Destination, DestinationQueueMessage } from "@axel/shared";
 import {
   createInMemoryDeliveryDeps,
+  IdempotencyClaimInFlightError,
+  IdempotencyClaimLostError,
   processDeliveryBatch,
   processDeliveryMessage,
   type CircuitBreaker,
   type CircuitDecision,
+  type IdempotencyStore,
 } from "../src/index.ts";
 
 describe("delivery worker", () => {
@@ -87,7 +90,7 @@ describe("delivery worker", () => {
     expect(deps.retryLog).toHaveLength(0);
   });
 
-  it("skips duplicate in-flight deliveries as a benign deduped success", async () => {
+  it("keeps duplicate in-flight deliveries retryable instead of reporting success", async () => {
     let calls = 0;
     const connector: Connector<{ ok: true }> = {
       type: "http",
@@ -102,14 +105,14 @@ describe("delivery worker", () => {
     });
     await deps.idempotency?.begin("ws-1:evt-1:rt-1:dest-1");
 
-    const out = await processDeliveryMessage(deps, message());
+    const delivery = processDeliveryMessage(deps, message());
 
-    // The in-flight copy is the canonical delivery; the duplicate is suppressed
-    // (connector not called) and recorded as a deduped success — NOT a
-    // dead-letter — so it never reaches the failure inbox.
+    // The original process can crash after claiming. Returning a synthetic
+    // success here would let the redelivery ACK the only durable copy before
+    // the stale claim can be reclaimed.
+    await expect(delivery).rejects.toBeInstanceOf(IdempotencyClaimInFlightError);
     expect(calls).toBe(0);
-    expect(out.status).toBe("success");
-    expect(out.response).toEqual({ deduped: true, reason: "duplicate_in_flight" });
+    expect(deps.attemptsLog).toHaveLength(0);
   });
 
   it("treats completed duplicate deliveries as deduped success", async () => {
@@ -134,6 +137,170 @@ describe("delivery worker", () => {
     expect(duplicate.status).toBe("success");
     expect(duplicate.response).toEqual({ deduped: true, reason: "already_delivered" });
     expect(deps.attemptsLog).toHaveLength(2);
+  });
+
+  it("carries the opaque claim token through completion", async () => {
+    const connector: Connector<{ ok: true }> = {
+      type: "http",
+      async deliver(_event, destination, context) {
+        return attempt(context?.eventId ?? "missing", destination.destination_id, "success");
+      },
+    };
+    const deps = createInMemoryDeliveryDeps({
+      destinations: [destination()],
+      connectors: createConnectorRegistry([connector]),
+    });
+    const complete = vi.fn(async () => true);
+    const fail = vi.fn(async () => true);
+    deps.idempotency = {
+      renewIntervalMs: 60_000,
+      begin: async () => ({ status: "started", token: "owner-opaque" }),
+      renew: async () => true,
+      complete,
+      fail,
+    };
+
+    const out = await processDeliveryMessage(deps, message());
+
+    expect(complete).toHaveBeenCalledWith(
+      "ws-1:evt-1:rt-1:dest-1",
+      "owner-opaque",
+      out,
+    );
+    expect(fail).not.toHaveBeenCalled();
+  });
+
+  it("carries the opaque claim token through failure", async () => {
+    const deps = createInMemoryDeliveryDeps({
+      destinations: [],
+      connectors: createConnectorRegistry([]),
+    });
+    const complete = vi.fn(async () => true);
+    const fail = vi.fn(async () => true);
+    deps.idempotency = {
+      renewIntervalMs: 60_000,
+      begin: async () => ({ status: "started", token: "owner-opaque" }),
+      renew: async () => true,
+      complete,
+      fail,
+    };
+
+    const out = await processDeliveryMessage(deps, message());
+
+    expect(fail).toHaveBeenCalledWith(
+      "ws-1:evt-1:rt-1:dest-1",
+      "owner-opaque",
+      out,
+    );
+    expect(complete).not.toHaveBeenCalled();
+  });
+
+  it("renews ownership while a connector delivery is still buffered", async () => {
+    vi.useFakeTimers();
+    try {
+      let releaseConnector: ((value: DeliveryAttempt) => void) | undefined;
+      let reportStarted: (() => void) | undefined;
+      const connectorStarted = new Promise<void>((resolve) => {
+        reportStarted = resolve;
+      });
+      const connector: Connector<{ ok: true }> = {
+        type: "http",
+        deliver() {
+          reportStarted?.();
+          return new Promise<DeliveryAttempt>((resolve) => {
+            releaseConnector = resolve;
+          });
+        },
+      };
+      const deps = createInMemoryDeliveryDeps({
+        destinations: [destination()],
+        connectors: createConnectorRegistry([connector]),
+      });
+      const renew = vi.fn(async () => true);
+      const complete = vi.fn(async () => true);
+      deps.idempotency = {
+        renewIntervalMs: 100,
+        begin: async () => ({ status: "started", token: "owner-buffered" }),
+        renew,
+        complete,
+        fail: async () => true,
+      } satisfies IdempotencyStore;
+
+      const processing = processDeliveryMessage(deps, message());
+      await connectorStarted;
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(renew).toHaveBeenCalledWith("ws-1:evt-1:rt-1:dest-1", "owner-buffered");
+      releaseConnector?.(attempt("evt-1", "dest-1", "success"));
+      await expect(processing).resolves.toMatchObject({ status: "success" });
+      expect(complete).toHaveBeenCalledWith(
+        "ws-1:evt-1:rt-1:dest-1",
+        "owner-buffered",
+        expect.objectContaining({ status: "success" }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refuses to settle after renewal reports that another worker owns the claim", async () => {
+    vi.useFakeTimers();
+    try {
+      let releaseConnector: ((value: DeliveryAttempt) => void) | undefined;
+      const connector: Connector<{ ok: true }> = {
+        type: "http",
+        deliver() {
+          return new Promise<DeliveryAttempt>((resolve) => {
+            releaseConnector = resolve;
+          });
+        },
+      };
+      const deps = createInMemoryDeliveryDeps({
+        destinations: [destination()],
+        connectors: createConnectorRegistry([connector]),
+      });
+      const complete = vi.fn(async () => true);
+      deps.idempotency = {
+        renewIntervalMs: 100,
+        begin: async () => ({ status: "started", token: "owner-stale" }),
+        renew: async () => false,
+        complete,
+        fail: async () => false,
+      } satisfies IdempotencyStore;
+
+      const processing = processDeliveryMessage(deps, message());
+      await vi.advanceTimersByTimeAsync(100);
+      releaseConnector?.(attempt("evt-1", "dest-1", "success"));
+
+      await expect(processing).rejects.toBeInstanceOf(IdempotencyClaimLostError);
+      expect(complete).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries when fenced completion reports that ownership was lost", async () => {
+    const connector: Connector<{ ok: true }> = {
+      type: "http",
+      async deliver(_event, destination, context) {
+        return attempt(context?.eventId ?? "missing", destination.destination_id, "success");
+      },
+    };
+    const deps = createInMemoryDeliveryDeps({
+      destinations: [destination()],
+      connectors: createConnectorRegistry([connector]),
+    });
+    deps.idempotency = {
+      renewIntervalMs: 60_000,
+      begin: async () => ({ status: "started", token: "owner-stale" }),
+      renew: async () => true,
+      complete: async () => false,
+      fail: async () => false,
+    };
+
+    await expect(processDeliveryMessage(deps, message())).rejects.toBeInstanceOf(
+      IdempotencyClaimLostError,
+    );
   });
 
   it("processes batches with bounded concurrency", async () => {

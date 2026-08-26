@@ -12,6 +12,7 @@ artifacts/
 .dev.vars
 .dev.vars.*
 .wrangler/
+.selfhost/
 .DS_Store
 *.tsbuildinfo
 

@@ -1,0 +1,22 @@
+{
+	admin off
+}
+
+{$AXEL_SITE_ADDRESS:http://localhost:8080} {
+	encode zstd gzip
+
+	@delivery path /health /internal/* /deliver /v1/cli/*
+	handle @delivery {
+		reverse_proxy delivery:10000
+	}
+
+	handle {
+		reverse_proxy dashboard:3000
+	}
+
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+	}
+}

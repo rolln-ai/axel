@@ -1,8 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { dbMock } = vi.hoisted(() => ({ dbMock: vi.fn() }));
+const { dbMock, safeDashboardFetchMock } = vi.hoisted(() => ({
+  dbMock: vi.fn(),
+  safeDashboardFetchMock: vi.fn(),
+}));
 
 vi.mock("../lib/db", () => ({ db: dbMock }));
+vi.mock("../lib/safe-egress", () => ({ safeDashboardFetch: safeDashboardFetchMock }));
 
 import { runDashboardPullSync } from "../lib/pull-sync";
 
@@ -22,6 +26,7 @@ describe("dashboard SaaS pull pagination", () => {
       updatedAt: string;
     }>();
     const runStatuses: string[] = [];
+    const storedSummaries: string[] = [];
     const databaseQuery = vi.fn(async (sql: string, params: unknown[] = []) => {
         if (sql.includes("FROM pull_sources ps")) {
           return {
@@ -65,6 +70,7 @@ describe("dashboard SaaS pull pagination", () => {
         }
         if (sql.includes("UPDATE pull_sync_runs") && sql.includes("SET status = $2")) {
           runStatuses.push(String(params[1]));
+          storedSummaries.push(String(params[5]));
           return { rows: [], rowCount: 1 };
         }
         return { rows: [], rowCount: 1 };
@@ -84,22 +90,27 @@ describe("dashboard SaaS pull pagination", () => {
     dbMock.mockReturnValue(pool);
 
     const stripeUrls: string[] = [];
-    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
-      if (url.includes("/v1/customers")) {
-        stripeUrls.push(url);
-        if (url.includes("created%5Bgt%5D=1001")) {
-          return Response.json({ data: [], has_more: false });
-        }
-        if (url.includes("starting_after=cus_new")) {
-          return Response.json({ data: [{ id: "cus_mid", created: 800 }], has_more: true });
-        }
-        if (url.includes("starting_after=cus_mid")) {
-          return Response.json({ data: [{ id: "cus_old", created: 600 }], has_more: false });
-        }
-        return Response.json({ data: [{ id: "cus_new", created: 1000 }], has_more: true });
-      }
+    const ingestFetch = vi.fn(async (_url: string, init?: RequestInit) => {
+      expect(init).toMatchObject({
+        redirect: "manual",
+        headers: expect.objectContaining({ "x-axel-token": "ingest-token" }),
+      });
       return new Response(null, { status: 202 });
-    }));
+    });
+    vi.stubGlobal("fetch", ingestFetch);
+    safeDashboardFetchMock.mockImplementation(async (url: string) => {
+      stripeUrls.push(url);
+      if (url.includes("created%5Bgt%5D=1001")) {
+        return Response.json({ data: [], has_more: false });
+      }
+      if (url.includes("starting_after=cus_new")) {
+        return Response.json({ data: [{ id: "cus_mid", created: 800 }], has_more: true });
+      }
+      if (url.includes("starting_after=cus_mid")) {
+        return Response.json({ data: [{ id: "cus_old", created: 600 }], has_more: false });
+      }
+      return Response.json({ data: [{ id: "cus_new", created: 1000 }], has_more: true });
+    });
 
     const first = await runDashboardPullSync({
       sourceId: "src_stripe",
@@ -148,6 +159,10 @@ describe("dashboard SaaS pull pagination", () => {
     expect(stripeUrls[2]).toContain("starting_after=cus_mid");
     expect(stripeUrls[3]).toContain("created%5Bgt%5D=1001");
     expect(runStatuses).toEqual(["partial", "partial", "success", "success"]);
+    expect(storedSummaries).toHaveLength(4);
+    expect(storedSummaries.every((summary) => summary.includes("cursor_present"))).toBe(true);
+    expect(storedSummaries.every((summary) => !summary.includes('"cursor":'))).toBe(true);
+    expect(ingestFetch).toHaveBeenCalledTimes(3);
     expect(lockClient.release).toHaveBeenCalledTimes(4);
   });
 });

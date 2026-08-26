@@ -148,9 +148,10 @@ export async function lookupSourceInPostgres(env: SourceLookupEnv, sourceId: str
  * (secret_token holds the hash; signing_secret is the decrypted ciphertext).
  */
 export async function mapSourceRow(row: SourceRow, masterKeyRaw: string | undefined): Promise<Source> {
-  // Best-effort decrypt (matches rowToEdgePayload): on failure omit the secret
-  // so provider verification rejects with missing_secret rather than silently
-  // passing — never a wrong-but-accepted signature.
+  // Decrypt both rotation slots before constructing the Source. The presence of
+  // either ciphertext means signature verification was configured; omitting a
+  // failed slot would silently turn a custom-HMAC source into token-only auth or
+  // leave a named provider accepting only the previous secret.
   const decrypt = async (blob: Uint8Array | null): Promise<string | undefined> => {
     if (!blob || !masterKeyRaw) return undefined;
     try {
@@ -165,15 +166,17 @@ export async function mapSourceRow(row: SourceRow, masterKeyRaw: string | undefi
   };
   const signingSecret = await decrypt(row.signing_secret_ciphertext);
   const signingSecretPrevious = await decrypt(row.signing_secret_previous_ciphertext);
-  // FAIL CLOSED: a source that HAS a signing-secret ciphertext but which we
-  // couldn't decrypt (CREDENTIALS_MASTER_KEY not deployed, or corrupt blob) must
-  // NOT be returned with an undefined secret — the ingest gate would then SKIP
-  // HMAC verification and accept spoofed webhooks (audit). Signal transient so
-  // ingest 503s + the producer retries until the key is deployed, rather than
-  // silently ingesting unverified.
-  if (row.signing_secret_ciphertext && signingSecret === undefined) {
+  // FAIL CLOSED on every configured slot, including an empty plaintext. Signal
+  // transient so ingest 503s and the producer retries until the key/blob is
+  // repaired rather than caching an authentication downgrade.
+  if (row.signing_secret_ciphertext && !signingSecret) {
     throw new SourceLookupUnavailableError(
-      `signing secret present but undecryptable for source ${row.id} — refusing to skip verification (CREDENTIALS_MASTER_KEY missing or corrupt)`,
+      `current signing secret present but undecryptable for source ${row.id} — refusing to skip verification (CREDENTIALS_MASTER_KEY missing or corrupt)`,
+    );
+  }
+  if (row.signing_secret_previous_ciphertext && !signingSecretPrevious) {
+    throw new SourceLookupUnavailableError(
+      `previous signing secret present but undecryptable for source ${row.id} — refusing to skip verification (CREDENTIALS_MASTER_KEY missing or corrupt)`,
     );
   }
   const source: Source = {

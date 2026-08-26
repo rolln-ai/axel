@@ -183,6 +183,7 @@ describe("alert sinks", () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe("https://example.com/hook");
+    expect(calls[0]?.init.redirect).toBe("manual");
     expect((calls[0]?.init.headers as Record<string, string>)["x-axel-alert-token"]).toBe("tk");
     const body = JSON.parse(calls[0]?.init.body as string) as { text: string; event: { rule: string } };
     expect(body.text).toMatch(/WARN/);

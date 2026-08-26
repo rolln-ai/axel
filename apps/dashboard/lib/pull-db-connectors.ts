@@ -37,6 +37,7 @@ import { BigQuery } from "@google-cloud/bigquery";
 import { MongoClient, ObjectId } from "mongodb";
 import pg from "pg";
 import { pullPgSslOption } from "@axel/shared";
+import { createSafePgStream, safeLookup } from "./safe-egress";
 
 export type DbPullSourceType = "postgres" | "mongodb" | "bigquery";
 
@@ -70,6 +71,7 @@ const pgConnect = async (config: PostgresConfig): Promise<PgClient> => {
           ...(config.user ? { user: config.user } : {}),
           ...(config.password ? { password: config.password } : {}),
         }),
+    stream: createSafePgStream,
     max: 2,
     // Verify the server certificate by default. A self-signed / private-CA DB
     // opts out with ssl:"no-verify" (or "disable" for no TLS). Matches pull-worker.
@@ -96,6 +98,7 @@ const mongoConnect = async (config: MongodbConfig): Promise<MongodbClientLike> =
     maxPoolSize: 4,
     serverSelectionTimeoutMS: 10_000,
     connectTimeoutMS: 10_000,
+    lookup: safeLookup,
   });
   await client.connect();
   return {

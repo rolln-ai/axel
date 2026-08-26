@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildChargebeeListUrl,
+  chargebeeApiBaseUrl,
   createChargebeeConnector,
   InMemoryPullRecordSink,
   InMemoryPullStateStore,
@@ -22,6 +23,109 @@ const SOURCE: PullSource<{ site: string; api_key: string; streams?: Array<{ name
 };
 
 describe("Chargebee pull connector", () => {
+  it("only builds API origins under a valid Chargebee tenant hostname", () => {
+    expect(chargebeeApiBaseUrl("Acme-Test")).toBe("https://acme-test.chargebee.com");
+    expect(chargebeeApiBaseUrl("https://acme-test.chargebee.com/", "chargebee.com"))
+      .toBe("https://acme-test.chargebee.com");
+
+    for (const site of ["-acme", "acme-", "acme.example", "a".repeat(64)]) {
+      expect(() => chargebeeApiBaseUrl(site)).toThrow(/valid tenant name/);
+    }
+    expect(() => chargebeeApiBaseUrl("acme", "attacker.example"))
+      .toThrow(/custom API domains are not supported/);
+  });
+
+  it("rejects a legacy custom domain before preparing a request", async () => {
+    const fetchImpl = vi.fn<HttpFetch>();
+    const summary = await runPullSync(
+      {
+        source: {
+          ...SOURCE,
+          config: { ...SOURCE.config, domain: "attacker.example" },
+        },
+        connector: createChargebeeConnector(fetchImpl),
+        stateStore: new InMemoryPullStateStore(),
+        sink: new InMemoryPullRecordSink(),
+      },
+      { now: fixedNow },
+    );
+
+    expect(summary.streams[0]).toMatchObject({
+      status: "failed",
+      error: expect.stringMatching(/custom API domains are not supported/),
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("does not follow redirects or forward the Basic credential", async () => {
+    const cancel = vi.fn(async () => undefined);
+    const readBody = vi.fn(async () =>
+      'payload={"email":"victim@example.com"} api_key=sk_live_response_secret'
+    );
+    const calls: Array<{
+      url: string;
+      authorization: string | undefined;
+      redirect: "manual" | undefined;
+    }> = [];
+    const fetchImpl: HttpFetch = async (url, init) => {
+      calls.push({
+        url,
+        authorization: init.headers.authorization,
+        redirect: init.redirect,
+      });
+      return {
+        status: 302,
+        headers: { get: (name) => name.toLowerCase() === "location" ? "http://127.0.0.1/metadata" : null },
+        body: { cancel },
+        text: readBody,
+      };
+    };
+
+    const summary = await runPullSync(
+      {
+        source: SOURCE,
+        connector: createChargebeeConnector(fetchImpl),
+        stateStore: new InMemoryPullStateStore(),
+        sink: new InMemoryPullRecordSink(),
+      },
+      { now: fixedNow },
+    );
+
+    expect(summary.streams[0]).toMatchObject({ status: "failed", error: "HTTP 302" });
+    expect(readBody).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(calls).toEqual([{
+      url: "https://acme-test.chargebee.com/api/v2/customers?limit=100&sort_by%5Basc%5D=updated_at",
+      authorization: "Basic dGVzdF9rZXk6",
+      redirect: "manual",
+    }]);
+    expect(calls.some((call) => call.url.includes("127.0.0.1"))).toBe(false);
+  });
+
+  it("does not echo malformed success-body bytes into the stream diagnostic", async () => {
+    const responseText = "not-json victim@example.com sk_live_response_secret";
+    const summary = await runPullSync(
+      {
+        source: SOURCE,
+        connector: createChargebeeConnector(async () => ({
+          status: 200,
+          headers: { get: () => null },
+          text: async () => responseText,
+        })),
+        stateStore: new InMemoryPullStateStore(),
+        sink: new InMemoryPullRecordSink(),
+      },
+      { now: fixedNow },
+    );
+
+    expect(summary.streams[0]).toMatchObject({
+      status: "failed",
+      error: "invalid JSON response",
+    });
+    expect(JSON.stringify(summary)).not.toContain("victim@example.com");
+    expect(JSON.stringify(summary)).not.toContain("sk_live_response_secret");
+  });
+
   it("builds incremental list URLs with updated_at cursor and offset", () => {
     const url = buildChargebeeListUrl(
       SOURCE,

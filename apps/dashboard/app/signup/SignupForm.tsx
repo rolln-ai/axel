@@ -5,6 +5,7 @@ import { signUp } from "../../lib/auth-actions";
 import type { ActionState } from "../../lib/action-data";
 import { CONSENT_DOCUMENTS } from "../../lib/legal";
 import { PasswordInput } from "../_components/PasswordInput";
+import { ScrubQueryParameter } from "../_components/ScrubQueryParameter";
 import { TimezoneField } from "../_components/TimezoneField";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -25,6 +26,7 @@ export function SignupForm({ inviteToken }: { inviteToken?: string | undefined }
   }
   return (
     <form action={formAction} className="space-y-4">
+      {inviteToken ? <ScrubQueryParameter name="invite" /> : null}
       {state.error ? (
         <Alert variant="destructive">
           <AlertDescription>{state.error}</AlertDescription>

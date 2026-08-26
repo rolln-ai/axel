@@ -172,7 +172,13 @@ async function waitForMutationBackpressure(table) {
 }
 
 async function fetchR2(r2Key) {
-  const url = `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT}/r2/buckets/${BUCKET}/objects/${encodeURIComponent(r2Key)}`;
+  const encodedKey = r2Key.split("/").map((segment) => {
+    if (segment === "." || segment === "..") {
+      throw new Error("invalid_r2_object_key: dot path segments are not supported");
+    }
+    return encodeURIComponent(segment);
+  }).join("/");
+  const url = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(CF_ACCOUNT)}/r2/buckets/${encodeURIComponent(BUCKET)}/objects/${encodedKey}`;
   try {
     const res = await fetch(url, { headers: { authorization: `Bearer ${CF_TOKEN}` } });
     if (!res.ok) return null;

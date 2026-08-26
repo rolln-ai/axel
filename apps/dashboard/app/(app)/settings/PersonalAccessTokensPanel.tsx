@@ -16,12 +16,14 @@ import { Label } from "@/components/ui/label";
 import { CopyableSecret } from "../_components/CopyButton";
 import { ConfirmAction } from "../../_components/ConfirmAction";
 import { LocalTime } from "../../_components/LocalTime";
+import { buildCliAuthLoginHint } from "../../../lib/cli-command";
 
 interface Props {
   initialTokens: PatRow[];
+  apiBaseUrl: string;
 }
 
-export function PersonalAccessTokensPanel({ initialTokens }: Props) {
+export function PersonalAccessTokensPanel({ initialTokens, apiBaseUrl }: Props) {
   const [createState, createAction, creating] = useActionState<ActionState, FormData>(
     createPersonalAccessToken,
     {},
@@ -74,7 +76,7 @@ export function PersonalAccessTokensPanel({ initialTokens }: Props) {
             <AlertDescription className="space-y-2">
               <span className="block">{createState.notice}</span>
               <CopyableSecret value={createState.data.plaintextToken} noun="token" />
-              <CliHint />
+              <CliHint apiBaseUrl={apiBaseUrl} />
             </AlertDescription>
           </Alert>
         ) : null}
@@ -154,10 +156,10 @@ export function PersonalAccessTokensPanel({ initialTokens }: Props) {
   );
 }
 
-function CliHint() {
+function CliHint({ apiBaseUrl }: { apiBaseUrl: string }) {
   return (
     <pre className="mt-1 overflow-x-auto rounded-md bg-background p-2 font-mono text-[11px] text-muted-foreground">
-      {`npm i -g @axel/cli\naxel auth login   # paste the token above when prompted`}
+      {buildCliAuthLoginHint(apiBaseUrl)}
     </pre>
   );
 }

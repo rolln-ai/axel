@@ -31,6 +31,7 @@ import {
 } from "./destination-inspect";
 import { sampleSourceEvents } from "./data-contracts/sampler";
 import type { DestinationType } from "./destination-defaults";
+import { createSafePgStream, safeLookup } from "./safe-egress";
 
 /**
  * Server actions used by the route-wiring UI to (a) list existing
@@ -56,6 +57,13 @@ interface BindingActionError {
 
 export type BindingTargetResult = BindingTargetList | BindingActionError;
 export type BindingCreateResult = BindingActionError | { ok: true; name: string };
+
+function destinationEgressGateError(workspace: {
+  role: "owner" | "admin" | "member";
+  workspace_status: "active" | "suspended" | "deleted";
+}): string | null {
+  return requireWritableRole(workspace.role) ?? requireActiveWorkspace(workspace);
+}
 
 /**
  * List the candidate write targets on a destination (tables for
@@ -123,10 +131,8 @@ export async function checkBigQueryCompatibilityAction(input: {
   try {
     const session = await requireSession();
     const workspaceId = session.activeWorkspace.workspace_id;
-    const roleError = requireWritableRole(session.activeWorkspace.role);
-    if (roleError) return { ok: false, error: roleError };
-    const wsError = requireActiveWorkspace(session.activeWorkspace);
-    if (wsError) return { ok: false, error: wsError };
+    const gateError = destinationEgressGateError(session.activeWorkspace);
+    if (gateError) return { ok: false, error: gateError };
     const table = input.table.trim();
     if (!table) return { ok: false, error: "Pick a table first." };
 
@@ -191,6 +197,8 @@ export async function listDestinationTargets(
 ): Promise<BindingTargetResult> {
   try {
     const session = await requireSession();
+    const gateError = destinationEgressGateError(session.activeWorkspace);
+    if (gateError) return { ok: false, error: gateError };
     const workspaceId = session.activeWorkspace.workspace_id;
     const typeRow = await db().query<{ type: DestinationType }>(
       `SELECT type FROM destinations WHERE id = $1 AND workspace_id = $2 LIMIT 1`,
@@ -242,6 +250,8 @@ export async function listBigQueryDatasetsAction(input: {
 }): Promise<BigQueryListResult> {
   try {
     const session = await requireSession();
+    const gateError = destinationEgressGateError(session.activeWorkspace);
+    if (gateError) return { ok: false, error: gateError };
     const workspaceId = session.activeWorkspace.workspace_id;
     let values: string[];
     if (input.destinationId) {
@@ -266,6 +276,8 @@ export async function listBigQueryTablesAction(input: {
 }): Promise<BigQueryListResult> {
   try {
     const session = await requireSession();
+    const gateError = destinationEgressGateError(session.activeWorkspace);
+    if (gateError) return { ok: false, error: gateError };
     const workspaceId = session.activeWorkspace.workspace_id;
     if (!input.dataset) return { ok: false, error: "Pick a dataset first." };
     let values: string[];
@@ -349,10 +361,8 @@ export async function createPostgresTable(
 ): Promise<BindingCreateResult> {
   try {
     const session = await requireSession();
-    const roleError = requireWritableRole(session.activeWorkspace.role);
-    if (roleError) return { ok: false, error: roleError };
-    const wsError = requireActiveWorkspace(session.activeWorkspace);
-    if (wsError) return { ok: false, error: wsError };
+    const gateError = destinationEgressGateError(session.activeWorkspace);
+    if (gateError) return { ok: false, error: gateError };
     const workspaceId = session.activeWorkspace.workspace_id;
 
     if (!SAFE_NAME.test(tableName)) {
@@ -370,6 +380,7 @@ export async function createPostgresTable(
 
     const pool = new Pool({
       connectionString: connStr,
+      stream: createSafePgStream,
       ssl: pgSslOption(connStr),
       connectionTimeoutMillis: CONNECTION_TIMEOUT_MS,
       max: 1,
@@ -403,10 +414,8 @@ export async function createMongoCollection(
 ): Promise<BindingCreateResult> {
   try {
     const session = await requireSession();
-    const roleError = requireWritableRole(session.activeWorkspace.role);
-    if (roleError) return { ok: false, error: roleError };
-    const wsError = requireActiveWorkspace(session.activeWorkspace);
-    if (wsError) return { ok: false, error: wsError };
+    const gateError = destinationEgressGateError(session.activeWorkspace);
+    if (gateError) return { ok: false, error: gateError };
     const workspaceId = session.activeWorkspace.workspace_id;
 
     if (!SAFE_NAME.test(collectionName)) {
@@ -426,6 +435,7 @@ export async function createMongoCollection(
       serverSelectionTimeoutMS: CONNECTION_TIMEOUT_MS,
       connectTimeoutMS: CONNECTION_TIMEOUT_MS,
       maxPoolSize: 1,
+      lookup: safeLookup,
     });
     try {
       await client.connect();
@@ -459,10 +469,8 @@ export async function listTablesForConnection(
 ): Promise<BindingTargetResult> {
   try {
     const session = await requireSession();
-    const roleError = requireWritableRole(session.activeWorkspace.role);
-    if (roleError) return { ok: false, error: roleError };
-    const wsError = requireActiveWorkspace(session.activeWorkspace);
-    if (wsError) return { ok: false, error: wsError };
+    const gateError = destinationEgressGateError(session.activeWorkspace);
+    if (gateError) return { ok: false, error: gateError };
     const connStr = connectionString.trim();
     if (!connStr) return { ok: false, error: "Enter a connection string first." };
     // SSRF guard: this connection string is operator-supplied and we dial it
@@ -474,6 +482,7 @@ export async function listTablesForConnection(
     if (type === "postgres") {
       const pool = new Pool({
         connectionString: connStr,
+        stream: createSafePgStream,
         ssl: pgSslOption(connStr),
         connectionTimeoutMillis: CONNECTION_TIMEOUT_MS,
         idleTimeoutMillis: 1_000,
@@ -506,6 +515,7 @@ export async function listTablesForConnection(
         serverSelectionTimeoutMS: CONNECTION_TIMEOUT_MS,
         connectTimeoutMS: CONNECTION_TIMEOUT_MS,
         maxPoolSize: 1,
+        lookup: safeLookup,
       });
       try {
         await client.connect();
@@ -529,10 +539,8 @@ export async function createTableForConnection(
 ): Promise<BindingCreateResult> {
   try {
     const session = await requireSession();
-    const roleError = requireWritableRole(session.activeWorkspace.role);
-    if (roleError) return { ok: false, error: roleError };
-    const wsError = requireActiveWorkspace(session.activeWorkspace);
-    if (wsError) return { ok: false, error: wsError };
+    const gateError = destinationEgressGateError(session.activeWorkspace);
+    if (gateError) return { ok: false, error: gateError };
     if (!SAFE_NAME.test(name)) {
       return { ok: false, error: "Name must be 1–63 chars, letters/digits/_ only, starting with a letter." };
     }
@@ -547,6 +555,7 @@ export async function createTableForConnection(
     if (type === "postgres") {
       const pool = new Pool({
         connectionString: connStr,
+        stream: createSafePgStream,
         ssl: pgSslOption(connStr),
         connectionTimeoutMillis: CONNECTION_TIMEOUT_MS,
         max: 1,
@@ -570,6 +579,7 @@ export async function createTableForConnection(
         serverSelectionTimeoutMS: CONNECTION_TIMEOUT_MS,
         connectTimeoutMS: CONNECTION_TIMEOUT_MS,
         maxPoolSize: 1,
+        lookup: safeLookup,
       });
       try {
         await client.connect();

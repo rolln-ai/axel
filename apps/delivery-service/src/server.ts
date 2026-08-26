@@ -20,6 +20,8 @@
  *   SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS — optional rotation-only previous credential
  *   POLL_BATCH_SIZE           — optional, default 25
  *   POLL_INTERVAL_MS          — optional, default 1000
+ *   POLL_MAX_IDLE_INTERVAL_MS — optional, defaults to POLL_INTERVAL_MS (fixed interval)
+ *   IDEMPOTENCY_CLAIM_LEASE_MS — optional, default 360000
  *   MAX_CONCURRENT_DELIVERIES — optional, default 16 (in-flight deliveries per batch)
  *
  * Health check: GET / responds 200 (used by Render).
@@ -28,27 +30,33 @@
 import http from "node:http";
 import dns from "node:dns";
 import {
+  IdempotencyClaimInFlightError,
+  IdempotencyClaimLostError,
   processDeliveryMessage,
   type AttemptLogSink,
   type CircuitBreaker,
   type CircuitDecision,
   type DestinationResolver,
   type DeliveryWorkerDeps,
-  type IdempotencyStore,
   type RetryQueueSink,
 } from "@axel/delivery-worker";
 import { createConnectorRegistry, createHttpConnector, createR2Connector, createWebhookConnector } from "@axel/connectors";
 import {
-  controlPlaneDbSslVerify,
+  controlPlanePgSslOption,
   credentialAadString,
   deadLetterFingerprint,
+  DEFAULT_DELIVERY_CLAIM_LEASE_MS,
   deleteSpillIfPresent,
   evaluateBreaker,
   hydrateIfSpilled,
   isQueueSpillObjectMissingError,
   mapWithConcurrency,
+  MAX_DELIVERY_CLAIM_LEASE_MS,
   numericEnv as sharedNumericEnv,
-  scrubConnectorError,
+  resolveIngestBaseUrl,
+  resolveRawPayloadBucket,
+  sanitizeConnectorDiagnosticForStorage,
+  sanitizeConnectorResponseForStorage,
   sleep,
   spillIfOversized,
   type DeliveryAttempt,
@@ -65,7 +73,12 @@ import { startRetentionLoop, type RetentionLoopOptions } from "./retention.js";
 import { sweepRawPayloadRetention, createClickhouseR2KeyLister, createR2HttpDeleter } from "./r2-retention.js";
 import { createMongoConnector, closeAllMongoClients } from "./connectors/mongodb.js";
 import { createPostgresConnector, closeAllPostgresPools } from "./connectors/postgres.js";
-import { createS3Connector, closeAllS3Clients, flushAllS3ParquetBatches } from "./connectors/s3.js";
+import {
+  beginS3ParquetDrain,
+  createS3Connector,
+  closeAllS3Clients,
+  flushAllS3ParquetBatches,
+} from "./connectors/s3.js";
 import {
   createDatabricksSqlConnector,
   createDatabricksVolumeConnector,
@@ -88,6 +101,7 @@ import { alertSinkFromEnv } from "@axel/router";
 import { createQueueLagMonitor } from "./queue-lag-monitor.js";
 import {
   handleInternalSourceRequest,
+  isInternalSecretAuthorized,
   loadInternalSource,
   resolveInternalSourceAuthSecrets,
 } from "./internal-source.js";
@@ -96,6 +110,13 @@ import {
   markRouteErrored,
   type RouteWithDestinationTypes,
 } from "./route-store.js";
+import { parsePulledMessageBody, type PulledMessage } from "./pulled-message.js";
+import {
+  closeSafeOutboundDispatcher,
+  safeOutboundFetch,
+} from "./safe-outbound-fetch.js";
+import { createPollIdleBackoff } from "./poll-idle-backoff.js";
+import { createPostgresIdempotencyStore } from "./postgres-idempotency.js";
 
 const ACCOUNT_ID = requireEnv("CLOUDFLARE_ACCOUNT_ID");
 const API_TOKEN = requireEnv("CLOUDFLARE_API_TOKEN");
@@ -106,7 +127,7 @@ const EDGE_DELIVERY_QUEUE_ID = process.env.EDGE_DELIVERY_QUEUE_ID;
 // no cross-replica fan-out. Until it's provisioned, router-edge falls back to
 // the native queue and the web role delivers Parquet as before.
 const PARQUET_QUEUE_ID = process.env.PARQUET_DELIVERY_QUEUE_ID;
-const RAW_PAYLOAD_BUCKET = process.env.RAW_PAYLOAD_BUCKET ?? "axel-events-raw";
+const RAW_PAYLOAD_BUCKET = resolveRawPayloadBucket(process.env);
 const DATABASE_URL = requireEnv("DATABASE_URL");
 
 // R2 surfaces for queue-message spill. The producer side (retry sink
@@ -133,7 +154,29 @@ const r2ObjectStore = createR2HttpObjectStore({
   rawPayloadBucket: RAW_PAYLOAD_BUCKET,
 });
 const BATCH_SIZE = Number(process.env.POLL_BATCH_SIZE ?? "25");
-const INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? "1000");
+const INTERVAL_MS = Math.max(1, sharedNumericEnv(process.env, "POLL_INTERVAL_MS", 1_000));
+// Production keeps its historical fixed one-second polling unless this opt-in
+// ceiling is set. The self-host profile uses 60 seconds because Cloudflare
+// bills empty HTTP pulls as Queue read operations.
+const MAX_IDLE_INTERVAL_MS = Math.max(
+  INTERVAL_MS,
+  sharedNumericEnv(process.env, "POLL_MAX_IDLE_INTERVAL_MS", INTERVAL_MS),
+);
+// Live owners renew at one third of this lease, including while Parquet waits
+// for a batch flush. Keep the Queue lease slightly longer than the base claim
+// so a crash leaves an eligible stale claim by the next Queue delivery.
+const IDEMPOTENCY_CLAIM_LEASE_MS = Math.min(
+  MAX_DELIVERY_CLAIM_LEASE_MS,
+  Math.max(
+    60_000,
+    sharedNumericEnv(
+      process.env,
+      "IDEMPOTENCY_CLAIM_LEASE_MS",
+      DEFAULT_DELIVERY_CLAIM_LEASE_MS,
+    ),
+  ),
+);
+const QUEUE_VISIBILITY_TIMEOUT_MS = IDEMPOTENCY_CLAIM_LEASE_MS + 60_000;
 // Cap concurrent in-flight deliveries within a pulled batch. Without a cap the
 // poll loop fanned the whole batch out through one Promise.all, so a large
 // batch opened a delivery (credential lookup + idempotency claim + outbound
@@ -201,15 +244,13 @@ function requireEnv(name: string): string {
 const pool = new pg.Pool({
   connectionString: DATABASE_URL,
   max: Number.parseInt(process.env.DATABASE_POOL_MAX ?? "20", 10),
-  ssl: DATABASE_URL.includes("localhost")
-    ? false
-    : { rejectUnauthorized: controlPlaneDbSslVerify(process.env.CONTROL_PLANE_DB_SSL_VERIFY) },
+  ssl: controlPlanePgSslOption(DATABASE_URL, process.env.CONTROL_PLANE_DB_SSL_VERIFY),
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 8_000,
 });
 
 pool.on("error", (err) => {
-  console.error("[control-pool] async error (handled):", err instanceof Error ? err.message : err);
+  console.error(`[control-pool] async error (handled): ${safeDeliveryDiagnostic(err)}`);
   // Suppress per-connection noise during a managed-Postgres pooler restart.
   // A failover fires this listener once per dead connection; capturing each
   // one opens a fresh Sentry fingerprint and buries the real signal
@@ -276,6 +317,7 @@ async function fetchAndMergeCredentials(
   config: unknown,
   credentialsRef: string | null,
   workspaceId: string,
+  destinationId: string,
 ): Promise<unknown> {
   if (!credentialsRef) return config;
   if (!MASTER_KEY) {
@@ -294,8 +336,8 @@ async function fetchAndMergeCredentials(
     pool.query<CredentialRow>(
       `SELECT ciphertext, nonce, auth_tag, encryption_version, workspace_id, destination_id
          FROM destination_credentials
-        WHERE id = $1 AND workspace_id = $2 LIMIT 1`,
-      [credentialsRef, workspaceId],
+        WHERE id = $1 AND workspace_id = $2 AND destination_id = $3 LIMIT 1`,
+      [credentialsRef, workspaceId, destinationId],
     ),
   );
   const row = result.rows[0];
@@ -314,10 +356,12 @@ async function fetchAndMergeCredentials(
   let secrets: Record<string, unknown>;
   try {
     secrets = JSON.parse(plaintext) as Record<string, unknown>;
-  } catch (err) {
+  } catch {
     // Same fail-closed rationale: a credential ref that won't decrypt to JSON
     // can't yield the secrets, so we must not deliver with bare config.
-    console.error("[delivery] failed to parse decrypted secrets blob:", err);
+    // JSON.parse errors can quote the decrypted input, so never log the
+    // exception object from this secret-bearing boundary.
+    console.error("[delivery] failed to parse decrypted secrets blob");
     throw new Error("credential_blob_unparseable");
   }
   return { ...(config as Record<string, unknown>), ...secrets };
@@ -336,7 +380,12 @@ const destinations: DestinationResolver = {
     );
     const row = result.rows[0];
     if (!row) return null;
-    const mergedConfig = await fetchAndMergeCredentials(row.config, row.credentials_ref, row.workspace_id);
+    const mergedConfig = await fetchAndMergeCredentials(
+      row.config,
+      row.credentials_ref,
+      row.workspace_id,
+      row.id,
+    );
     // AXE-28 — overlay the destination-level request_timeout_ms into
     // the connector-shaped config. HTTP reads `timeoutMs`; Webhook
     // reads `timeout_ms`. Either field already had a default in the
@@ -372,94 +421,14 @@ const destinations: DestinationResolver = {
 
 // ---- Idempotency store ---- //
 
-const idempotency: IdempotencyStore = {
-  async begin(key) {
-    // INSERT ... ON CONFLICT lets us atomically claim or detect prior state.
-    // Under heavy concurrency (the 580+ DLQ replay storm we saw on
-    // 2026-05-14) we'd occasionally get a 23505 *despite* ON CONFLICT
-    // — usually because the queue redelivers a message after PG had
-    // committed the first INSERT but before the worker observed
-    // success, then the retry races a parallel worker on the same
-    // key. Catch the SQLSTATE and re-read the existing row instead
-    // of bubbling a 503 that ends up dead-lettered.
-    interface BeginRow { state: "in_flight" | "completed" | "failed"; inserted: boolean }
-    let result: { rows: BeginRow[] };
-    // The key is `workspace:event:route:destination` (4 parts), or for a DAG
-    // (pipeline-graph) route `workspace:event:route:destination:leaf_node_id`
-    // (5 parts) — see @axel/shared idempotencyKeyFor. None of those ids contain a
-    // colon (replay event_ids use `#rpy_`), so the first four parts are always the
-    // identity. Persist those columns — they were all '' before, which left these
-    // rows invisible to GDPR erasure (event_id) + workspace-delete (workspace_id).
-    // Require at least the 4 identity parts, else fall back to '' rather than
-    // mis-attribute. (delivery-edge already populates these from the message.)
-    const parts = key.split(":");
-    const [workspaceId, eventId, routeId, destinationId] = parts.length >= 4 ? parts : ["", "", "", ""];
-    try {
-      result = await withPgRetry("idempotency-begin", () =>
-        pool.query<BeginRow>(
-          `WITH ins AS (
-             INSERT INTO delivery_idempotency
-               (idempotency_key, workspace_id, event_id, route_id, destination_id, state, expires_at)
-             VALUES ($1, $2, $3, $4, $5, 'in_flight', now() + interval '14 days')
-             ON CONFLICT (idempotency_key) DO NOTHING
-             RETURNING state, true AS inserted
-           )
-           SELECT state, inserted FROM ins
-           UNION ALL
-           SELECT state, false AS inserted FROM delivery_idempotency WHERE idempotency_key = $1
-           LIMIT 1`,
-          [key, workspaceId, eventId, routeId, destinationId],
-        ),
-      );
-    } catch (err: unknown) {
-      const code = (err as { code?: string }).code;
-      if (code === "23505") {
-        // PG unique_violation. Treat as "row exists" — re-read state.
-        const existing = await withPgRetry("idempotency-begin-recover", () =>
-          pool.query<{ state: "in_flight" | "completed" | "failed" }>(
-            `SELECT state FROM delivery_idempotency WHERE idempotency_key = $1 LIMIT 1`,
-            [key],
-          ),
-        );
-        const state = existing.rows[0]?.state;
-        if (state === "completed") return "completed";
-        // A "failed" row is a prior attempt that should be retried, not skipped.
-        // Returning "completed" here made the worker treat it as already
-        // delivered and silently drop the retry under the 23505 race. Return
-        // "started" to proceed with delivery (matches the happy-path fallthrough).
-        if (state === "failed") return "started";
-        return "duplicate";
-      }
-      throw err;
-    }
-    const row = result.rows[0];
-    if (row?.inserted) return "started";
-    const state = row?.state;
-    if (state === "completed") return "completed";
-    if (state === "in_flight") return "duplicate";
-    return "started";
-  },
-  async complete(key, attempt) {
-    await withPgRetry("idempotency-complete", () =>
-      pool.query(
-        `UPDATE delivery_idempotency
-            SET state = 'completed', attempt_id = $2, updated_at = now()
-          WHERE idempotency_key = $1`,
-        [key, attempt.attempt_id],
-      ),
-    );
-  },
-  async fail(key, attempt) {
-    await withPgRetry("idempotency-fail", () =>
-      pool.query(
-        `UPDATE delivery_idempotency
-            SET state = 'failed', attempt_id = $2, updated_at = now()
-          WHERE idempotency_key = $1`,
-        [key, attempt.attempt_id],
-      ),
-    );
-  },
-};
+const idempotency = createPostgresIdempotencyStore({
+  claimLeaseMs: IDEMPOTENCY_CLAIM_LEASE_MS,
+  runQuery: async (operation, sql, params) =>
+    withPgRetry(operation, async () => {
+      const result = await pool.query(sql, params);
+      return { rows: result.rows as Array<Record<string, unknown>> };
+    }),
+});
 
 // ---- Attempt log + retry sinks ---- //
 
@@ -558,9 +527,18 @@ function deliveryAttemptErrorMessage(attempt: DeliveryAttempt): string {
   const response = attempt.response;
   if (response && typeof response === "object" && "error" in response) {
     const error = (response as { error?: unknown }).error;
-    if (typeof error === "string" && error.trim()) return error;
+    if (typeof error === "string" && error.trim()) {
+      return sanitizeConnectorDiagnosticForStorage(error, 1000);
+    }
   }
   return "Replay delivery failed.";
+}
+
+function safeDeliveryDiagnostic(error: unknown, maxLength = 500): string {
+  return sanitizeConnectorDiagnosticForStorage(
+    error instanceof Error ? error.message : error,
+    maxLength,
+  );
 }
 
 async function insertDeliveryDeadLetter(
@@ -569,10 +547,9 @@ async function insertDeliveryDeadLetter(
   message: string,
   erroredAt: string,
 ): Promise<void> {
-  // Scrub value echoes (PG DETAIL, quoted literals, emails, long digit runs)
-  // before persisting — dead_letters.message flows into notification rows and
-  // Resend alert emails, and DB-connector errors can quote payload values.
-  const ddMessage = scrubConnectorError(message).slice(0, 400);
+  // Receiver and driver errors can echo the submitted row or credentials.
+  // This value reaches notifications and immediate email through dead_letters.
+  const ddMessage = sanitizeConnectorDiagnosticForStorage(message, 400);
   const fingerprint = await deadLetterFingerprint({ route_id: body.route_id, reason, message: ddMessage });
   await withPgRetry("dead-letter-insert", () =>
     pool.query(
@@ -631,6 +608,7 @@ const retries: RetryQueueSink = {
       `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/queues/${QUEUE_ID}/messages`,
       {
         method: "POST",
+        redirect: "manual",
         headers: {
           "content-type": "application/json",
           "authorization": `Bearer ${API_TOKEN}`,
@@ -680,10 +658,10 @@ async function hydrateRouteDestinationBinding(
 const resolveAllIps = (hostname: string) => dns.promises.lookup(hostname, { all: true });
 
 const connectors = createConnectorRegistry([
-  createHttpConnector(globalThis.fetch as typeof fetch, resolveAllIps),
+  createHttpConnector(safeOutboundFetch, resolveAllIps),
   // Signed-webhook variant. Same wire as HTTP but every request is HMAC-signed
   // and timestamped so the receiver can verify origin + reject replays.
-  createWebhookConnector(globalThis.fetch as typeof fetch, resolveAllIps),
+  createWebhookConnector(safeOutboundFetch, resolveAllIps),
   createMongoConnector(),
   createPostgresConnector(),
   createS3Connector(),
@@ -967,7 +945,7 @@ async function auditBreakerTransition(
       [workspaceId, destinationId, JSON.stringify({ from, to, ...metadata })],
     );
   } catch (err) {
-    console.error("[circuit] audit log write failed", err);
+    console.error(`[circuit] audit log write failed: ${safeDeliveryDiagnostic(err)}`);
   }
 }
 
@@ -1009,7 +987,7 @@ async function notifyBreakerOpened(
     );
   } catch (err) {
     // Notifications table may not exist on older deploys yet — log + carry on.
-    console.error("[circuit] notification insert failed", err);
+    console.error(`[circuit] notification insert failed: ${safeDeliveryDiagnostic(err)}`);
   }
 }
 
@@ -1034,7 +1012,7 @@ async function resolveBreakerNotification(
       [workspaceId, `breaker_open:${destinationId}`],
     );
   } catch (err) {
-    console.error("[circuit] notification resolve failed", err);
+    console.error(`[circuit] notification resolve failed: ${safeDeliveryDiagnostic(err)}`);
   }
 }
 
@@ -1050,49 +1028,19 @@ const deps: DeliveryWorkerDeps = {
 
 // ---- Cloudflare Queues HTTP-pull loop ---- //
 
-interface PulledMessage {
-  // Cloudflare's HTTP-pull API returns the body as a JSON STRING when the
-  // producer used `contentType: "json"`, even though the docs hint at
-  // "parsed object". We parse on receipt so downstream code works with the
-  // canonical DestinationQueueMessage shape.
-  body: string | DestinationQueueMessage;
-  lease_id: string;
-  id: string;
-  metadata?: { CF_QUEUE_NAME?: string; "CF-Content-Type"?: string };
-}
-
-function parseMessageBody(raw: PulledMessage["body"]): DestinationQueueMessage | null {
-  if (typeof raw === "string") {
-    try {
-      return parseMessageBody(JSON.parse(raw) as PulledMessage["body"]);
-    } catch (err) {
-      console.error("[loop] failed to JSON-parse message body:", err);
-      return null;
-    }
-  }
-  if (
-    raw
-    && typeof raw === "object"
-    && "body" in raw
-    && Object.keys(raw).length === 1
-  ) {
-    return parseMessageBody((raw as { body: PulledMessage["body"] }).body);
-  }
-  return raw as DestinationQueueMessage;
-}
-
 async function pullBatch(queueId: string = QUEUE_ID): Promise<PulledMessage[]> {
   const res = await fetch(
     `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/queues/${queueId}/messages/pull`,
     {
       method: "POST",
+      redirect: "manual",
       headers: {
         "content-type": "application/json",
         "authorization": `Bearer ${API_TOKEN}`,
       },
       body: JSON.stringify({
         batch_size: BATCH_SIZE,
-        visibility_timeout_ms: 60_000,
+        visibility_timeout_ms: QUEUE_VISIBILITY_TIMEOUT_MS,
       }),
     },
   );
@@ -1121,6 +1069,7 @@ async function ackOrRetry(
     `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/queues/${queueId}/messages/ack`,
     {
       method: "POST",
+      redirect: "manual",
       headers: {
         "content-type": "application/json",
         "authorization": `Bearer ${API_TOKEN}`,
@@ -1129,18 +1078,29 @@ async function ackOrRetry(
     },
   );
   if (!res.ok) {
-    console.error("[ack] failed:", res.status, await res.text());
+    console.error(`[ack] failed: ${res.status} ${safeDeliveryDiagnostic(await res.text())}`);
   }
 }
 
 let stopping = false;
+let releasePollWait: (() => void) | null = null;
+const pollStopSignal = new Promise<void>((resolve) => {
+  releasePollWait = resolve;
+});
+let deliveryPollLoopPromise: Promise<void> | null = null;
+let parquetPollLoopPromise: Promise<void> | null = null;
 let lastPullAuthCaptureAt = 0;
 let pollLoopTickCount = 0;
+
+async function waitForNextPoll(delayMs: number): Promise<void> {
+  await Promise.race([sleep(delayMs), pollStopSignal]);
+}
 
 async function pollLoop(
   queueId: string = QUEUE_ID,
   component: string = "delivery-service",
 ): Promise<void> {
+  const idleBackoff = createPollIdleBackoff(INTERVAL_MS, MAX_IDLE_INTERVAL_MS);
   while (!stopping) {
     pollLoopTickCount += 1;
     // Heartbeat every tick — last_seen + monotonic counter let the
@@ -1150,14 +1110,15 @@ async function pollLoop(
       component,
       tickCount: pollLoopTickCount,
       environment: process.env.NODE_ENV ?? "production",
-      expectedIntervalSeconds: Math.max(5, Math.ceil(INTERVAL_MS / 1000) * 3),
+      expectedIntervalSeconds: Math.max(5, Math.ceil(MAX_IDLE_INTERVAL_MS / 1000) * 3),
     });
     try {
       const messages = await pullBatch(queueId);
       if (messages.length === 0) {
-        await sleep(INTERVAL_MS);
+        await waitForNextPoll(idleBackoff.nextEmptyDelayMs());
         continue;
       }
+      idleBackoff.reset();
 
       // Observe queue lag from enqueued_at on the pulled batch (fire-and-forget
       // so alerting never blocks delivery). Best-effort second parse — cheap at
@@ -1165,7 +1126,7 @@ async function pollLoop(
       void queueLagMonitor
         .observe(
           messages
-            .map((m) => parseMessageBody(m.body))
+            .map((m) => parsePulledMessageBody(m))
             .filter((b): b is DestinationQueueMessage => b !== null),
         )
         .catch(() => undefined);
@@ -1180,7 +1141,7 @@ async function pollLoop(
         messages,
         MAX_CONCURRENT_DELIVERIES,
         async (m) => {
-          let body = parseMessageBody(m.body);
+          let body = parsePulledMessageBody(m);
           if (!body) {
             // Unparseable bodies are terminal — ack so we don't retry forever.
             console.error(`[loop] dropping unparseable message ${m.id}`);
@@ -1195,7 +1156,7 @@ async function pollLoop(
             // The hydrate helper throws `spill_r2_key_missing: <key>` so the
             // key path is already in the error message; no need to duplicate
             // it as a Sentry tag.
-            console.error(`[loop] spill hydrate failed for ${body.event_id}:`, err);
+            console.error(`[loop] spill hydrate failed for ${body.event_id}: ${safeDeliveryDiagnostic(err)}`);
             if (isQueueSpillObjectMissingError(err)) {
               const errorMessage = err instanceof Error ? err.message : String(err);
               const response = {
@@ -1227,12 +1188,16 @@ async function pollLoop(
               try {
                 await insertDeliveryDeadLetter(body, "spill_r2_key_missing", errorMessage, attempt.created_at);
               } catch (deadLetterErr) {
-                console.error(`[loop] dead_letter insert failed for ${body.event_id}:`, deadLetterErr);
+                console.error(
+                  `[loop] dead_letter insert failed for ${body.event_id}: ${safeDeliveryDiagnostic(deadLetterErr)}`,
+                );
               }
               try {
                 await markReplayDeliveryOutcome(body, attempt);
               } catch (replayErr) {
-                console.error(`[loop] replay terminal update failed for ${body.event_id}:`, replayErr);
+                console.error(
+                  `[loop] replay terminal update failed for ${body.event_id}: ${safeDeliveryDiagnostic(replayErr)}`,
+                );
               }
               acks.push(m.lease_id);
               return;
@@ -1253,8 +1218,10 @@ async function pollLoop(
             attempt = await processDeliveryMessage(deps, body);
             await markReplayDeliveryOutcome(body, attempt);
           } catch (err) {
-            console.error(`[loop] processing failed for ${body.event_id}:`, err);
+            console.error(`[loop] processing failed for ${body.event_id}: ${safeDeliveryDiagnostic(err)}`);
             if (
+              !(err instanceof IdempotencyClaimInFlightError) &&
+              !(err instanceof IdempotencyClaimLostError) &&
               !isTransientR2Error(err) &&
               !isTransientPlatformHttpError(err) &&
               !isTransientFetchError(err)
@@ -1320,7 +1287,9 @@ async function pollLoop(
             try {
               await insertDeliveryDeadLetter(body, "delivery_dead", ddMessage, attempt.created_at);
             } catch (err) {
-              console.error(`[loop] dead_letter insert failed for ${body.event_id}:`, err);
+              console.error(
+                `[loop] dead_letter insert failed for ${body.event_id}: ${safeDeliveryDiagnostic(err)}`,
+              );
             }
           }
           if (attempt.status === "success" || attempt.status === "dead") {
@@ -1347,34 +1316,34 @@ async function pollLoop(
 
       await ackOrRetry({ ack: acks, retry: retries_ }, queueId);
     } catch (err) {
-      console.error("[loop] tick error:", err);
+      console.error(`[loop] tick error: ${safeDeliveryDiagnostic(err)}`);
       if (err instanceof CloudflareQueueAuthError) {
         const now = Date.now();
         if (now - lastPullAuthCaptureAt >= PULL_AUTH_ERROR_CAPTURE_INTERVAL_MS) {
           lastPullAuthCaptureAt = now;
           void captureException(sentry, err, { tags: { component: "delivery_poll_tick", category: "cloudflare_queue_auth" } });
         }
-        await sleep(Math.max(INTERVAL_MS * 10, 30_000));
+        await waitForNextPoll(Math.max(INTERVAL_MS * 10, 30_000));
       } else if (isCloudflareQueueOverloadError(err)) {
         // AXE-65 — pull-API rate-limit. Cloudflare returned 10250
         // (Queue is overloaded). Transient backpressure — back off
         // aggressively but don't spam Sentry; an overloaded queue
         // can keep returning this on every poll for minutes.
-        await sleep(Math.max(INTERVAL_MS * 10, 30_000));
+        await waitForNextPoll(Math.max(INTERVAL_MS * 10, 30_000));
       } else if (isTransientFetchError(err)) {
         // AXE-114/115 — Cloudflare Queue pull/ack occasionally fails at
         // the platform fetch layer as plain "TypeError: fetch failed".
         // The poll loop is already retrying forever, so treat this like
         // queue backpressure instead of opening one Sentry issue per blip.
-        await sleep(Math.max(INTERVAL_MS * 5, 10_000));
+        await waitForNextPoll(Math.max(INTERVAL_MS * 5, 10_000));
       } else if (isTransientPlatformHttpError(err)) {
         // Cloudflare Queue HTTP API 5xx/504 responses are the same class
         // of transient platform blip as fetch-level failures: the poll loop
         // keeps running and the message remains leased for retry.
-        await sleep(Math.max(INTERVAL_MS * 5, 10_000));
+        await waitForNextPoll(Math.max(INTERVAL_MS * 5, 10_000));
       } else {
         void captureException(sentry, err, { tags: { component: "delivery_poll_tick" } });
-        await sleep(INTERVAL_MS * 2);
+        await waitForNextPoll(INTERVAL_MS * 2);
       }
     }
   }
@@ -1444,9 +1413,19 @@ interface InternalRouteErroredRequest {
   message: string;
 }
 
+const INTERNAL_REQUEST_BODY_LIMIT_BYTES = 2 * 1024 * 1024;
+
 async function readBody(req: http.IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
+  let totalBytes = 0;
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+    totalBytes += buffer.byteLength;
+    if (totalBytes > INTERNAL_REQUEST_BODY_LIMIT_BYTES) {
+      throw new Error("internal_request_body_too_large");
+    }
+    chunks.push(buffer);
+  }
   return Buffer.concat(chunks).toString("utf8");
 }
 
@@ -1485,7 +1464,7 @@ const server = http.createServer((req, res) => {
   // own Prometheus scrape (running with the secret set) can read.
   if (req.method === "GET" && req.url === "/metrics") {
     const provided = req.headers["x-axel-shared-secret"];
-    if (!SHARED_SECRET || typeof provided !== "string" || provided !== SHARED_SECRET) {
+    if (!isInternalSecretAuthorized(provided, SHARED_SECRET)) {
       res.writeHead(401, { "content-type": "text/plain" });
       res.end("# unauthorized — set x-axel-shared-secret header\n");
       return;
@@ -1495,9 +1474,9 @@ const server = http.createServer((req, res) => {
         const snapshot = await renderMetrics(pool);
         res.writeHead(200, { "content-type": "text/plain; version=0.0.4" });
         res.end(snapshot.text);
-      } catch (err) {
+      } catch {
         res.writeHead(500, { "content-type": "text/plain" });
-        res.end(`# render_failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        res.end("# render_failed\n");
       }
     })();
     return;
@@ -1523,7 +1502,7 @@ const server = http.createServer((req, res) => {
             () => loadInternalSource(pool, sourceId, MASTER_KEY),
           ),
           onError: (err, sourceId) => {
-            console.error("[/internal/source] lookup failed:", err);
+            console.error(`[/internal/source] lookup failed: ${safeDeliveryDiagnostic(err)}`);
             if (!isTransientPostgresError(err)) {
               void captureException(sentry, err, {
                 tags: {
@@ -1549,7 +1528,7 @@ const server = http.createServer((req, res) => {
   if (req.method === "POST" && req.url === "/internal/heartbeat") {
     void (async () => {
       const provided = req.headers["x-axel-shared-secret"];
-      if (!SHARED_SECRET || typeof provided !== "string" || provided !== SHARED_SECRET) {
+      if (!isInternalSecretAuthorized(provided, SHARED_SECRET)) {
         res.writeHead(401, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
         return;
@@ -1564,9 +1543,9 @@ const server = http.createServer((req, res) => {
       };
       try {
         body = JSON.parse(await readBody(req));
-      } catch (err) {
+      } catch {
         res.writeHead(400, { "content-type": "application/json" });
-        res.end(JSON.stringify({ ok: false, error: `invalid_body: ${err instanceof Error ? err.message : String(err)}` }));
+        res.end(JSON.stringify({ ok: false, error: "invalid_body" }));
         return;
       }
       if (!body?.component || typeof body.component !== "string") {
@@ -1594,7 +1573,7 @@ const server = http.createServer((req, res) => {
   if (req.method === "POST" && req.url === "/internal/routes") {
     void (async () => {
       const provided = req.headers["x-axel-shared-secret"];
-      if (!SHARED_SECRET || typeof provided !== "string" || provided !== SHARED_SECRET) {
+      if (!isInternalSecretAuthorized(provided, SHARED_SECRET)) {
         res.writeHead(401, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
         return;
@@ -1602,9 +1581,9 @@ const server = http.createServer((req, res) => {
       let body: InternalRoutesRequest;
       try {
         body = JSON.parse(await readBody(req)) as InternalRoutesRequest;
-      } catch (err) {
+      } catch {
         res.writeHead(400, { "content-type": "application/json" });
-        res.end(JSON.stringify({ ok: false, error: `invalid_body: ${err instanceof Error ? err.message : String(err)}` }));
+        res.end(JSON.stringify({ ok: false, error: "invalid_body" }));
         return;
       }
       if (!body?.workspace_id || !body?.source_id) {
@@ -1618,7 +1597,7 @@ const server = http.createServer((req, res) => {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify(payload));
       } catch (err) {
-        console.error("[/internal/routes] lookup failed:", err);
+        console.error(`[/internal/routes] lookup failed: ${safeDeliveryDiagnostic(err)}`);
         // Skip Sentry on transient pg failures (AXE-95..113) — the router-edge
         // queue redelivery will retry. Same pattern as AXE-65 / AXE-93.
         const transientPostgres = isTransientPostgresError(err);
@@ -1647,7 +1626,7 @@ const server = http.createServer((req, res) => {
   if (req.method === "POST" && req.url === "/internal/routes/errored") {
     void (async () => {
       const provided = req.headers["x-axel-shared-secret"];
-      if (!SHARED_SECRET || typeof provided !== "string" || provided !== SHARED_SECRET) {
+      if (!isInternalSecretAuthorized(provided, SHARED_SECRET)) {
         res.writeHead(401, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
         return;
@@ -1655,9 +1634,9 @@ const server = http.createServer((req, res) => {
       let body: InternalRouteErroredRequest;
       try {
         body = JSON.parse(await readBody(req)) as InternalRouteErroredRequest;
-      } catch (err) {
+      } catch {
         res.writeHead(400, { "content-type": "application/json" });
-        res.end(JSON.stringify({ ok: false, error: `invalid_body: ${err instanceof Error ? err.message : String(err)}` }));
+        res.end(JSON.stringify({ ok: false, error: "invalid_body" }));
         return;
       }
       if (!body?.workspace_id || !body?.route_id || !body?.reason) {
@@ -1672,7 +1651,7 @@ const server = http.createServer((req, res) => {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: true, updated }));
       } catch (err) {
-        console.error("[/internal/routes/errored] update failed:", err);
+        console.error(`[/internal/routes/errored] update failed: ${safeDeliveryDiagnostic(err)}`);
         const transientPostgres = isTransientPostgresError(err);
         if (!transientPostgres) {
           void captureException(sentry, err, {
@@ -1690,7 +1669,7 @@ const server = http.createServer((req, res) => {
   if (req.method === "POST" && req.url === "/deliver") {
     void (async () => {
       const provided = req.headers["x-axel-shared-secret"];
-      if (!SHARED_SECRET || typeof provided !== "string" || provided !== SHARED_SECRET) {
+      if (!isInternalSecretAuthorized(provided, SHARED_SECRET)) {
         res.writeHead(401, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
         return;
@@ -1700,9 +1679,9 @@ const server = http.createServer((req, res) => {
       try {
         const raw = await readBody(req);
         body = JSON.parse(raw) as DirectDeliverRequest;
-      } catch (err) {
+      } catch {
         res.writeHead(400, { "content-type": "application/json" });
-        res.end(JSON.stringify({ ok: false, error: `invalid_body: ${err instanceof Error ? err.message : String(err)}` }));
+        res.end(JSON.stringify({ ok: false, error: "invalid_body" }));
         return;
       }
 
@@ -1716,7 +1695,9 @@ const server = http.createServer((req, res) => {
       try {
         message = await hydrateIfSpilled(message, spillReader);
       } catch (err) {
-        console.error(`[/deliver] spill hydrate failed for ${message.event_id}:`, err);
+        console.error(
+          `[/deliver] spill hydrate failed for ${message.event_id}: ${safeDeliveryDiagnostic(err)}`,
+        );
         if (isQueueSpillObjectMissingError(err)) {
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify({
@@ -1784,14 +1765,18 @@ const server = http.createServer((req, res) => {
           ok: true,
           status: reportedStatus,
           latency_ms: attempt.latency_ms,
-          response: attempt.response ?? null,
+          response: sanitizeConnectorResponseForStorage(attempt.response ?? null),
         }));
       } catch (err) {
-        console.error(`[/deliver] processing failed for ${message.event_id}:`, err);
+        console.error(
+          `[/deliver] processing failed for ${message.event_id}: ${safeDeliveryDiagnostic(err)}`,
+        );
         // Transient platform errors (re-enqueue 504, R2 5xx, fetch blips) are
         // retried via the 503 below — don't open a code-bug Sentry issue for
         // them. Mirrors the delivery_poll_loop + spill-hydrate guards (ROL-210).
         if (
+          !(err instanceof IdempotencyClaimInFlightError) &&
+          !(err instanceof IdempotencyClaimLostError) &&
           !isTransientR2Error(err) &&
           !isTransientPlatformHttpError(err) &&
           !isTransientFetchError(err)
@@ -1819,7 +1804,12 @@ const server = http.createServer((req, res) => {
           response: { error: err instanceof Error ? err.message : String(err) },
           created_at: new Date().toISOString(),
         });
-        res.writeHead(503, { "content-type": "application/json" });
+        res.writeHead(503, {
+          "content-type": "application/json",
+          ...(err instanceof IdempotencyClaimInFlightError || err instanceof IdempotencyClaimLostError
+            ? { "retry-after": "30" }
+            : {}),
+        });
         // Generic body — the error detail is logged to ClickHouse + Sentry above.
         res.end(JSON.stringify({ ok: false, error: "internal_error" }));
       } finally {
@@ -1838,11 +1828,11 @@ const server = http.createServer((req, res) => {
         const handled = await handleCliApi(req, res, {
           pool,
           sentry,
-          ingestBaseUrl: process.env.AXEL_INGEST_URL ?? "https://ingest.axelapp.ai",
+          ingestBaseUrl: resolveIngestBaseUrl(process.env),
           ingestAdminToken: process.env.INGEST_ADMIN_TOKEN ?? "",
           cloudflareAccountId: ACCOUNT_ID,
           cloudflareApiToken: API_TOKEN,
-          rawPayloadBucket: process.env.RAW_PAYLOAD_BUCKET ?? "axel-events-raw",
+          rawPayloadBucket: RAW_PAYLOAD_BUCKET,
           clickhouseUrl: process.env.CLICKHOUSE_URL,
           clickhouseUser: process.env.CLICKHOUSE_USER,
           clickhousePassword: process.env.CLICKHOUSE_PASSWORD,
@@ -1852,7 +1842,7 @@ const server = http.createServer((req, res) => {
           res.end();
         }
       } catch (err) {
-        console.error("[/v1/cli] handler crashed:", err);
+        console.error(`[/v1/cli] handler crashed: ${safeDeliveryDiagnostic(err)}`);
         void captureException(sentry, err, { tags: { component: "cli_api" } });
         if (!res.headersSent) {
           res.writeHead(500, { "content-type": "application/json" });
@@ -1921,7 +1911,7 @@ const replayWorkerHandle = runWorkers ? startReplayWorker({
   pool,
   cloudflareAccountId: ACCOUNT_ID,
   cloudflareApiToken: API_TOKEN,
-  rawPayloadBucket: process.env.RAW_PAYLOAD_BUCKET ?? "axel-events-raw",
+  rawPayloadBucket: RAW_PAYLOAD_BUCKET,
   deliveryQueueId: EDGE_DELIVERY_QUEUE_ID ?? QUEUE_ID,
   nativeDeliveryQueueId: QUEUE_ID,
   intervalMs: replayIntervalMs,
@@ -1982,21 +1972,50 @@ if (runWorkers && (process.env.PARQUET_COMPACTION_ENABLED ?? "") === "1") {
 
 // ---- Graceful shutdown ---- //
 
+let shutdownStarted = false;
+
+async function drainHttpServer(): Promise<void> {
+  if (!runWeb) return;
+  await new Promise<void>((resolve) => {
+    server.close(() => resolve());
+  });
+}
+
 async function shutdown(signal: string): Promise<void> {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
   console.log(`[shutdown] received ${signal}, draining...`);
   stopping = true;
+  releasePollWait?.();
   if (retentionTimer) clearInterval(retentionTimer);
-  // Stop the periodic runners *before* the pool closes — their in-flight
-  // batches still need Postgres to update state. Each stop() awaits the
-  // active tick before resolving.
-  if (replayWorkerHandle) await replayWorkerHandle.stop();
-  if (backfillJobWorkerHandle) await backfillJobWorkerHandle.stop();
-  if (parquetCompactionHandle) await parquetCompactionHandle.stop();
-  server.close();
+
+  // Enter persistent Parquet drain mode before awaiting poll loops. A loop can
+  // already be awaiting a low-volume buffered delivery, and more entries can
+  // arrive from in-flight HTTP handlers while the server is closing.
+  const s3ParquetDrain = beginS3ParquetDrain();
+
+  // Stop accepting HTTP work, wake idle poll sleeps, and await every active
+  // delivery batch before closing shared clients or Postgres. Otherwise a
+  // SIGTERM can leave a committed in_flight claim while tearing the connector
+  // down underneath it. The bounded claim lease is the crash-only fallback.
+  const drains: Promise<unknown>[] = [s3ParquetDrain, drainHttpServer()];
+  if (deliveryPollLoopPromise) drains.push(deliveryPollLoopPromise);
+  if (parquetPollLoopPromise) drains.push(parquetPollLoopPromise);
+  if (replayWorkerHandle) drains.push(replayWorkerHandle.stop());
+  if (backfillJobWorkerHandle) drains.push(backfillJobWorkerHandle.stop());
+  if (parquetCompactionHandle) drains.push(parquetCompactionHandle.stop());
+  const drainResults = await Promise.allSettled(drains);
+  for (const result of drainResults) {
+    if (result.status === "rejected") {
+      console.error(`[shutdown] drain failed: ${safeDeliveryDiagnostic(result.reason)}`);
+    }
+  }
+
   await flushAllS3ParquetBatches();
   await closeAllPostgresPools();
   await closeAllMongoClients();
   closeAllS3Clients();
+  await closeSafeOutboundDispatcher();
   await pool.end();
   console.log("[shutdown] done");
   process.exit(0);
@@ -2009,8 +2028,10 @@ process.on("SIGINT", () => void shutdown("SIGINT"));
 
 if (runWeb) {
   console.log("[boot] starting poll loop");
-  pollLoop().catch(async (err) => {
-    console.error("[boot] poll loop crashed:", err);
+  deliveryPollLoopPromise = pollLoop();
+  void deliveryPollLoopPromise.catch(async (err) => {
+    if (stopping) return;
+    console.error(`[boot] poll loop crashed: ${safeDeliveryDiagnostic(err)}`);
     await captureExceptionBeforeExit(sentry, err, {
       level: "fatal",
       tags: { component: "delivery_poll_loop" },
@@ -2028,8 +2049,10 @@ if (runWeb) {
 // deps as the native poll loop.
 if (runWorkers && PARQUET_QUEUE_ID) {
   console.log("[boot] starting parquet poll loop (single-instance batching)");
-  pollLoop(PARQUET_QUEUE_ID, "delivery-service-parquet").catch(async (err) => {
-    console.error("[boot] parquet poll loop crashed:", err);
+  parquetPollLoopPromise = pollLoop(PARQUET_QUEUE_ID, "delivery-service-parquet");
+  void parquetPollLoopPromise.catch(async (err) => {
+    if (stopping) return;
+    console.error(`[boot] parquet poll loop crashed: ${safeDeliveryDiagnostic(err)}`);
     await captureExceptionBeforeExit(sentry, err, {
       level: "fatal",
       tags: { component: "delivery_poll_loop_parquet" },

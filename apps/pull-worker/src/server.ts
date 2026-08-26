@@ -1,5 +1,10 @@
 import pg from "pg";
-import { controlPlaneDbSslVerify, requireEnv } from "@axel/shared";
+import {
+  controlPlanePgSslOption,
+  requireEnv,
+  resolveIngestBaseUrl,
+  sanitizeConnectorDiagnosticForStorage,
+} from "@axel/shared";
 import { captureException, installNodeSentryHandlers, isTransientPostgresError, recordHeartbeat, sentryClientFromEnv, withCronCheckIn } from "@axel/observability";
 import { PullBatchError, runActivePullSources } from "./index.js";
 
@@ -14,16 +19,14 @@ const MONITOR_INTERVAL_MINUTES = Number.parseInt(
 );
 const MONITOR_CHECKIN_MARGIN_MINUTES = 5;
 const MONITOR_MAX_RUNTIME_MINUTES = 30;
-const INGEST_URL = process.env.AXEL_INGEST_URL ?? process.env.NEXT_PUBLIC_AXEL_INGEST_URL ?? "https://ingest.axelapp.ai";
+const INGEST_URL = resolveIngestBaseUrl(process.env);
 const sentry = sentryClientFromEnv(process.env, "pull-worker");
 installNodeSentryHandlers(sentry);
 
 const pool = new pg.Pool({
   connectionString: DATABASE_URL,
   max: Number.parseInt(process.env.DATABASE_POOL_MAX ?? "10", 10),
-  ssl: DATABASE_URL.includes("localhost")
-    ? false
-    : { rejectUnauthorized: controlPlaneDbSslVerify(process.env.CONTROL_PLANE_DB_SSL_VERIFY) },
+  ssl: controlPlanePgSslOption(DATABASE_URL, process.env.CONTROL_PLANE_DB_SSL_VERIFY),
   // Fail a hung dial fast (matches delivery-service) rather than pg's default
   // of waiting forever — a stalled connect should surface as a transient the
   // tick can retry, not block the whole worker.
@@ -34,7 +37,7 @@ pool.on("error", (err) => {
   // node-postgres emits idle-client failures on the Pool itself. Without an
   // error listener, EventEmitter turns a routine socket abort into an
   // uncaughtException and terminates the whole pull worker.
-  console.error("[control-pool] async error (handled):", err instanceof Error ? err.message : err);
+  console.error("[control-pool] async error (handled):", safePullDiagnostic(err));
   if (isTransientPostgresError(err)) return;
   void captureException(sentry, err, { tags: { component: "postgres_pool" } });
 });
@@ -71,7 +74,7 @@ function beatPullWorker(): void {
 async function tick(): Promise<void> {
   tickCount += 1;
   let lastError: string | undefined;
-  let summaries: Array<{ source_id: string; source_type: string; streams: unknown[] }> = [];
+  let summaries: Awaited<ReturnType<typeof runActivePullSources>> = [];
   try {
     summaries = await withCronCheckIn(
       sentry,
@@ -97,10 +100,17 @@ async function tick(): Promise<void> {
     lastTickError = undefined;
     lastSourcesProcessed = summaries.length;
     if (summaries.length > 0) {
-      console.log("[pull-worker] completed", JSON.stringify(summaries));
+      console.log("[pull-worker] completed", JSON.stringify({
+        sources: summaries.length,
+        streams: summaries.reduce((count, summary) => count + summary.streams.length, 0),
+        records: summaries.reduce(
+          (count, summary) => count + summary.streams.reduce((sum, stream) => sum + stream.records, 0),
+          0,
+        ),
+      }));
     }
   } catch (err) {
-    lastError = err instanceof Error ? err.message : String(err);
+    lastError = err instanceof PullBatchError ? "pull_batch_failed" : safePullDiagnostic(err);
     lastTickError = lastError;
     if (err instanceof PullBatchError) {
       lastSourcesProcessed = err.attempted;
@@ -125,7 +135,7 @@ const timer = setInterval(() => {
       console.error(`[pull-worker] ${err.message}`);
       return;
     }
-    console.error("[pull-worker] tick failed", err);
+    console.error(`[pull-worker] tick failed: ${safePullDiagnostic(err)}`);
     // Drop transient pg pooler blips so we don't open a Sentry fingerprint
     // per failover (same pattern as delivery-service). The next tick will
     // re-acquire a healthy connection.
@@ -146,7 +156,7 @@ tick().catch((err) => {
     console.error(`[pull-worker] ${err.message}`);
     return;
   }
-  console.error("[pull-worker] initial tick failed", err);
+  console.error(`[pull-worker] initial tick failed: ${safePullDiagnostic(err)}`);
   if (isTransientPostgresError(err)) return;
   void captureException(sentry, err, { tags: { component: "pull_worker_initial_tick" } });
 }).finally(() => {
@@ -160,3 +170,9 @@ process.on("SIGTERM", async () => {
   process.exit(0);
 });
 
+function safePullDiagnostic(value: unknown): string {
+  return sanitizeConnectorDiagnosticForStorage(
+    value instanceof Error ? value.message : value,
+    500,
+  ) || "pull_worker_failed";
+}

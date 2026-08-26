@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { afterEach, describe, it, expect, beforeEach, vi } from "vitest";
 import { createHash } from "node:crypto";
 import worker, { type Env } from "../src/index.js";
 import type { QueueMessage, Source } from "@axel/shared";
 import { handleTriggerEvent, type TriggerEventDeps } from "../src/admin.js";
 import { resetRateLimitsForTests } from "../src/rate-limit.js";
-import { inMemorySourceCache } from "../src/source-cache.js";
+import { inMemorySourceCache, type SourceCache } from "../src/source-cache.js";
 
 function tokenHash(plaintext: string): string {
   return createHash("sha256").update(plaintext).digest("hex");
@@ -42,7 +42,7 @@ class FakeQueue<T> {
 
 function makeEnv(opts: {
   adminToken?: string;
-  cache?: ReturnType<typeof inMemorySourceCache>;
+  cache?: SourceCache;
   devSources?: Record<string, unknown>;
 }): Env {
   const queues = Array.from({ length: 16 }, () => new FakeQueue<QueueMessage>());
@@ -169,6 +169,22 @@ describe("admin source-cache invalidation endpoint", () => {
     expect(res.status).toBe(204);
     expect(spy).toHaveBeenCalledWith("src_x");
   });
+
+  it("returns 503 when the cache delete fails", async () => {
+    const cache: SourceCache = {
+      async get() { return undefined; },
+      async put() {},
+      async invalidate() { throw new Error("KV unavailable"); },
+    };
+    const env = makeEnv({ adminToken: "tok-admin", cache });
+    const res = await worker.fetch(
+      invalidateRequest("tok-admin", { source_id: "src_x" }),
+      env,
+      ctx,
+    );
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "cache_invalidation_failed" });
+  });
 });
 
 describe("admin source-cache PUT endpoint", () => {
@@ -265,6 +281,44 @@ describe("admin source-cache PUT endpoint", () => {
       ctx,
     );
     expect(ingestRes.status).toBe(202);
+  });
+
+  it("defaults admin-pushed source entries to a five-minute TTL", async () => {
+    let writtenTtl: number | undefined;
+    const cache: SourceCache = {
+      async get() { return undefined; },
+      async put(_sourceId, _value, ttlSeconds) { writtenTtl = ttlSeconds; },
+      async invalidate() {},
+    };
+    const env = makeEnv({ adminToken: "tok-admin", cache });
+    const res = await worker.fetch(
+      putRequest("tok-admin", { source_id: "src_pushed", source: VALID_SOURCE }),
+      env,
+      ctx,
+    );
+    expect(res.status).toBe(204);
+    expect(writtenTtl).toBe(300);
+  });
+
+  it("caps an explicit source-cache TTL at five minutes", async () => {
+    let writtenTtl: number | undefined;
+    const cache: SourceCache = {
+      async get() { return undefined; },
+      async put(_sourceId, _value, ttlSeconds) { writtenTtl = ttlSeconds; },
+      async invalidate() {},
+    };
+    const env = makeEnv({ adminToken: "tok-admin", cache });
+    const res = await worker.fetch(
+      putRequest("tok-admin", {
+        source_id: "src_pushed",
+        source: VALID_SOURCE,
+        ttl_seconds: 31_536_000,
+      }),
+      env,
+      ctx,
+    );
+    expect(res.status).toBe(204);
+    expect(writtenTtl).toBe(300);
   });
 
   it("returns 204 with no cache configured (dev parity)", async () => {
@@ -515,7 +569,7 @@ describe("admin trigger-event endpoint — parity with the public ingest path", 
       ...source,
     } as unknown as Source;
     const deps: TriggerEventDeps = {
-      cache: { async get() { return { kind: "hit", source: resolved }; } },
+      lookupSource: async () => resolved,
       adminToken: "tok-admin",
       rawPayloads: r2.bucket,
       queueForShard: () => queue as unknown as Queue<unknown>,
@@ -535,6 +589,93 @@ describe("admin trigger-event endpoint — parity with the public ingest path", 
       body: JSON.stringify(body),
     });
   }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("uses the authenticated delivery-service fallback when SOURCE_CACHE is absent", async () => {
+    const source: Source = {
+      source_id: "src_selfhost",
+      workspace_id: "ws_selfhost",
+      name: "Self-host source",
+      secret_token: "stored-token-hash",
+      status: "active",
+      provider: "custom",
+    };
+    const lookupFetch = vi.fn(async (_input: string, _init: RequestInit) => (
+      new Response(JSON.stringify({ source }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    ));
+    vi.stubGlobal("fetch", lookupFetch);
+
+    const env = makeEnv({ adminToken: "tok-admin" });
+    delete env.DEV_MODE;
+    delete env.DEV_SOURCES;
+    env.DELIVERY_SERVICE_URL = "https://delivery.example.test/";
+    env.SOURCE_LOOKUP_SHARED_SECRET = "source-lookup-secret"; // gitleaks:allow
+
+    const res = await worker.fetch(
+      triggerRequest("tok-admin", {
+        source_id: "src_selfhost",
+        body: { type: "selfhost.test" },
+        actor_kind: "dashboard",
+      }),
+      env,
+      ctx,
+    );
+
+    expect(res.status).toBe(202);
+    expect(lookupFetch).toHaveBeenCalledOnce();
+    expect(lookupFetch.mock.calls[0]).toEqual([
+      "https://delivery.example.test/internal/source",
+      expect.objectContaining({
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-axel-shared-secret": "source-lookup-secret",
+        },
+        body: JSON.stringify({ source_id: "src_selfhost" }),
+      }),
+    ]);
+    const queued = Array.from({ length: 16 }, (_, index) => {
+      const key = `QUEUE_EVENTS_${index.toString().padStart(2, "0")}` as keyof Env;
+      return (env[key] as unknown as FakeQueue<QueueMessage>).sent;
+    }).flat();
+    expect(queued).toHaveLength(1);
+    expect(queued[0]).toMatchObject({
+      source_id: "src_selfhost",
+      workspace_id: "ws_selfhost",
+      event_type: "selfhost.test",
+      is_test: true,
+    });
+  });
+
+  it("returns a retryable 503 without writing when the fallback is unavailable", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("upstream unavailable", { status: 503 })));
+    const env = makeEnv({ adminToken: "tok-admin" });
+    delete env.DEV_MODE;
+    delete env.DEV_SOURCES;
+    env.DELIVERY_SERVICE_URL = "https://delivery.example.test";
+    env.SOURCE_LOOKUP_SHARED_SECRET = "source-lookup-secret"; // gitleaks:allow
+    const putSpy = vi.spyOn(env.EVENTS_RAW, "put");
+
+    const res = await worker.fetch(
+      triggerRequest("tok-admin", { source_id: "src_selfhost", body: {} }),
+      env,
+      ctx,
+    );
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("retry-after")).toBe("2");
+    expect(await res.json()).toEqual({
+      error: "source_lookup_unavailable",
+      retry_after_seconds: 2,
+    });
+    expect(putSpy).not.toHaveBeenCalled();
+  });
 
   it("redacts configured paths BEFORE the durable R2 write (and sizes the message to the stored body)", async () => {
     const h = harness({ redact_paths: ["card"] });

@@ -26,6 +26,7 @@ import {
   BIGQUERY_API_ROOT,
   BIGQUERY_SCOPE,
 } from "./bigquery-auth";
+import { createSafePgStream, safeDashboardFetch, safeLookup } from "./safe-egress";
 
 /**
  * Pre-create connectivity probe for the destination form. Catches three
@@ -268,7 +269,7 @@ async function probeHttp(values: Record<string, string>): Promise<TestDestinatio
   try {
     // HEAD with redirect:"manual" — any HTTP response (incl. 405/404/401)
     // means we reached the receiver. Only DNS/TCP/TLS failures throw.
-    const res = await fetch(url, {
+    const res = await safeDashboardFetch(url, {
       method: "HEAD",
       signal: controller.signal,
       redirect: "manual",
@@ -322,6 +323,7 @@ async function probePostgres(
   const connStr = noVerify ? withNoVerifySslMode(rawConnStr) : rawConnStr;
   const pool = new Pool({
     connectionString: connStr,
+    stream: createSafePgStream,
     ssl: pgSslOption(connStr),
     connectionTimeoutMillis: PROBE_TIMEOUT_MS,
     idleTimeoutMillis: 1_000,
@@ -382,6 +384,7 @@ async function probeMongo(
     serverSelectionTimeoutMS: PROBE_TIMEOUT_MS,
     connectTimeoutMS: PROBE_TIMEOUT_MS,
     maxPoolSize: 1,
+    lookup: safeLookup,
   });
   try {
     await client.connect();
@@ -445,12 +448,13 @@ async function probeDatabricksSql(values: Record<string, string>): Promise<TestD
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
   try {
-    const res = await fetch(
+    const res = await safeDashboardFetch(
       `https://${host}/api/2.0/sql/warehouses/${encodeURIComponent(warehouseId)}`,
       {
         method: "GET",
         headers: { authorization: `Bearer ${token}` },
         signal: controller.signal,
+        redirect: "manual",
       },
     );
     if (res.status === 401 || res.status === 403) {
@@ -513,10 +517,11 @@ async function probeDatabricksVolume(values: Record<string, string>): Promise<Te
     const url = fullName
       ? `https://${host}/api/2.1/unity-catalog/volumes/${encodeURIComponent(fullName)}`
       : `https://${host}/api/2.1/unity-catalog/volumes?catalog_name=${encodeURIComponent(catalog)}&schema_name=${encodeURIComponent(schemaName)}`;
-    const res = await fetch(url, {
+    const res = await safeDashboardFetch(url, {
       method: "GET",
       headers: { authorization: `Bearer ${token}` },
       signal: controller.signal,
+      redirect: "manual",
     });
     if (res.status === 401 || res.status === 403) {
       return {

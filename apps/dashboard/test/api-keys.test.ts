@@ -123,6 +123,7 @@ describe("authenticateApiKey — personal access tokens (axe_pat_)", () => {
     revoked_at: null,
     expires_at: null,
     workspace_status: "active",
+    membership_role: "admin",
   };
 
   function patSelectReturns(row: Record<string, unknown> | null): void {
@@ -140,6 +141,16 @@ describe("authenticateApiKey — personal access tokens (axe_pat_)", () => {
     expect(await authenticateApiKey("Bearer axe_pat_validtoken")).toEqual({
       workspace_id: "ws_pat",
       scopes: ["read", "write", "replay"],
+      key_id: "pat_1",
+    });
+    expect(String(queryMock.mock.calls[0]?.[0])).toMatch(/JOIN workspace_members/i);
+  });
+
+  it("keeps a member PAT read-only", async () => {
+    patSelectReturns({ ...patRow, membership_role: "member" });
+    expect(await authenticateApiKey("Bearer axe_pat_member")).toEqual({
+      workspace_id: "ws_pat",
+      scopes: ["read"],
       key_id: "pat_1",
     });
   });
@@ -162,5 +173,11 @@ describe("authenticateApiKey — personal access tokens (axe_pat_)", () => {
   it("rejects an unknown PAT (no row)", async () => {
     patSelectReturns(null);
     expect(await authenticateApiKey("Bearer axe_pat_unknown")).toBeNull();
+  });
+
+  it("rejects a PAT when its membership join returns no row", async () => {
+    patSelectReturns(null);
+    expect(await authenticateApiKey("Bearer axe_pat_removed_member")).toBeNull();
+    expect(String(queryMock.mock.calls[0]?.[0])).toMatch(/wm\.user_id = p\.user_id/i);
   });
 });

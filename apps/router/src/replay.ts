@@ -16,7 +16,7 @@
  * spinning up a database.
  */
 
-import type { QueueMessage } from "@axel/shared";
+import { sanitizeConnectorDiagnosticForStorage, type QueueMessage } from "@axel/shared";
 import { processQueueMessage, type FanoutScope, type RouterDeps, type RouterProcessResult } from "./processor.ts";
 
 export interface ReplayRow {
@@ -86,6 +86,22 @@ export interface ReplayProcessSummary extends RouterProcessResult {
 }
 
 /**
+ * Raw objects are written only beneath a workspace segment. Validate that
+ * invariant again at the privileged replay consumer so a compromised or
+ * buggy replay producer cannot turn the account-wide R2 credential into a
+ * cross-tenant read primitive.
+ */
+export function replayPayloadKeyBelongsToWorkspace(key: string, workspaceId: string): boolean {
+  const segments = key.split("/");
+  return (
+    (segments[0] === "events" || segments[0] === "pull") &&
+    segments[1] === workspaceId &&
+    segments.length >= 3 &&
+    segments.slice(2).every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
+  );
+}
+
+/**
  * Process one batch of pending replay rows. Returns the per-row summaries.
  *
  * Designed to be called from a periodic loop (e.g. every 30s). Idempotent:
@@ -100,6 +116,9 @@ export async function processReplayBatch(deps: ReplayProcessorDeps): Promise<Rep
 
   for (const row of rows) {
     try {
+      if (!replayPayloadKeyBelongsToWorkspace(row.r2_key, row.workspace_id)) {
+        throw new Error("replay_payload_workspace_mismatch");
+      }
       const hints = (await deps.hints?.resolveHints(row.event_id, row.r2_key)) ?? null;
       // We tag the synthesized event_id with the replay_id so that the
       // delivery idempotency_key (workspace:event:route:destination) naturally
@@ -153,7 +172,10 @@ export async function processReplayBatch(deps: ReplayProcessorDeps): Promise<Rep
       }
       summaries.push(summary);
     } catch (err) {
-      const message = err instanceof Error ? err.message : "unknown_replay_error";
+      const message = sanitizeConnectorDiagnosticForStorage(
+        err instanceof Error ? err.message : "unknown_replay_error",
+        1000,
+      );
       await deps.replays.markFailed(row.id, message);
     }
   }

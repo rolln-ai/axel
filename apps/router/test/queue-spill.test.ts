@@ -210,11 +210,13 @@ describe("queue-spill (consumer)", () => {
     // The message identifies the object and carries no byte offset.
     expect(corrupt.message).toContain(key);
     expect(corrupt.message).not.toMatch(/position \d+/);
-    expect(corrupt.cause).toBeInstanceOf(SyntaxError);
+    // The original SyntaxError can quote malformed webhook bytes, so it must
+    // not survive on the error object sent to logs or Sentry.
+    expect("cause" in corrupt).toBe(false);
   });
 
   it("identifies corrupt spill body errors by class or message", () => {
-    expect(isQueueSpillBodyCorruptError(new QueueSpillBodyCorruptError("k", 10, new Error("x")))).toBe(true);
+    expect(isQueueSpillBodyCorruptError(new QueueSpillBodyCorruptError("k", 10))).toBe(true);
     expect(isQueueSpillBodyCorruptError(new Error("spill_r2_body_corrupt: k (10 bytes)"))).toBe(true);
     expect(isQueueSpillBodyCorruptError(new SyntaxError("Unterminated string in JSON at position 65536"))).toBe(false);
     expect(isQueueSpillBodyCorruptError(new QueueSpillObjectMissingError("k"))).toBe(false);

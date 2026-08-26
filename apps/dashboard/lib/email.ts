@@ -36,9 +36,10 @@ export interface SendOptions {
 }
 
 /**
- * Send a transactional email through Resend. When `RESEND_API_KEY` is unset
- * (typical local dev) we log the message to stdout instead so password-reset
- * and invite flows still work end-to-end without third-party config.
+ * Send a transactional email through Resend. Local development keeps a
+ * console fallback so password-reset and invite flows can be exercised without
+ * a provider. Production must fail closed: those messages contain one-shot
+ * credentials and must never be copied into hosted or container logs.
  */
 export async function sendEmail(
   args: SendArgs,
@@ -46,26 +47,38 @@ export async function sendEmail(
 ): Promise<SendResult> {
   const client = getClient();
   if (!client) {
-    console.log("\n[email:dev-fallback] would send →", args.to);
-    console.log("[email:dev-fallback] subject:", args.subject);
-    console.log("[email:dev-fallback] body:\n" + args.text + "\n");
-    return { ok: true };
+    if (process.env.NODE_ENV === "development") {
+      console.log("\n[email:dev-fallback] would send →", args.to);
+      console.log("[email:dev-fallback] subject:", args.subject);
+      console.log("[email:dev-fallback] body:\n" + args.text + "\n");
+      return { ok: true };
+    }
+    console.warn("[email] delivery is not configured; message was not sent");
+    return { ok: false, error: "Email delivery is not configured." };
   }
 
-  const result = await client.emails.send(
-    {
-      from: getFrom(),
-      to: args.to,
-      subject: args.subject,
-      html: args.html,
-      text: args.text,
-    },
-    options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : undefined,
-  );
+  let result: Awaited<ReturnType<typeof client.emails.send>>;
+  try {
+    result = await client.emails.send(
+      {
+        from: getFrom(),
+        to: args.to,
+        subject: args.subject,
+        html: args.html,
+        text: args.text,
+      },
+      options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : undefined,
+    );
+  } catch {
+    // Provider/network exceptions can retain request objects. Do not hand the
+    // original exception to callers that may log it alongside a one-shot URL.
+    console.error("[email] provider request failed");
+    return { ok: false, error: "Email provider request failed." };
+  }
 
   if (result.error) {
-    console.error("[email] resend send failed:", result.error);
-    return { ok: false, error: result.error.message };
+    console.error("[email] provider rejected the message");
+    return { ok: false, error: "Email provider rejected the message." };
   }
   return { ok: true, messageId: result.data?.id };
 }

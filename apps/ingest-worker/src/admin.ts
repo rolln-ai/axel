@@ -17,9 +17,9 @@ import type { SourceCache } from "./source-cache.js";
  *                                            trigger` command (and the
  *                                            dashboard's "send test event").
  *
- * The dashboard uses `put` on createSource / setSourceStatus / rotateSourceToken
- * so that sources created in the control plane immediately become resolvable
- * at the edge — without us having to give the worker a Postgres client.
+ * The dashboard uses `put` as a best-effort creation warm-up. Existing-source
+ * security changes use required invalidation and repopulate through the
+ * authenticated control-plane lookup.
  *
  * Auth: a single shared admin token (env `ADMIN_TOKEN`) compared in
  * constant time. This is a service-to-service interface, not a customer
@@ -39,7 +39,7 @@ export interface InvalidatePayload {
 export interface PutPayload {
   source_id?: unknown;
   source?: unknown;
-  /** Optional override TTL in seconds; defaults to 1 year (KV max). */
+  /** Optional shorter TTL in seconds; capped at 300 (5 min). */
   ttl_seconds?: unknown;
 }
 
@@ -97,14 +97,12 @@ export async function handleSourceCachePut(
     return adminJson({ error: "source_id_mismatch" }, 400);
   }
 
-  // KV TTL is set on write, never refreshed by reads. With no Postgres
-  // fallback in `lookupSourceUncached`, a TTL'd entry means the source 404s
-  // until something in the dashboard re-PUTs it (createSource /
-  // setSourceStatus / rotateSourceToken). 1 year is KV's max — anything
-  // shorter risks live sources going dark on quiet weekends.
+  // Keep positive entries short-lived so a missed invalidation cannot preserve
+  // stale credentials or privacy policy indefinitely. Expired entries safely
+  // repopulate through the authenticated control-plane lookup.
   const ttl = typeof body.ttl_seconds === "number" && body.ttl_seconds > 0
-    ? Math.floor(body.ttl_seconds)
-    : 31_536_000;
+    ? Math.min(300, Math.floor(body.ttl_seconds))
+    : 300;
   await ctx.cache.put(sourceId, { kind: "hit", source: body.source }, ttl);
   return new Response(null, { status: 204 });
 }
@@ -184,7 +182,13 @@ export async function handleSourceCacheInvalidate(
     return adminJson({ error: "missing_source_id" }, 400);
   }
 
-  await ctx.cache.invalidate(sourceId);
+  try {
+    await ctx.cache.invalidate(sourceId);
+  } catch {
+    // A 204 must mean the revocation really reached the cache. Returning 503
+    // lets required dashboard invalidations abort the control-plane mutation.
+    return adminJson({ error: "cache_invalidation_failed" }, 503);
+  }
   return new Response(null, { status: 204 });
 }
 
@@ -210,7 +214,11 @@ export interface TriggerEventPayload {
 }
 
 export interface TriggerEventDeps {
-  cache: { get(sourceId: string): Promise<{ kind: "hit"; source: Source } | { kind: "miss" } | undefined> } | null;
+  /**
+   * Uses the same cache plus authenticated control-plane fallback as public
+   * ingest. The self-host profile intentionally has no SOURCE_CACHE binding.
+   */
+  lookupSource: (sourceId: string) => Promise<Source | null>;
   adminToken: string | undefined;
   /** R2 bucket for raw payload storage. */
   rawPayloads: R2Bucket;
@@ -274,17 +282,13 @@ export async function handleTriggerEvent(
   const sourceId = typeof payload.source_id === "string" ? payload.source_id.trim() : "";
   if (!sourceId) return adminJson({ error: "missing_source_id" }, 400);
 
-  // Resolve source from cache only — the admin endpoint shouldn't have
-  // its own Postgres handle, and the dashboard always pushes a source
-  // to the cache as part of createSource. If the cache has nothing
-  // for this id, the operator hasn't created the source yet (or the
-  // KV TTL expired without a refresh).
-  if (!deps.cache) return adminJson({ error: "cache_not_configured" }, 503);
-  const cached = await deps.cache.get(sourceId);
-  if (!cached || cached.kind === "miss") {
-    return adminJson({ error: "unknown_source" }, 404);
-  }
-  const source = cached.source;
+  // Resolve exactly as the public /in/<id> path does. In Axel Cloud this uses
+  // the edge cache first; in the no-KV self-host profile it calls the
+  // authenticated delivery-service source endpoint. Upstream failures throw a
+  // SourceLookupUnavailableError and the worker-level handler returns a
+  // retryable 503 without writing R2 or Queue state.
+  const source = await deps.lookupSource(sourceId);
+  if (!source) return adminJson({ error: "unknown_source" }, 404);
   if (source.status !== "active") {
     return adminJson({ error: "source_disabled" }, 403);
   }

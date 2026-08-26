@@ -1,4 +1,5 @@
 import "server-only";
+import { sanitizeConnectorDiagnosticForStorage } from "@axel/shared";
 import { db, type Queryable } from "./db";
 import { sendEmail, type SendArgs, type SendResult } from "./email";
 import {
@@ -141,11 +142,14 @@ export function renderImmediateAlert(
   const tag = n.severity === "high" ? "🔴" : n.severity === "warning" ? "🟠" : "ℹ️";
   const link = n.link_path ? `${app}${n.link_path}` : null;
   const unsubscribe = `${app}/settings?tab=notifications`;
-  const bodyText = n.body_md ? n.body_md.replace(/\s+/g, " ").trim() : null;
+  const title = sanitizeConnectorDiagnosticForStorage(n.title, 200);
+  const bodyText = n.body_md
+    ? sanitizeConnectorDiagnosticForStorage(n.body_md.replace(/\s+/g, " ").trim(), 400)
+    : null;
 
-  const subject = `${tag} [${workspaceName}] ${n.title}`;
+  const subject = `${tag} [${workspaceName}] ${title}`;
   const text = [
-    `${workspaceName} — ${n.title}`,
+    `${workspaceName} — ${title}`,
     "",
     ...(bodyText ? [bodyText, ""] : []),
     ...(link ? [`Investigate: ${link}`, ""] : []),
@@ -154,10 +158,10 @@ export function renderImmediateAlert(
   ].join("\n");
 
   const html = renderBrandedEmail({
-    preheader: bodyText ? bodyText.slice(0, 140) : `${workspaceName} — ${n.title}`,
+    preheader: bodyText ? bodyText.slice(0, 140) : `${workspaceName} — ${title}`,
     contentHtml: [
       emailNote(`${tag} ${escapeHtml(workspaceName)}`),
-      emailHeading(n.title),
+      emailHeading(title),
       bodyText ? emailParagraph(escapeHtml(bodyText.slice(0, 400))) : "",
       link ? emailButton(link, "Investigate →") : "",
     ].join(""),

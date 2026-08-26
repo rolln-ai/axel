@@ -21,6 +21,9 @@ vi.mock("../lib/db", () => {
   const query = vi.fn();
   return {
     db: vi.fn(() => ({ query })),
+    withTransaction: vi.fn(async (fn: (client: { query: typeof query }) => Promise<unknown>) => (
+      fn({ query })
+    )),
     hasDatabaseUrl: () => true,
   };
 });
@@ -237,6 +240,7 @@ describe("POST /api/v1/sources", () => {
   it("201 create response matches schema", async () => {
     fakeAuth(["write"]);
     queueRows(
+      [{ status: "active" }], // workspace liveness lock
       [], // dup-name check → 0 rows
       [], // insert sources
       [], // insert audit_log
@@ -257,6 +261,38 @@ describe("POST /api/v1/sources", () => {
     if (!validate(body)) {
       throw new Error(ajv.errorsText(validate.errors));
     }
+
+    expect(db.withTransaction as Mock).toHaveBeenCalledOnce();
+    const sql = dbMock().mock.calls.map(([statement]) => String(statement));
+    expect(sql[0]).toMatch(/FROM workspaces[\s\S]*FOR UPDATE/i);
+    expect(sql.findIndex((statement) => /FROM sources[\s\S]*lower\(name\)/i.test(statement))).toBe(1);
+    expect(sql.findIndex((statement) => /INSERT INTO sources/i.test(statement))).toBe(2);
+    expect(sql.findIndex((statement) => /INSERT INTO audit_log/i.test(statement))).toBe(3);
+  });
+
+  it("409s without inserting when the locked workspace is no longer active", async () => {
+    fakeAuth(["write"]);
+    queueRows([{ status: "suspended" }]);
+
+    const res = await sourcesRoute.POST(
+      req("http://t/api/v1/sources", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer axl_x",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ name: "stripe-webhooks-prod" }),
+      }),
+    );
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: "Workspace is not active. Source was not created.",
+      code: "workspace_inactive",
+    });
+    expect(db.withTransaction as Mock).toHaveBeenCalledOnce();
+    expect(dbMock()).toHaveBeenCalledOnce();
+    expect(String(dbMock().mock.calls[0]?.[0])).toMatch(/FROM workspaces[\s\S]*FOR UPDATE/i);
   });
 
   it("400 invalid_name matches Error envelope", async () => {

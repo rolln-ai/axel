@@ -38,6 +38,7 @@ export async function lookupSourceFromDeliveryService(
   try {
     response = await fetchImpl(`${baseUrl.replace(/\/$/, "")}/internal/source`, {
       method: "POST",
+      redirect: "manual",
       headers: {
         "content-type": "application/json",
         "x-axel-shared-secret": sharedSecret,

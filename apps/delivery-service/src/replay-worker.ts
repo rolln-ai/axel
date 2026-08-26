@@ -41,7 +41,12 @@ import {
   type RunnerHandle,
 } from "@axel/router";
 import type { DeadLetterRecord, DeadLetterSink } from "@axel/router";
-import { deadLetterFingerprint, type QueueSpillWriter } from "@axel/shared";
+import {
+  cloudflareR2ObjectUrl,
+  deadLetterFingerprint,
+  sanitizeConnectorDiagnosticForStorage,
+  type QueueSpillWriter,
+} from "@axel/shared";
 import type { ObjectStoreLike } from "@axel/connectors";
 import { advanceReplayJobOnTerminal } from "./replay-job-completion.js";
 import { loadActiveRoutes, markRouteErrored } from "./route-store.js";
@@ -56,7 +61,11 @@ async function fetchWithTimeout(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REPLAY_FETCH_TIMEOUT_MS);
   try {
-    return await fetchImpl(input, { ...init, signal: controller.signal });
+    return await fetchImpl(input, {
+      ...init,
+      redirect: "manual",
+      signal: controller.signal,
+    });
   } finally {
     clearTimeout(timeout);
   }
@@ -188,7 +197,11 @@ export function createPgReplayStore(pool: Pool): ReplayStore {
             [jobId],
           );
         } catch (err) {
-          console.error("[replay-job] running stamp on claim failed", err);
+          console.error(
+            `[replay-job] running stamp on claim failed: ${sanitizeConnectorDiagnosticForStorage(
+              err instanceof Error ? err.message : err,
+            )}`,
+          );
         }
       }
       return result.rows;
@@ -224,6 +237,7 @@ export function createPgReplayStore(pool: Pool): ReplayStore {
       if (jobId) await advanceReplayJobOnTerminal(pool, jobId, "succeeded");
     },
     async markFailed(id, message): Promise<void> {
+      const safeMessage = sanitizeConnectorDiagnosticForStorage(message, 1000);
       const result = await pool.query<{ replay_job_id: string | null }>(
         `UPDATE replay_requests
             SET state = 'failed',
@@ -231,7 +245,7 @@ export function createPgReplayStore(pool: Pool): ReplayStore {
                 error_message = $2
           WHERE id = $1
         RETURNING replay_job_id`,
-        [id, message.slice(0, 1000)],
+        [id, safeMessage],
       );
       // The DISPATCH-failed terminal path: a replay that never enqueued a
       // delivery (R2 payload missing, route deleted, processQueueMessage threw)
@@ -271,12 +285,13 @@ export function createPgRouteStore(pool: Pool): RouteStore {
 export function createPgDeadLetterSink(pool: Pool): DeadLetterSink {
   return {
     async push(record: DeadLetterRecord): Promise<void> {
+      const safeMessage = sanitizeConnectorDiagnosticForStorage(record.message, 400);
       // Stamp the same fingerprint the inbox recomputes + bulk replay mutes
       // against. Hash the exact route_id/reason/message we INSERT.
       const fingerprint = await deadLetterFingerprint({
         route_id: record.route_id,
         reason: record.reason,
-        message: record.message,
+        message: safeMessage,
       });
       await pool.query(
         `INSERT INTO dead_letters
@@ -290,7 +305,7 @@ export function createPgDeadLetterSink(pool: Pool): DeadLetterSink {
           record.route_id,
           record.r2_key,
           record.reason,
-          record.message,
+          safeMessage,
           record.errored_at,
           fingerprint,
         ],
@@ -312,7 +327,11 @@ export function createR2HttpRawPayloadStore(deps: R2HttpDeps): RawPayloadStore {
   const fetchImpl = deps.fetchImpl ?? fetch;
   return {
     async get(key: string): Promise<ArrayBuffer | null> {
-      const url = `https://api.cloudflare.com/client/v4/accounts/${deps.cloudflareAccountId}/r2/buckets/${deps.rawPayloadBucket}/objects/${encodeURIComponent(key)}`;
+      const url = cloudflareR2ObjectUrl(
+        deps.cloudflareAccountId,
+        deps.rawPayloadBucket,
+        key,
+      );
       const res = await fetchR2WithRetry(fetchImpl, url, {
         headers: { authorization: `Bearer ${deps.cloudflareApiToken}` },
       });
@@ -335,7 +354,11 @@ export function createR2HttpSpillStore(deps: R2HttpDeps): QueueSpillWriter {
   const fetchImpl = deps.fetchImpl ?? fetch;
   return {
     async put(key: string, body: string): Promise<void> {
-      const url = `https://api.cloudflare.com/client/v4/accounts/${deps.cloudflareAccountId}/r2/buckets/${deps.rawPayloadBucket}/objects/${encodeURIComponent(key)}`;
+      const url = cloudflareR2ObjectUrl(
+        deps.cloudflareAccountId,
+        deps.rawPayloadBucket,
+        key,
+      );
       const res = await fetchR2WithRetry(fetchImpl, url, {
         method: "PUT",
         headers: {
@@ -365,7 +388,11 @@ export function createR2HttpObjectStore(deps: R2HttpDeps): ObjectStoreLike {
   const fetchImpl = deps.fetchImpl ?? fetch;
   return {
     async put(key: string, value: ArrayBuffer, metadata: Record<string, string>): Promise<void> {
-      const url = `https://api.cloudflare.com/client/v4/accounts/${deps.cloudflareAccountId}/r2/buckets/${deps.rawPayloadBucket}/objects/${encodeURIComponent(key)}`;
+      const url = cloudflareR2ObjectUrl(
+        deps.cloudflareAccountId,
+        deps.rawPayloadBucket,
+        key,
+      );
       const metaHeaders: Record<string, string> = {};
       for (const [k, v] of Object.entries(metadata)) metaHeaders[`x-amz-meta-${k}`] = v;
       const res = await fetchR2WithRetry(fetchImpl, url, {
@@ -394,8 +421,11 @@ export function createR2HttpSpillReader(deps: R2HttpDeps): {
   delete(key: string): Promise<void>;
 } {
   const fetchImpl = deps.fetchImpl ?? fetch;
-  const url = (key: string) =>
-    `https://api.cloudflare.com/client/v4/accounts/${deps.cloudflareAccountId}/r2/buckets/${deps.rawPayloadBucket}/objects/${encodeURIComponent(key)}`;
+  const url = (key: string) => cloudflareR2ObjectUrl(
+    deps.cloudflareAccountId,
+    deps.rawPayloadBucket,
+    key,
+  );
   return {
     async get(key: string): Promise<ArrayBuffer | null> {
       const res = await fetchR2WithRetry(fetchImpl, url(key), {

@@ -15,7 +15,7 @@ export type ChargebeeStreamName = "customers" | "subscriptions" | "invoices";
 export interface ChargebeeConfig {
   /** Chargebee site subdomain, e.g. "acme-test" for acme-test.chargebee.com. */
   site: string;
-  /** Optional region/domain override for EU or custom Chargebee domains. */
+  /** Legacy field. Empty or "chargebee.com" are the only accepted values. */
   domain?: string;
   streams?: PullStreamConfig[];
   page_size?: number;
@@ -112,15 +112,28 @@ function afterCursorValue(value: string | number): string | number {
 }
 
 function baseUrl(config: ChargebeeConfig): string {
-  const site = config.site.trim();
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9-]*$/.test(site)) {
-    throw new Error("Chargebee site must be a bare site name, not a URL");
+  return chargebeeApiBaseUrl(config.site, config.domain);
+}
+
+const CHARGEBEE_API_DOMAIN = "chargebee.com";
+const CHARGEBEE_SITE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/** Build the only API origin to which a Chargebee credential may be sent. */
+export function chargebeeApiBaseUrl(site: string, legacyDomain?: string): string {
+  const domain = legacyDomain?.trim().toLowerCase();
+  if (domain && domain !== CHARGEBEE_API_DOMAIN) {
+    throw new Error("Chargebee custom API domains are not supported");
   }
-  const domain = config.domain?.trim() || "chargebee.com";
-  if (!/^[a-zA-Z0-9.-]+$/.test(domain)) {
-    throw new Error("Chargebee domain must be a hostname");
+
+  const normalizedSite = site
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/\.chargebee\.com\/?$/, "");
+  if (!CHARGEBEE_SITE.test(normalizedSite)) {
+    throw new Error("Chargebee site must be a valid tenant name, for example acme-test");
   }
-  return `https://${site}.${domain}`;
+  return `https://${normalizedSite}.${CHARGEBEE_API_DOMAIN}`;
 }
 
 function clampPageSize(value: number | undefined): number {

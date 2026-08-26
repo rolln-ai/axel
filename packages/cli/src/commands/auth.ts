@@ -1,5 +1,5 @@
 import { createInterface } from "node:readline/promises";
-import { CliApiError, makeClient } from "../api-client.js";
+import { CliApiError, makeClient, normalizeApiBaseUrl } from "../api-client.js";
 import { clearConfig, configPath, readConfig, writeConfig } from "../config.js";
 
 const DEFAULT_API_BASE = "https://app.axelapp.ai";
@@ -11,7 +11,14 @@ interface MeResponse {
 }
 
 export async function authLogin(flags: Record<string, string>): Promise<void> {
-  const apiBase = flags["api-base"] ?? DEFAULT_API_BASE;
+  let apiBase: string;
+  try {
+    apiBase = normalizeApiBaseUrl(flags["api-base"] ?? DEFAULT_API_BASE);
+  } catch (err: unknown) {
+    console.error(`Invalid API base: ${err instanceof Error ? err.message : String(err)}`);
+    process.exitCode = 64;
+    return;
+  }
   const token = flags.token ?? (await promptForToken());
   if (!token) {
     console.error("No token provided. Run `axel auth login --token <pat>` or paste at the prompt.");

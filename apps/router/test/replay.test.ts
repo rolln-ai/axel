@@ -3,6 +3,7 @@ import {
   createInMemoryReplayStore,
   createInMemoryRouterDeps,
   processReplayBatch,
+  replayPayloadKeyBelongsToWorkspace,
   type ReplayRow,
 } from "../src/index.ts";
 import { replayEventId } from "../src/replay.ts";
@@ -105,16 +106,16 @@ describe("processReplayBatch", () => {
     const router = createInMemoryRouterDeps({
       now: () => NOW,
       payloads: {
-        "k0": "{}",
-        "k1": "{}",
-        "k2": "{}",
+        "events/ws_1/k0": "{}",
+        "events/ws_1/k1": "{}",
+        "events/ws_1/k2": "{}",
       },
       routes: [],
     });
     const replays = createInMemoryReplayStore([
-      row({ id: "a", r2_key: "k0" }),
-      row({ id: "b", r2_key: "k1" }),
-      row({ id: "c", r2_key: "k2" }),
+      row({ id: "a", r2_key: "events/ws_1/k0" }),
+      row({ id: "b", r2_key: "events/ws_1/k1" }),
+      row({ id: "c", r2_key: "events/ws_1/k2" }),
     ]);
 
     const summaries = await processReplayBatch({ router, replays, batchSize: 2 });
@@ -158,10 +159,12 @@ describe("processReplayBatch", () => {
   it("uses payload hints when supplied", async () => {
     const router = createInMemoryRouterDeps({
       now: () => NOW,
-      payloads: { "k0": "{}" },
+      payloads: { "events/ws_1/k0": "{}" },
       routes: [],
     });
-    const replays = createInMemoryReplayStore([row({ id: "h", r2_key: "k0" })]);
+    const replays = createInMemoryReplayStore([
+      row({ id: "h", r2_key: "events/ws_1/k0" }),
+    ]);
 
     let hintsResolved = false;
     const summaries = await processReplayBatch({
@@ -171,7 +174,7 @@ describe("processReplayBatch", () => {
         async resolveHints(eventId, key) {
           hintsResolved = true;
           expect(eventId).toBe("evt_1");
-          expect(key).toBe("k0");
+          expect(key).toBe("events/ws_1/k0");
           return { content_type: "application/x-www-form-urlencoded" };
         },
       },
@@ -179,5 +182,49 @@ describe("processReplayBatch", () => {
 
     expect(hintsResolved).toBe(true);
     expect(summaries).toHaveLength(1);
+  });
+
+  it("rejects a foreign-workspace raw key before hints or R2 are touched", async () => {
+    let hintsResolved = false;
+    const router = createInMemoryRouterDeps({
+      now: () => NOW,
+      payloads: { "events/ws_victim/2026-05-15/evt_secret": "customer secret" },
+      routes: [
+        {
+          route_id: "rt_attacker",
+          workspace_id: "ws_1",
+          source_id: "src_1",
+          status: "active",
+          destination_ids: ["dst_attacker"],
+        },
+      ],
+    });
+    const replays = createInMemoryReplayStore([
+      row({ id: "rpy_foreign", r2_key: "events/ws_victim/2026-05-15/evt_secret" }),
+    ]);
+
+    const summaries = await processReplayBatch({
+      router,
+      replays,
+      hints: {
+        async resolveHints() {
+          hintsResolved = true;
+          return null;
+        },
+      },
+    });
+
+    expect(summaries).toEqual([]);
+    expect(hintsResolved).toBe(false);
+    expect(router.deliveryRecords).toEqual([]);
+    expect(replays.failed.get("rpy_foreign")).toBe("replay_payload_workspace_mismatch");
+  });
+
+  it("matches workspace keys by a complete path segment", () => {
+    expect(replayPayloadKeyBelongsToWorkspace("events/ws_1/day/event", "ws_1")).toBe(true);
+    expect(replayPayloadKeyBelongsToWorkspace("pull/ws_1/source/stream/event.json", "ws_1")).toBe(true);
+    expect(replayPayloadKeyBelongsToWorkspace("events/ws_10/day/event", "ws_1")).toBe(false);
+    expect(replayPayloadKeyBelongsToWorkspace("events/ws_1/../ws_victim/event", "ws_1")).toBe(false);
+    expect(replayPayloadKeyBelongsToWorkspace("queue-spill/ws_1/event", "ws_1")).toBe(false);
   });
 });

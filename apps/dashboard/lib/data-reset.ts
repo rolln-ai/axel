@@ -1,13 +1,18 @@
 import "server-only";
 import { MongoClient } from "mongodb";
 import { Pool } from "pg";
-import { pgSslOption, validateDestinationUrl } from "@axel/shared";
+import {
+  cloudflareR2ObjectUrl,
+  pgSslOption,
+  resolveRawPayloadBucket,
+  validateDestinationUrl,
+} from "@axel/shared";
 import { db, type Queryable } from "./db";
 import { clickhouse, hasClickhouseUrl, type ClickhouseQueryable } from "./clickhouse";
 import { credentialAad, decryptCredentialBlob } from "./credentials";
 import type { DestinationType } from "./destination-defaults";
+import { createSafePgStream, safeDashboardFetch, safeLookup } from "./safe-egress";
 
-const R2_RAW_BUCKET = "axel-events-raw";
 const R2_DELETE_BATCH_SIZE = 10_000;
 // Cloudflare returns 429 (code 971, "consider throttling") under sustained
 // parallel deletes. Kept modest, with adaptive pacing between batches; teardown
@@ -399,6 +404,7 @@ async function deleteWorkspaceRawPayloadsViaIngest(
     try {
       const response = await fetchImpl(endpoint, {
         method: "POST",
+        redirect: "manual",
         signal: controller.signal,
         headers: {
           "content-type": "application/json",
@@ -462,6 +468,7 @@ export async function deleteR2Objects(
   const env = deps.env ?? process.env;
   const token = env.CLOUDFLARE_API_TOKEN;
   const accountId = env.CLOUDFLARE_ACCOUNT_ID;
+  const bucket = resolveRawPayloadBucket(env);
   if (!token || !accountId || keys.length === 0) {
     return { deleted: 0, skipped: !token || !accountId };
   }
@@ -473,6 +480,7 @@ export async function deleteR2Objects(
     const results = await Promise.all(batch.map((key) => deleteR2ObjectWithRetry(
       key,
       accountId,
+      bucket,
       token,
       fetchImpl,
     )));
@@ -491,10 +499,11 @@ export async function deleteR2Objects(
 async function deleteR2ObjectWithRetry(
   key: string,
   accountId: string,
+  bucket: string,
   token: string,
   fetchImpl: typeof fetch,
 ): Promise<{ deleted: number; throttled: boolean }> {
-  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/r2/buckets/${R2_RAW_BUCKET}/objects/${encodeURIComponent(key)}`;
+  const url = cloudflareR2ObjectUrl(accountId, bucket, key);
   let lastStatus = 0;
   let lastBody = "";
   let sawThrottle = false;
@@ -504,6 +513,7 @@ async function deleteR2ObjectWithRetry(
     try {
       const res = await fetchImpl(url, {
         method: "DELETE",
+        redirect: "manual",
         headers: { authorization: `Bearer ${token}` },
       });
       if (res.ok || res.status === 404) return { deleted: 1, throttled: sawThrottle };
@@ -695,6 +705,7 @@ async function flushPostgres(row: DestinationRowWithBlob): Promise<DestinationFl
 
   const pool = new Pool({
     connectionString: connStr,
+    stream: createSafePgStream,
     ssl: pgSslOption(connStr),
     connectionTimeoutMillis: DESTINATION_CONNECTION_TIMEOUT_MS,
     idleTimeoutMillis: 1_000,
@@ -721,6 +732,7 @@ async function flushMongo(row: DestinationRowWithBlob): Promise<DestinationFlush
     serverSelectionTimeoutMS: DESTINATION_CONNECTION_TIMEOUT_MS,
     connectTimeoutMS: DESTINATION_CONNECTION_TIMEOUT_MS,
     maxPoolSize: 1,
+    lookup: safeLookup,
   });
   try {
     await client.connect();
@@ -794,9 +806,10 @@ async function flushDatabricksVolume(row: DestinationRowWithBlob): Promise<Desti
       ...prefix.split("/").filter(Boolean),
     ].map((segment) => encodeURIComponent(segment)).join("/");
     const url = `https://${host}/api/2.0/fs/directories/${volumePath}/`;
-    const res = await fetch(url, {
+    const res = await safeDashboardFetch(url, {
       method: "DELETE",
       headers: { authorization: `Bearer ${token}` },
+      redirect: "manual",
     });
     if (!res.ok && res.status !== 404) {
       const text = await res.text().catch(() => "");
@@ -827,7 +840,7 @@ async function runDatabricksStatement(row: DestinationRowWithBlob, statement: st
   const hostReason = validateDestinationUrl(`https://${host}`);
   if (hostReason) throw new Error(`workspace_host blocked: ${hostReason}`);
 
-  const res = await fetch(`https://${host}/api/2.0/sql/statements/`, {
+  const res = await safeDashboardFetch(`https://${host}/api/2.0/sql/statements/`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -839,6 +852,7 @@ async function runDatabricksStatement(row: DestinationRowWithBlob, statement: st
       wait_timeout: "30s",
       on_wait_timeout: "CANCEL",
     }),
+    redirect: "manual",
   });
   const text = await res.text();
   if (!res.ok) throw new Error(`databricks_http_${res.status}: ${text.slice(0, 300)}`);

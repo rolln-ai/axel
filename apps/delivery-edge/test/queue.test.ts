@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { deadLetterFingerprint, type DestinationQueueMessage, type DestinationType } from "@axel/shared";
+import {
+  deadLetterFingerprint,
+  sanitizeConnectorDiagnosticForStorage,
+  type DestinationQueueMessage,
+  type DestinationType,
+} from "@axel/shared";
 
 const sqlState = vi.hoisted(() => ({
   destinations: [] as Array<{
@@ -11,10 +16,16 @@ const sqlState = vi.hoisted(() => ({
   }>,
   deadLetters: [] as unknown[],
   failDeadLetterInsert: false,
-  // Canned response for the delivery_idempotency claim query. Empty = a fresh
-  // claim (proceed to deliver); set [{state:"completed",inserted:false}] to
-  // simulate a prior completion (the dedup-skip path).
-  idempotency: [] as Array<{ state: string; inserted: boolean }>,
+  // Null auto-generates a successful fresh claim using the candidate token.
+  // Explicit rows exercise completed or competing-owner decisions.
+  idempotency: null as null | Array<{
+    state: string;
+    claimed: boolean;
+    claim_token: string | null;
+    claim_expires_at?: string;
+  }>,
+  idempotencyRenew: [{ updated: true }] as Array<{ updated: boolean }>,
+  idempotencySettle: [{ updated: true }] as Array<{ updated: boolean }>,
   // Canned response for the breaker failure-bump UPDATE...RETURNING. Set a row
   // with consecutive >= threshold to exercise the auto-trip path.
   breakerBump: [] as Array<{
@@ -29,6 +40,7 @@ const sqlState = vi.hoisted(() => ({
   // Every executed query, joined with "?" placeholders — lets tests assert the
   // breaker trip/reset UPDATEs fired.
   queries: [] as string[],
+  unsafeQueries: [] as Array<{ query: string; parameters: unknown[] }>,
   end: vi.fn(),
 }));
 
@@ -42,7 +54,6 @@ vi.mock("postgres", () => ({
       if (query.includes("FROM destinations")) return sqlState.destinations;
       if (query.includes("circuit_consecutive_failures = circuit_consecutive_failures + 1")) return sqlState.breakerBump;
       if (query.includes("circuit_state = 'half_open'") && query.includes("RETURNING id")) return sqlState.breakerFlip;
-      if (query.includes("delivery_idempotency")) return sqlState.idempotency;
       if (query.includes("INSERT INTO dead_letters")) {
         if (sqlState.failDeadLetterInsert) throw new Error("postgres unavailable");
         sqlState.deadLetters.push(values);
@@ -50,6 +61,23 @@ vi.mock("postgres", () => ({
       }
       return [];
     }) as unknown as SqlMock;
+    sql.unsafe = vi.fn(async (query: string, parameters: unknown[] = []) => {
+      sqlState.queries.push(query);
+      sqlState.unsafeQueries.push({ query, parameters });
+      if (query.includes("WITH claimed AS")) {
+        if (sqlState.idempotency) return sqlState.idempotency;
+        const token = parameters[6] as string;
+        return [{
+          state: "in_flight",
+          claimed: true,
+          claim_token: token,
+          claim_expires_at: new Date(Date.now() + 360_000).toISOString(),
+        }];
+      }
+      if (query.includes("SET state = $3::text")) return sqlState.idempotencySettle;
+      if (query.includes("expires_at = now() + ($3::bigint")) return sqlState.idempotencyRenew;
+      return [];
+    });
     sql.end = sqlState.end;
     sql.json = (value: unknown) => value;
     return sql;
@@ -66,10 +94,13 @@ describe("delivery-edge queue handler", () => {
   beforeEach(() => {
     sqlState.destinations = [];
     sqlState.deadLetters = [];
-    sqlState.idempotency = [];
+    sqlState.idempotency = null;
+    sqlState.idempotencyRenew = [{ updated: true }];
+    sqlState.idempotencySettle = [{ updated: true }];
     sqlState.breakerBump = [];
     sqlState.breakerFlip = [{ id: "dest-1" }];
     sqlState.queries = [];
+    sqlState.unsafeQueries = [];
     sqlState.failDeadLetterInsert = false;
     sqlState.end.mockReset();
     sqlState.end.mockResolvedValue(undefined);
@@ -134,6 +165,29 @@ describe("delivery-edge queue handler", () => {
     expect(ctx.waitUntil).toHaveBeenCalled();
   });
 
+  it("binds credential lookup to the destination and workspace", async () => {
+    sqlState.destinations = [{
+      ...destination("http", { url: "https://receiver.example" }),
+      credentials_ref: "cred-other-workspace",
+    }];
+    const message = queueMessage();
+
+    await worker.queue(
+      batch("axel-delivery", [message]),
+      env({ CREDENTIALS_MASTER_KEY: "00".repeat(32) }),
+      executionContext(),
+    );
+
+    const credentialQuery = sqlState.queries.find((query) =>
+      query.includes("FROM destination_credentials")
+    );
+    expect(credentialQuery).toContain("WHERE id = ?");
+    expect(credentialQuery).toContain("AND workspace_id = ?");
+    expect(credentialQuery).toContain("AND destination_id = ?");
+    expect(message.retry).toHaveBeenCalledOnce();
+    expect(message.ack).not.toHaveBeenCalled();
+  });
+
   it("retries transient HTTP delivery failures", async () => {
     sqlState.destinations = [destination("http", { url: "https://receiver.example" })];
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("", { status: 503 }));
@@ -171,7 +225,7 @@ describe("delivery-edge queue handler", () => {
     // Theme B (b1): CF redelivery of an already-completed delivery must NOT
     // re-POST. The claim query reports a prior completion.
     sqlState.destinations = [destination("http", { url: "https://receiver.example" })];
-    sqlState.idempotency = [{ state: "completed", inserted: false }];
+    sqlState.idempotency = [{ state: "completed", claimed: false, claim_token: "att-old" }];
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
     const message = queueMessage();
 
@@ -180,6 +234,127 @@ describe("delivery-edge queue handler", () => {
     expect(fetchSpy).not.toHaveBeenCalled(); // no second POST to the receiver
     expect(message.ack).toHaveBeenCalledOnce();
     expect(message.retry).not.toHaveBeenCalled();
+  });
+
+  it("retries without sending when a native worker owns a live claim", async () => {
+    sqlState.destinations = [destination("http", { url: "https://receiver.example" })];
+    sqlState.idempotency = [{
+      state: "in_flight",
+      claimed: false,
+      claim_token: "claim_native-owner",
+      claim_expires_at: new Date(Date.now() + 360_000).toISOString(),
+    }];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+    const message = queueMessage();
+
+    await worker.queue(batch("axel-delivery", [message]), env(), executionContext());
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(message.ack).not.toHaveBeenCalled();
+    expect(message.retry).toHaveBeenCalledWith(expect.objectContaining({
+      delaySeconds: expect.any(Number),
+    }));
+    expect(sqlState.unsafeQueries.some(({ query }) => query.includes("SET state = $3::text"))).toBe(false);
+  });
+
+  it("uses the same opaque token to claim and settle, with a state-and-owner fence", async () => {
+    sqlState.destinations = [destination("http", { url: "https://receiver.example" })];
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+    const message = queueMessage();
+
+    await worker.queue(batch("axel-delivery", [message]), env(), executionContext());
+
+    const claimQuery = sqlState.unsafeQueries.find(({ query }) => query.includes("WITH claimed AS"));
+    const settleQuery = sqlState.unsafeQueries.find(({ query }) => query.includes("SET state = $3::text"));
+    const token = claimQuery?.parameters[6];
+    expect(token).toEqual(expect.stringMatching(/^claim_[0-9a-f-]+$/));
+    expect(settleQuery?.parameters).toEqual([
+      "ws-1:evt-1:rt-1:dest-1",
+      token,
+      "completed",
+      "evt-1-dest-1-1",
+    ]);
+    expect(settleQuery?.query).toContain("AND state = 'in_flight'");
+    expect(settleQuery?.query).toContain("AND attempt_id = $2");
+    expect(claimQuery?.query).toContain("delivery_idempotency.expires_at <= now()");
+  });
+
+  it("retries the durable message when fenced settlement reports lost ownership", async () => {
+    sqlState.destinations = [destination("http", { url: "https://receiver.example" })];
+    sqlState.idempotencySettle = [];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+    const message = queueMessage();
+
+    await worker.queue(batch("axel-delivery", [message]), env(), executionContext());
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(message.ack).not.toHaveBeenCalled();
+    expect(message.retry).toHaveBeenCalledOnce();
+  });
+
+  it("renews ownership while an edge object-store write remains active", async () => {
+    vi.useFakeTimers();
+    try {
+      sqlState.destinations = [destination("r2", { bucket: "events" })];
+      let finishPut: (() => void) | undefined;
+      const put = vi.fn(() => new Promise<void>((resolve) => {
+        finishPut = resolve;
+      }));
+      const message = queueMessage();
+      const processing = worker.queue(
+        batch("axel-delivery", [message]),
+        env({ EVENTS_RAW: { put }, IDEMPOTENCY_CLAIM_LEASE_MS: "60000" }),
+        executionContext(),
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(put).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(20_000);
+
+      const renewQuery = sqlState.unsafeQueries.find(({ query }) =>
+        query.includes("expires_at = now() + ($3::bigint")
+      );
+      const claimQuery = sqlState.unsafeQueries.find(({ query }) => query.includes("WITH claimed AS"));
+      expect(renewQuery?.parameters).toEqual([
+        "ws-1:evt-1:rt-1:dest-1",
+        claimQuery?.parameters[6],
+        60_000,
+      ]);
+
+      finishPut?.();
+      await processing;
+      expect(message.ack).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not settle or ACK after edge renewal loses the owner token", async () => {
+    vi.useFakeTimers();
+    try {
+      sqlState.destinations = [destination("r2", { bucket: "events" })];
+      sqlState.idempotencyRenew = [];
+      let finishPut: (() => void) | undefined;
+      const put = vi.fn(() => new Promise<void>((resolve) => {
+        finishPut = resolve;
+      }));
+      const message = queueMessage();
+      const processing = worker.queue(
+        batch("axel-delivery", [message]),
+        env({ EVENTS_RAW: { put }, IDEMPOTENCY_CLAIM_LEASE_MS: "60000" }),
+        executionContext(),
+      );
+
+      await vi.advanceTimersByTimeAsync(20_000);
+      finishPut?.();
+      await processing;
+
+      expect(message.ack).not.toHaveBeenCalled();
+      expect(message.retry).toHaveBeenCalledOnce();
+      expect(sqlState.unsafeQueries.some(({ query }) => query.includes("SET state = $3::text"))).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("auto-trips the breaker open when a failure crosses the threshold (b3)", async () => {
@@ -342,6 +517,7 @@ describe("delivery-edge queue handler", () => {
 
     expect(fetchMock).toHaveBeenCalledWith("https://delivery.example/deliver", expect.objectContaining({
       method: "POST",
+      redirect: "manual",
       headers: {
         "content-type": "application/json",
         "x-axel-shared-secret": "shared",
@@ -508,6 +684,8 @@ describe("delivery-edge queue handler", () => {
   });
 
   it("persists destination_id when the router supplies it", async () => {
+    const diagnostic = 'delivery_service_503: {"ok":false,"error":"delivery_overloaded"}';
+    const storedDiagnostic = sanitizeConnectorDiagnosticForStorage(diagnostic, 400);
     const message = queueMessage({
       workspace_id: "ws-1",
       event_id: "evt-1",
@@ -516,7 +694,7 @@ describe("delivery-edge queue handler", () => {
       destination_id: "dest-1",
       r2_key: "events/ws-1/evt-1.json",
       reason: "router_processing_failed",
-      message: 'delivery_service_503: {"ok":false,"error":"delivery_overloaded"}',
+      message: diagnostic,
       errored_at: "2026-05-02T12:00:00.000Z",
     });
 
@@ -526,7 +704,7 @@ describe("delivery-edge queue handler", () => {
     const fp = await deadLetterFingerprint({
       route_id: "rt-1",
       reason: "router_processing_failed",
-      message: 'delivery_service_503: {"ok":false,"error":"delivery_overloaded"}',
+      message: storedDiagnostic,
     });
     expect(sqlState.deadLetters[0]).toEqual([
       "ws-1",
@@ -536,7 +714,7 @@ describe("delivery-edge queue handler", () => {
       "dest-1",
       "events/ws-1/evt-1.json",
       "router_processing_failed",
-      'delivery_service_503: {"ok":false,"error":"delivery_overloaded"}',
+      storedDiagnostic,
       "2026-05-02T12:00:00.000Z",
       fp,
     ]);
@@ -568,7 +746,35 @@ describe("delivery-edge queue handler", () => {
     const storedMessage = (sqlState.deadLetters[0] as unknown[])[7] as string;
     expect(storedMessage).not.toContain("alice@example.com");
     expect(storedMessage).toContain("=([REDACTED])");
-    expect(storedMessage).toContain("u_email"); // constraint name kept for debugging
+    expect(storedMessage).not.toContain("u_email");
+  });
+
+  it("sanitizes explicit DLQ messages before storing or fingerprinting them", async () => {
+    const raw = 'router failed: payload={"note":"private webhook text"}; password=hunter2';
+    const message = queueMessage({
+      workspace_id: "ws-1",
+      event_id: "evt-1",
+      source_id: "src-1",
+      route_id: "rt-1",
+      r2_key: "events/ws-1/evt-1.json",
+      reason: "router_processing_failed",
+      message: raw,
+      errored_at: "2026-05-02T12:00:00.000Z",
+    });
+
+    await worker.queue(batch("axel-dead-letter", [message]), env(), executionContext());
+
+    const storedMessage = (sqlState.deadLetters[0] as unknown[])[7] as string;
+    expect(storedMessage).not.toContain("private webhook text");
+    expect(storedMessage).not.toContain("hunter2");
+    expect(storedMessage).toContain("payload=[REDACTED]");
+    expect((sqlState.deadLetters[0] as unknown[])[9]).toBe(
+      await deadLetterFingerprint({
+        route_id: "rt-1",
+        reason: "router_processing_failed",
+        message: storedMessage,
+      }),
+    );
   });
 
   it("deletes the queue-spill object when an auto-DLQ'd message carried one", async () => {
@@ -656,6 +862,7 @@ describe("delivery-edge queue handler", () => {
 
 interface SqlMock {
   (strings: TemplateStringsArray, ...values: unknown[]): Promise<unknown[]>;
+  unsafe: (query: string, parameters?: unknown[]) => Promise<unknown[]>;
   end: (options?: unknown) => Promise<void>;
   json: (value: unknown) => unknown;
 }

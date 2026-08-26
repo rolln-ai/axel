@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Destination } from "@axel/shared";
 
 // The connector does a real DNS resolve for its SSRF guard — pin it to a public
@@ -7,7 +7,10 @@ vi.mock("node:dns/promises", () => ({
   lookup: vi.fn(async () => [{ address: "93.184.216.34", family: 4 }]),
 }));
 
-import { createDatabricksSqlConnector } from "../src/connectors/databricks.ts";
+import {
+  createDatabricksSqlConnector,
+  type DatabricksFetch,
+} from "../src/connectors/databricks.ts";
 
 const destination = (): Destination => ({
   destination_id: "dest_dbx_1",
@@ -28,6 +31,8 @@ const encode = (obj: unknown) => new TextEncoder().encode(JSON.stringify(obj)).b
 interface FakeRes {
   status: number;
   text: () => Promise<string>;
+  headers?: { get(name: string): string | null };
+  body?: ReadableStream<Uint8Array> | null;
 }
 const stmtRes = (
   state: string,
@@ -59,7 +64,7 @@ const fetchMock = vi.fn(async (url: string, init: { method?: string; body?: stri
 const deliver = (
   event: ArrayBuffer,
   ctx: Parameters<ReturnType<typeof createDatabricksSqlConnector>["deliver"]>[2],
-) => createDatabricksSqlConnector().deliver(event, destination(), ctx);
+) => createDatabricksSqlConnector(fetchMock as DatabricksFetch).deliver(event, destination(), ctx);
 
 const inserts = () => calls.filter((c) => c.statement.startsWith("INSERT"));
 
@@ -68,9 +73,7 @@ describe("databricks_sql connector", () => {
     calls.length = 0;
     responder = () => stmtRes("SUCCEEDED");
     fetchMock.mockClear();
-    vi.stubGlobal("fetch", fetchMock);
   });
-  afterEach(() => vi.unstubAllGlobals());
 
   it("json_column (default) inserts the JSON body as one STRING parameter", async () => {
     const out = await deliver(encode({ a: 1 }), { eventId: "e1", binding: { table: "events" } });
@@ -78,6 +81,46 @@ describe("databricks_sql connector", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.statement).toBe("INSERT INTO `main`.`webhooks`.`events` (`payload`) VALUES (:p)");
     expect(calls[0]!.parameters).toEqual([{ name: "p", value: JSON.stringify({ a: 1 }), type: "STRING" }]);
+  });
+
+  it("caps successful response bodies before buffering them", async () => {
+    const text = vi.fn(async () => {
+      throw new Error("streaming response must not fall back to text()");
+    });
+    responder = () => ({
+      status: 200,
+      text,
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(600_000));
+          controller.enqueue(new Uint8Array(600_000));
+          controller.close();
+        },
+      }),
+    });
+
+    const out = await deliver(encode({ a: 1 }), {
+      eventId: "e-response-cap",
+      binding: { table: "events" },
+    });
+
+    expect(out.status).toBe("dead");
+    expect(out.response).toEqual({ error: "databricks_response_too_large" });
+    expect(text).not.toHaveBeenCalled();
+  });
+
+  it("does not retain non-success response bodies that can echo event data", async () => {
+    const text = vi.fn(async () => "customer payload echoed here");
+    responder = () => ({ status: 400, text });
+
+    const out = await deliver(encode({ secret: "customer payload" }), {
+      eventId: "e-response-privacy",
+      binding: { table: "events" },
+    });
+
+    expect(out.status).toBe("dead");
+    expect(out.response).toEqual({ status: 400 });
+    expect(text).not.toHaveBeenCalled();
   });
 
   it("typed_columns sends native typed parameters and flattens nested objects", async () => {

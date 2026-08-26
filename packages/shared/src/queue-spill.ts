@@ -76,12 +76,11 @@ export class QueueSpillBodyCorruptError extends Error {
   readonly spillKey: string;
   readonly byteLength: number;
 
-  constructor(spillKey: string, byteLength: number, cause: unknown) {
+  constructor(spillKey: string, byteLength: number) {
     super(`spill_r2_body_corrupt: ${spillKey} (${byteLength} bytes)`);
     this.name = "QueueSpillBodyCorruptError";
     this.spillKey = spillKey;
     this.byteLength = byteLength;
-    this.cause = cause;
   }
 }
 
@@ -178,8 +177,10 @@ export async function hydrateIfSpilled(
   let parsed: QueueSpillBody;
   try {
     parsed = JSON.parse(new TextDecoder().decode(buf)) as QueueSpillBody;
-  } catch (err) {
-    throw new QueueSpillBodyCorruptError(message.spill_r2_key, buf.byteLength, err);
+  } catch {
+    // JSON.parse may quote the malformed input in its SyntaxError. Spill bodies
+    // contain webhook payloads, so keep only non-sensitive key/size context.
+    throw new QueueSpillBodyCorruptError(message.spill_r2_key, buf.byteLength);
   }
   return {
     ...message,

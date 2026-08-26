@@ -19,6 +19,36 @@ describe("data reset", () => {
     vi.restoreAllMocks();
   });
 
+  it("deletes through the configured bucket with literal R2 key slashes", async () => {
+    const { deleteR2Objects } = await import("../lib/data-reset");
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
+
+    await expect(deleteR2Objects(["events/ws one/evt.json"], {
+      fetchImpl,
+      env: {
+        CLOUDFLARE_ACCOUNT_ID: "acct",
+        CLOUDFLARE_API_TOKEN: "token",
+        RAW_PAYLOAD_BUCKET: "selfhost-raw",
+      },
+    })).resolves.toEqual({ deleted: 1, skipped: false });
+
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe(
+      "https://api.cloudflare.com/client/v4/accounts/acct/r2/buckets/selfhost-raw/objects/events/ws%20one/evt.json",
+    );
+  });
+
+  it("refuses the hosted bucket default in self-hosted mode", async () => {
+    const { deleteR2Objects } = await import("../lib/data-reset");
+
+    await expect(deleteR2Objects(["events/one.json"], {
+      env: {
+        AXEL_DEPLOYMENT_MODE: "self-hosted",
+        CLOUDFLARE_ACCOUNT_ID: "acct",
+        CLOUDFLARE_API_TOKEN: "token",
+      },
+    })).rejects.toThrow(/RAW_PAYLOAD_BUCKET is required/);
+  });
+
   it("deletes raw payloads through bounded native R2 batches before wiping databases", async () => {
     process.env.CLICKHOUSE_URL = "https://clickhouse.example";
     const { wipeWorkspaceData } = await import("../lib/data-reset");
@@ -52,6 +82,7 @@ describe("data reset", () => {
     expect(String(fetchImpl.mock.calls[0]?.[0])).toBe(
       "https://ingest.example/admin/workspace-payloads/delete-batch",
     );
+    expect(fetchImpl.mock.calls[0]?.[1]?.redirect).toBe("manual");
     expect(calls.some((sql) => sql.includes("SELECT DISTINCT r2_key"))).toBe(false);
   });
 

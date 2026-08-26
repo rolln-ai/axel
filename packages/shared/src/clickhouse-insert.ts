@@ -68,14 +68,19 @@ export async function insertRows(
   try {
     const res = await fetch(url, {
       method: "POST",
+      redirect: "manual",
       headers,
       body: rows.map((row) => JSON.stringify(row)).join("\n"),
     });
     if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      console.error(`[clickhouse] ${table} insert ${res.status}: ${body.slice(0, 200)}`);
+      // ClickHouse parse errors can echo the submitted JSON row. That row can
+      // include webhook metadata or a destination response excerpt, so status
+      // is the only safe process-log diagnostic.
+      console.error(`[clickhouse] ${table} insert ${res.status}`);
     }
-  } catch (err) {
-    console.error(`[clickhouse] ${table} insert failed:`, err);
+  } catch {
+    // Fetch implementations may attach the request to their exception. Never
+    // send that object to stdout/stderr because it contains the row body.
+    console.error(`[clickhouse] ${table} insert transport failed`);
   }
 }

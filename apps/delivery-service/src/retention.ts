@@ -157,10 +157,11 @@ export async function enforceRetention(
   // Expiry-based cleanups. These rows carry an absolute expires_at, so
   // there is no per-workspace retention join. Previously these lived in
   // apps/router's runCleanupPass, which never deployed (since removed) — so in production
-  // they grew unbounded. delivery_idempotency is the critical one: it
-  // inserts on EVERY delivery with expires_at = now()+14d, and unpruned it
-  // reaches tens of millions of rows and degrades the ON CONFLICT claim that
-  // runs on the delivery hot path. This is why the loop drains it per tick.
+  // they grew unbounded. delivery_idempotency is the critical one: an active
+  // row carries its renewable claim deadline, then terminal settlement moves
+  // expires_at to now()+14d. Without pruning, terminal rows reach tens of
+  // millions and degrade the ON CONFLICT claim on the delivery hot path. This
+  // is why the loop drains the table per tick.
   summary.delivery_idempotency_deleted = await runCategory(() =>
     deleteExpired(pool, {
       table: "delivery_idempotency",

@@ -24,9 +24,40 @@ export interface RetryQueueSink {
 }
 
 export interface IdempotencyStore {
-  begin(key: string): Promise<"started" | "duplicate" | "completed">;
-  complete(key: string, attempt: DeliveryAttempt): Promise<void> | void;
-  fail(key: string, attempt: DeliveryAttempt): Promise<void> | void;
+  /** Renew active ownership this often while a connector is still working. */
+  renewIntervalMs: number;
+  begin(key: string): Promise<IdempotencyBeginResult>;
+  renew(key: string, token: string): Promise<boolean> | boolean;
+  complete(key: string, token: string, attempt: DeliveryAttempt): Promise<boolean> | boolean;
+  fail(key: string, token: string, attempt: DeliveryAttempt): Promise<boolean> | boolean;
+}
+
+export type IdempotencyBeginResult =
+  | { status: "started"; token: string }
+  | { status: "duplicate" }
+  | { status: "completed" };
+
+/**
+ * A second worker encountered a live claim for the same delivery. Callers
+ * must retry the durable message later; treating this as success can ACK the
+ * only remaining copy if the original process dies before completing.
+ */
+export class IdempotencyClaimInFlightError extends Error {
+  constructor() {
+    super("delivery idempotency claim is already in flight");
+    this.name = "IdempotencyClaimInFlightError";
+  }
+}
+
+/**
+ * This worker no longer owns the claim it started with. The durable message
+ * must be retried; a stale worker must not terminalize the replacement claim.
+ */
+export class IdempotencyClaimLostError extends Error {
+  constructor(cause?: unknown) {
+    super("delivery idempotency claim ownership was lost", { cause });
+    this.name = "IdempotencyClaimLostError";
+  }
 }
 
 /**
@@ -73,22 +104,32 @@ export async function processDeliveryMessage(
   message: DestinationQueueMessage,
 ): Promise<DeliveryAttempt> {
   const claim = await deps.idempotency?.begin(message.idempotency_key);
-  if (claim === "completed") {
+  if (claim?.status === "completed") {
     const attempt = dedupedAttempt(message, "already_delivered");
     await deps.attempts.recordAttempt(attempt);
     return attempt;
   }
-  if (claim === "duplicate") {
-    // A copy of this exact (workspace, event, route, destination) is already
-    // in-flight. That in-flight attempt is the canonical delivery — it will
-    // complete or retry on its own — so suppressing this duplicate is correct
-    // dedup, NOT a failure. Record it as a benign deduped success (same as the
-    // `completed` branch above) rather than a dead-letter, so it never clutters
-    // the failure inbox.
-    const attempt = dedupedAttempt(message, "duplicate_in_flight");
-    await deps.attempts.recordAttempt(attempt);
-    return attempt;
+  if (claim?.status === "duplicate") {
+    throw new IdempotencyClaimInFlightError();
   }
+
+  const ownership =
+    claim?.status === "started" && deps.idempotency
+      ? startClaimRenewal(deps.idempotency, message.idempotency_key, claim.token)
+      : null;
+
+  try {
+    return await processClaimedDelivery(deps, message, ownership);
+  } finally {
+    await ownership?.stop();
+  }
+}
+
+async function processClaimedDelivery(
+  deps: DeliveryWorkerDeps,
+  message: DestinationQueueMessage,
+  ownership: ClaimRenewal | null,
+): Promise<DeliveryAttempt> {
 
   const destination = await deps.destinations.getDestination(
     message.workspace_id,
@@ -98,7 +139,7 @@ export async function processDeliveryMessage(
   if (!destination) {
     const attempt = terminalAttempt(message, "destination_not_found");
     await deps.attempts.recordAttempt(attempt);
-    await deps.idempotency?.fail(message.idempotency_key, attempt);
+    await settleClaim(deps.idempotency, ownership, "fail", message.idempotency_key, attempt);
     return attempt;
   }
 
@@ -106,7 +147,7 @@ export async function processDeliveryMessage(
   if (!connector) {
     const attempt = terminalAttempt(message, `connector_not_registered:${destination.type}`);
     await deps.attempts.recordAttempt(attempt);
-    await deps.idempotency?.fail(message.idempotency_key, attempt);
+    await settleClaim(deps.idempotency, ownership, "fail", message.idempotency_key, attempt);
     return attempt;
   }
 
@@ -131,19 +172,19 @@ export async function processDeliveryMessage(
           final_attempt_no: message.attempt_no,
         });
         await deps.attempts.recordAttempt(attempt);
-        await deps.idempotency?.fail(message.idempotency_key, attempt);
+        await settleClaim(deps.idempotency, ownership, "fail", message.idempotency_key, attempt);
         return attempt;
       }
       const attempt = breakerSkipAttempt(message, "retry", decision.reason);
       await deps.attempts.recordAttempt(attempt);
-      await deps.idempotency?.fail(message.idempotency_key, attempt);
+      await settleClaim(deps.idempotency, ownership, "fail", message.idempotency_key, attempt);
       await scheduleRetryIfAllowed(deps, message, attempt, decision.retry_after_ms);
       return attempt;
     }
     if (decision.decision === "skip_dead") {
       const attempt = breakerSkipAttempt(message, "dead", decision.reason);
       await deps.attempts.recordAttempt(attempt);
-      await deps.idempotency?.fail(message.idempotency_key, attempt);
+      await settleClaim(deps.idempotency, ownership, "fail", message.idempotency_key, attempt);
       return attempt;
     }
   }
@@ -182,12 +223,71 @@ export async function processDeliveryMessage(
     });
   }
   if (attempt.status === "success") {
-    await deps.idempotency?.complete(message.idempotency_key, attempt);
+    await settleClaim(deps.idempotency, ownership, "complete", message.idempotency_key, attempt);
   } else {
-    await deps.idempotency?.fail(message.idempotency_key, attempt);
+    await settleClaim(deps.idempotency, ownership, "fail", message.idempotency_key, attempt);
     await scheduleRetryIfAllowed(deps, message, attempt);
   }
   return attempt;
+}
+
+interface ClaimRenewal {
+  token: string;
+  stop(): Promise<void>;
+  assertHealthy(): void;
+}
+
+function startClaimRenewal(
+  store: IdempotencyStore,
+  key: string,
+  token: string,
+): ClaimRenewal {
+  const intervalMs = positiveFiniteInteger(store.renewIntervalMs, "idempotency renewIntervalMs");
+  let stopped = false;
+  let pending: Promise<void> | null = null;
+  let failure: unknown = null;
+  const timer = setInterval(() => {
+    if (stopped || pending || failure) return;
+    pending = Promise.resolve()
+      .then(() => store.renew(key, token))
+      .then((renewed) => {
+        if (!renewed) failure = new IdempotencyClaimLostError();
+      })
+      .catch((error: unknown) => {
+        failure = new IdempotencyClaimLostError(error);
+      })
+      .finally(() => {
+        pending = null;
+      });
+  }, intervalMs);
+
+  return {
+    token,
+    async stop() {
+      if (!stopped) {
+        stopped = true;
+        clearInterval(timer);
+      }
+      await pending;
+    },
+    assertHealthy() {
+      if (failure) throw failure;
+    },
+  };
+}
+
+async function settleClaim(
+  store: IdempotencyStore | undefined,
+  ownership: ClaimRenewal | null,
+  outcome: "complete" | "fail",
+  key: string,
+  attempt: DeliveryAttempt,
+): Promise<void> {
+  if (!store || !ownership) return;
+  await ownership.stop();
+  ownership.assertHealthy();
+  const updated = await store[outcome](key, ownership.token, attempt);
+  if (!updated) throw new IdempotencyClaimLostError();
 }
 
 function breakerSkipAttempt(
@@ -246,22 +346,43 @@ export function createInMemoryIdempotencyStore(): IdempotencyStore & {
   states: Map<string, "in_flight" | "completed" | "failed">;
 } {
   const states = new Map<string, "in_flight" | "completed" | "failed">();
+  const owners = new Map<string, string>();
+  let nextClaim = 0;
   return {
     states,
+    renewIntervalMs: 60_000,
     async begin(key) {
       const state = states.get(key);
-      if (state === "completed") return "completed";
-      if (state === "in_flight") return "duplicate";
+      if (state === "completed") return { status: "completed" };
+      if (state === "in_flight") return { status: "duplicate" };
+      const token = `memory-claim-${++nextClaim}`;
       states.set(key, "in_flight");
-      return "started";
+      owners.set(key, token);
+      return { status: "started", token };
     },
-    async complete(key) {
+    async renew(key, token) {
+      return states.get(key) === "in_flight" && owners.get(key) === token;
+    },
+    async complete(key, token) {
+      if (states.get(key) !== "in_flight" || owners.get(key) !== token) return false;
       states.set(key, "completed");
+      owners.delete(key);
+      return true;
     },
-    async fail(key) {
+    async fail(key, token) {
+      if (states.get(key) !== "in_flight" || owners.get(key) !== token) return false;
       states.set(key, "failed");
+      owners.delete(key);
+      return true;
     },
   };
+}
+
+function positiveFiniteInteger(value: number, name: string): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new RangeError(`${name} must be a positive finite number`);
+  }
+  return Math.floor(value);
 }
 
 function encodePayload(payload: unknown): ArrayBuffer {

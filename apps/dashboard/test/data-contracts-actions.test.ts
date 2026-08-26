@@ -9,6 +9,7 @@ import {
 } from "../lib/data-contracts/actions";
 import {
   FixturesFailedError,
+  InvalidApprovalReplayTargetsError,
   type ApprovalInput,
   type ApprovalResult,
 } from "../lib/data-contracts/explain";
@@ -421,6 +422,18 @@ describe("approvePatchImpl", () => {
     });
     expect(result.error).toMatch(/1\/3 fixtures failed/);
     expect(result.fixture_failures).toEqual({ passed: 2, failed: 1, total: 3 });
+  });
+
+  it("maps an invalid replay target to a refresh-safe error", async () => {
+    const result = await approvePatchImpl(ownerSession(), baseInput(), {
+      approvePatch: async () => {
+        throw new InvalidApprovalReplayTargetsError();
+      },
+    });
+
+    expect(result.error).toMatch(/unavailable or do not belong/i);
+    expect(result.error).toMatch(/refresh and try again/i);
+    expect(result.error).not.toContain("k1");
   });
 
   it("wraps generic approval errors with context, doesn't leak stack", async () => {

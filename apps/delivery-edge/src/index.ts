@@ -13,9 +13,6 @@
  *     forwarding fallback for stale or misrouted messages.
  *
  * What this DOESN'T have (yet, by design):
- *   - Postgres-backed delivery_idempotency claims. The Worker today writes
- *     attempts straight through; replays via the dashboard re-run with a
- *     suffixed event_id so they don't collide.
  *   - Sandbox eval (still owned by future Node router).
  */
 
@@ -23,9 +20,15 @@ import postgres from "postgres";
 import { AwsClient } from "aws4fetch";
 import {
   controlPlaneDbSslVerify,
+  DEFAULT_DELIVERY_CLAIM_LEASE_MS,
+  DELIVERY_CLAIM_RENEW_SQL,
+  DELIVERY_CLAIM_SETTLE_SQL,
+  DELIVERY_CLAIM_SQL,
+  decideDeliveryClaim,
   deleteSpillIfPresent,
   hydrateIfSpilled,
-  scrubConnectorError,
+  sanitizeConnectorDiagnosticForStorage,
+  sanitizeConnectorResponseForStorage,
   type DestinationQueueMessage,
   buildHttpAuthConfig,
   credentialAadString,
@@ -42,6 +45,7 @@ import {
   evaluateBreaker,
   type CircuitDecision,
   mapInfoSchemaType,
+  MAX_DELIVERY_CLAIM_LEASE_MS,
   planColumnRepair,
   planDottedColumnInsert,
   type PgLeafType,
@@ -79,6 +83,8 @@ export interface Env extends ClickhouseLogEnv, SentryEnv {
   // Opt-in TLS cert verification for the control-plane DATABASE_URL connection
   // (set to "true" once Render's CA chain is validated). Default: encrypt-only.
   CONTROL_PLANE_DB_SSL_VERIFY?: string;
+  /** Keep aligned with the native service. The owner persists its deadline. */
+  IDEMPOTENCY_CLAIM_LEASE_MS?: string;
   // Same direct-delivery endpoint used by router-edge for native-runtime
   // destinations. This lets delivery-edge recover if an older router deploy,
   // stale queue message, or missing route type map sends a native destination
@@ -250,7 +256,9 @@ export default {
               // ack; a failed insert is logged but still acks (retrying a
               // permanently-dead delivery would loop forever).
               await insertEdgeDeadLetter(client, hydrated, outcome).catch((err) => {
-                console.error(`[delivery] dead_letters insert failed for ${hydrated.event_id}:`, err);
+                console.error(
+                  `[delivery] dead_letters insert failed for ${hydrated.event_id}: ${safeDeliveryDiagnostic(err)}`,
+                );
               });
             }
             // ACK. For success/dead, delete the spill object so it doesn't linger
@@ -268,7 +276,7 @@ export default {
             );
           }
         } catch (err) {
-          console.error("[delivery] dispatch failed", err);
+          console.error(`[delivery] dispatch failed: ${safeDeliveryDiagnostic(err)}`);
           const finalAttempt = msg.attempts >= DELIVERY_CONSUMER_MAX_RETRIES;
           const transientPlatform =
             isTransientPostgresError(err) ||
@@ -366,145 +374,222 @@ async function deliverOne(
   const gate = await evaluateEdgeBreaker(client, dest);
   if (gate) return gate;
 
-  // Idempotency claim (audit): CF Queues are at-least-once, so without a claim a
-  // worker restart / lost-ack redelivery re-POSTs to http/webhook destinations.
-  // CONSERVATIVE: only skip on a CONFIRMED prior completion — a claim-write
-  // hiccup falls through to deliver (at-least-once, as before), so this can
-  // never DROP a delivery, only suppress a confirmed duplicate.
-  let alreadyDelivered = false;
-  try {
-    alreadyDelivered = (await claimEdgeDelivery(client, message)) === "completed";
-  } catch {
-    // claim write hiccup → deliver anyway
-  }
-  if (alreadyDelivered) {
+  // The edge and native services share one token-fenced claim protocol. Claim
+  // failures must retry the durable message. Sending without a claim would let
+  // a stale edge invocation overwrite a live native owner and double-POST the
+  // webhook body.
+  const claimLeaseMs = edgeClaimLeaseMs(env);
+  const claim = await claimEdgeDelivery(client, message, claimLeaseMs);
+  if (claim.status === "completed") {
     return { result: "success", response: { destination_type: dest.type, deduped: true } };
   }
-
-  const payloadBytes = encodePayload(message.payload);
-  const startedAt = Date.now();
-  // Connectors take an ArrayBuffer; the object-store/postgres paths below
-  // still take the Uint8Array view. One copy, reused by both http + webhook.
-  let payloadBuffer: ArrayBuffer | null = null;
-  const asArrayBuffer = (): ArrayBuffer => (payloadBuffer ??= toArrayBuffer(payloadBytes));
-
-  // Merge encrypted credentials (if any) into the destination config so the
-  // connectors see one unified object. Decryption happens on every delivery —
-  // it's cheap (~1ms with Web Crypto AES-GCM) so we don't bother caching.
-  let mergedConfig: unknown;
-  try {
-    mergedConfig = await mergeCredentialsIntoConfig(client, env, dest);
-  } catch (err) {
-    console.error(`[delivery] credential decrypt failed for ${dest.id}:`, err);
+  if (claim.status === "duplicate") {
     return {
       result: "retry",
-      response: {
-        destination_type: dest.type,
-        error: `credential_decrypt_failed: ${err instanceof Error ? err.message : String(err)}`,
-      },
+      response: { destination_type: dest.type, error: "idempotency_claim_in_flight" },
+      retryDelaySeconds: Math.min(
+        43_200,
+        Math.max(1, Math.ceil((claim.retry_after_ms ?? claimLeaseMs) / 1_000)),
+      ),
     };
   }
 
+  const ownership = startEdgeClaimRenewal(
+    client,
+    message.idempotency_key,
+    claim.token,
+    claimLeaseMs,
+  );
+
   try {
-    let result: DeliveryResult;
-    let extra: Record<string, unknown> = {};
-    switch (dest.type) {
-      case "http": {
-        // Expand auth_type/bearer/basic/api_key/custom_headers into the headers
-        // dict the connector sends — same expansion delivery-service applies.
-        // Without this, edge http deliveries to authed endpoints went out with
-        // no Authorization header (audit critical).
-        const httpConfig = buildHttpAuthConfig(
-          mergedConfig as Record<string, unknown>,
-        ) as unknown as HttpDestinationConfig;
-        const attemptRow = await httpConnector.deliver(
-          asArrayBuffer(),
-          connectorDestination(dest, httpConfig),
-          { eventId: message.event_id, workspaceId: message.workspace_id, routeId: message.route_id },
-        );
-        result = toDeliveryResult(attemptRow.status);
-        extra = edgeResponseExtras(attemptRow.response);
-        break;
+    const payloadBytes = encodePayload(message.payload);
+    const startedAt = Date.now();
+    // Connectors take an ArrayBuffer; the object-store paths below take the
+    // Uint8Array view. One copy is reused by HTTP and webhook.
+    let payloadBuffer: ArrayBuffer | null = null;
+    const asArrayBuffer = (): ArrayBuffer => (payloadBuffer ??= toArrayBuffer(payloadBytes));
+
+    let outcome: DeliveryOutcome;
+    try {
+      // Merge encrypted credentials into the destination config. Any failure is
+      // a retry outcome, but it still settles this claim as failed so a later
+      // queue attempt can reclaim it immediately.
+      const mergedConfig = await mergeCredentialsIntoConfig(client, env, dest);
+      let result: DeliveryResult;
+      let extra: Record<string, unknown> = {};
+      switch (dest.type) {
+        case "http": {
+          const httpConfig = buildHttpAuthConfig(
+            mergedConfig as Record<string, unknown>,
+          ) as unknown as HttpDestinationConfig;
+          const attemptRow = await httpConnector.deliver(
+            asArrayBuffer(),
+            connectorDestination(dest, httpConfig),
+            { eventId: message.event_id, workspaceId: message.workspace_id, routeId: message.route_id },
+          );
+          result = toDeliveryResult(attemptRow.status);
+          extra = edgeResponseExtras(attemptRow.response);
+          break;
+        }
+        case "webhook": {
+          const attemptRow = await webhookConnector.deliver(
+            asArrayBuffer(),
+            connectorDestination(dest, mergedConfig as WebhookDestinationConfig),
+            { eventId: message.event_id, workspaceId: message.workspace_id, routeId: message.route_id },
+          );
+          result = toDeliveryResult(attemptRow.status);
+          extra = edgeResponseExtras(attemptRow.response);
+          break;
+        }
+        case "r2":
+          result = await deliverR2(env, payloadBytes, mergedConfig as R2Config, message);
+          break;
+        case "s3":
+          result = await deliverS3(payloadBytes, mergedConfig as S3Config, message);
+          break;
+        default:
+          console.error(`[delivery] unsupported type ${dest.type}`);
+          result = "dead";
+          extra = { error: "unsupported_type" };
+          break;
       }
-      case "webhook": {
-        const attemptRow = await webhookConnector.deliver(
-          asArrayBuffer(),
-          connectorDestination(dest, mergedConfig as WebhookDestinationConfig),
-          { eventId: message.event_id, workspaceId: message.workspace_id, routeId: message.route_id },
-        );
-        result = toDeliveryResult(attemptRow.status);
-        extra = edgeResponseExtras(attemptRow.response);
-        break;
-      }
-      case "r2":
-        result = await deliverR2(env, payloadBytes, mergedConfig as R2Config, message);
-        break;
-      case "s3":
-        result = await deliverS3(payloadBytes, mergedConfig as S3Config, message);
-        break;
-      default:
-        console.error(`[delivery] unsupported type ${dest.type}`);
-        result = "dead";
-        extra = { error: "unsupported_type" };
-        break;
+      console.log(
+        `[delivery] event=${message.event_id} dest=${message.destination_id} type=${dest.type} status=${result} latency=${Date.now() - startedAt}ms`,
+      );
+      outcome = { result, response: { destination_type: dest.type, ...extra } };
+    } catch (err) {
+      const summary = safeDeliveryDiagnostic(err);
+      console.error(`[delivery] event=${message.event_id} dest=${message.destination_id} ERR ${summary}`);
+      outcome = {
+        result: "retry",
+        response: { destination_type: dest.type, error: summary },
+      };
     }
-    console.log(
-      `[delivery] event=${message.event_id} dest=${message.destination_id} type=${dest.type} status=${result} latency=${Date.now() - startedAt}ms`,
+
+    await settleEdgeDeliveryClaim(
+      client,
+      ownership,
+      message,
+      outcome.result === "success" ? "completed" : "failed",
     );
-    // Record the claim outcome so a CF redelivery sees "completed" and skips.
-    // Best-effort: a mark failure must never flip the delivery result.
-    await markEdgeDeliveryClaim(client, message.idempotency_key, result === "success" ? "completed" : "failed").catch(() => {});
     // Record the outcome on the circuit breaker so it auto-trips for edge-native
-    // types (http/webhook/r2/s3) — the edge previously only HONORED the breaker
-    // but nothing opened it, so the protection was inert (audit). Best-effort.
-    await recordEdgeBreakerOutcome(client, dest, result).catch(() => {});
-    return { result, response: { destination_type: dest.type, ...extra } };
-  } catch (err) {
-    const summary = err instanceof Error ? err.message : String(err);
-    console.error(`[delivery] event=${message.event_id} dest=${message.destination_id} ERR ${summary}`);
-    await recordEdgeBreakerOutcome(client, dest, "retry").catch(() => {});
-    return {
-      result: "retry",
-      response: { destination_type: dest.type, error: summary },
-    };
+    // types. Best-effort, after authoritative claim settlement.
+    await recordEdgeBreakerOutcome(client, dest, outcome.result).catch(() => {});
+    return outcome;
+  } finally {
+    await ownership.stop();
   }
 }
 
 /**
- * Take a delivery_idempotency claim for an edge-delivered event. Mirrors the
- * delivery-service begin() but populates the real workspace_id/event_id/route_id
- * (the native path stored empty strings, which broke GDPR/workspace-delete
- * matching). Returns "completed" ONLY when a prior attempt is confirmed
- * complete — every other state proceeds, so this can never drop a delivery.
+ * Take the same atomic claim used by delivery-service. A fresh live claim is a
+ * retry signal, never permission to deliver. Empty or unexpected query results
+ * fail closed after one new-statement recovery attempt.
  */
 async function claimEdgeDelivery(
   client: ReturnType<typeof postgres>,
   message: DestinationQueueMessage,
-): Promise<"claimed" | "completed"> {
-  const rows = await client<{ state: "in_flight" | "completed" | "failed"; inserted: boolean }[]>`
-    WITH ins AS (
-      INSERT INTO delivery_idempotency
-        (idempotency_key, workspace_id, event_id, route_id, destination_id, state, expires_at)
-      VALUES (${message.idempotency_key}, ${message.workspace_id}, ${message.event_id},
-              ${message.route_id}, ${message.destination_id}, 'in_flight', now() + interval '14 days')
-      ON CONFLICT (idempotency_key) DO NOTHING
-      RETURNING state, true AS inserted
-    )
-    SELECT state, inserted FROM ins
-    UNION ALL
-    SELECT state, false AS inserted FROM delivery_idempotency WHERE idempotency_key = ${message.idempotency_key}
-    LIMIT 1
-  `;
-  const row = rows[0];
-  return row && !row.inserted && row.state === "completed" ? "completed" : "claimed";
+  leaseMs: number,
+): Promise<NonNullable<ReturnType<typeof decideDeliveryClaim>>> {
+  const token = `claim_${crypto.randomUUID()}`;
+  const params = [
+    message.idempotency_key,
+    message.workspace_id,
+    message.event_id,
+    message.route_id,
+    message.destination_id,
+    leaseMs,
+    token,
+  ];
+  const first = await client.unsafe<Array<Record<string, unknown>>>(DELIVERY_CLAIM_SQL, params);
+  const firstDecision = decideDeliveryClaim(first[0], token);
+  if (firstDecision) return firstDecision;
+
+  // READ COMMITTED can observe an ON CONFLICT row that the statement's SELECT
+  // snapshot cannot return. Retry atomically in a new statement.
+  const recovered = await client.unsafe<Array<Record<string, unknown>>>(DELIVERY_CLAIM_SQL, params);
+  const recoveredDecision = decideDeliveryClaim(recovered[0], token);
+  if (!recoveredDecision) throw new Error("idempotency claim returned no authoritative state");
+  return recoveredDecision;
 }
 
-async function markEdgeDeliveryClaim(
+interface EdgeClaimOwnership {
+  token: string;
+  stop(): Promise<void>;
+  assertHealthy(): void;
+}
+
+class EdgeIdempotencyClaimLostError extends Error {
+  constructor(cause?: unknown) {
+    super("delivery idempotency claim ownership was lost", { cause });
+    this.name = "EdgeIdempotencyClaimLostError";
+  }
+}
+
+function startEdgeClaimRenewal(
   client: ReturnType<typeof postgres>,
-  idempotencyKey: string,
+  key: string,
+  token: string,
+  leaseMs: number,
+): EdgeClaimOwnership {
+  const intervalMs = Math.max(1, Math.floor(leaseMs / 3));
+  let stopped = false;
+  let pending: Promise<void> | null = null;
+  let failure: unknown = null;
+  const timer = setInterval(() => {
+    if (stopped || pending || failure) return;
+    pending = Promise.resolve()
+      .then(async () => {
+        const rows = await client.unsafe<Array<Record<string, unknown>>>(
+          DELIVERY_CLAIM_RENEW_SQL,
+          [key, token, leaseMs],
+        );
+        if (rows.length === 0) throw new EdgeIdempotencyClaimLostError();
+      })
+      .catch((error: unknown) => {
+        failure = error instanceof EdgeIdempotencyClaimLostError
+          ? error
+          : new EdgeIdempotencyClaimLostError(error);
+      })
+      .finally(() => {
+        pending = null;
+      });
+  }, intervalMs);
+
+  return {
+    token,
+    async stop() {
+      if (!stopped) {
+        stopped = true;
+        clearInterval(timer);
+      }
+      await pending;
+    },
+    assertHealthy() {
+      if (failure) throw failure;
+    },
+  };
+}
+
+async function settleEdgeDeliveryClaim(
+  client: ReturnType<typeof postgres>,
+  ownership: EdgeClaimOwnership,
+  message: DestinationQueueMessage,
   state: "completed" | "failed",
 ): Promise<void> {
-  await client`UPDATE delivery_idempotency SET state = ${state}, updated_at = now() WHERE idempotency_key = ${idempotencyKey}`;
+  await ownership.stop();
+  ownership.assertHealthy();
+  const rows = await client.unsafe<Array<Record<string, unknown>>>(
+    DELIVERY_CLAIM_SETTLE_SQL,
+    [message.idempotency_key, ownership.token, state, buildAttemptId(message)],
+  );
+  if (rows.length === 0) throw new EdgeIdempotencyClaimLostError();
+}
+
+function edgeClaimLeaseMs(env: Env): number {
+  const configured = Number(env.IDEMPOTENCY_CLAIM_LEASE_MS ?? DEFAULT_DELIVERY_CLAIM_LEASE_MS);
+  if (!Number.isFinite(configured)) return DEFAULT_DELIVERY_CLAIM_LEASE_MS;
+  return Math.min(MAX_DELIVERY_CLAIM_LEASE_MS, Math.max(60_000, Math.floor(configured)));
 }
 
 /** Record a terminal "dead" edge delivery into dead_letters (visible + replayable). */
@@ -513,16 +598,16 @@ async function insertEdgeDeadLetter(
   message: DestinationQueueMessage,
   outcome: DeliveryOutcome,
 ): Promise<void> {
+  const safeResponse = sanitizeConnectorResponseForStorage(outcome.response);
   const detail = typeof outcome.response.error === "string"
-    ? outcome.response.error
-    : JSON.stringify(outcome.response);
+    ? String((safeResponse as { error?: unknown })?.error ?? "delivery_failed")
+    : JSON.stringify(safeResponse);
   // Build the exact reason/message we store, then fingerprint THOSE so the
   // stamped value matches the inbox recomputation + the bulk-replay mute join.
   const reason = `delivery_dead_${outcome.response.destination_type ?? "unknown"}`;
-  // Scrub value echoes (PG DETAIL, quoted literals, emails, long digit runs)
-  // before persisting — dead_letters.message surfaces in notification rows and
-  // Resend alert emails, and DB-connector errors can quote payload values.
-  const storedMessage = scrubConnectorError(detail).slice(0, 400);
+  // Receiver and driver errors can echo the submitted row or credentials.
+  // This value reaches notifications and immediate email through dead_letters.
+  const storedMessage = sanitizeConnectorDiagnosticForStorage(detail, 400);
   const fingerprint = await deadLetterFingerprint({
     route_id: message.route_id,
     reason,
@@ -538,6 +623,13 @@ async function insertEdgeDeadLetter(
     )
     ON CONFLICT DO NOTHING
   `;
+}
+
+function safeDeliveryDiagnostic(error: unknown, maxLength = 500): string {
+  return sanitizeConnectorDiagnosticForStorage(
+    error instanceof Error ? error.message : error,
+    maxLength,
+  );
 }
 
 /**
@@ -609,7 +701,9 @@ async function evaluateEdgeBreaker(
                   cooldown_seconds: dest.circuit_cooldown_seconds,
                 })})
       `.catch((err) => {
-        console.error(`[delivery] breaker audit insert failed for ${dest.id}:`, err);
+        console.error(
+          `[delivery] breaker audit insert failed for ${dest.id}: ${safeDeliveryDiagnostic(err)}`,
+        );
       });
     }
     return breakerSkipOutcome(dest, evaluation.decision);
@@ -717,7 +811,9 @@ async function recordEdgeBreakerOutcome(
         )
         ON CONFLICT DO NOTHING
       `.catch((err) => {
-        console.error(`[delivery] breaker notification insert failed for ${dest.id}:`, err);
+        console.error(
+          `[delivery] breaker notification insert failed for ${dest.id}: ${safeDeliveryDiagnostic(err)}`,
+        );
       });
     }
   }
@@ -748,6 +844,7 @@ async function forwardNativeDelivery(
 
   const res = await fetch(`${env.DELIVERY_SERVICE_URL.replace(/\/$/, "")}/deliver`, {
     method: "POST",
+    redirect: "manual",
     headers: {
       "content-type": "application/json",
       "x-axel-shared-secret": env.DELIVERY_SHARED_SECRET,
@@ -839,6 +936,8 @@ async function mergeCredentialsIntoConfig(
     SELECT ciphertext, nonce, auth_tag, encryption_version, workspace_id, destination_id
       FROM destination_credentials
      WHERE id = ${destination.credentials_ref}
+       AND workspace_id = ${destination.workspace_id}
+       AND destination_id = ${destination.id}
      LIMIT 1
   `;
   const row = rows[0];
@@ -851,11 +950,10 @@ async function mergeCredentialsIntoConfig(
   let secrets: Record<string, unknown>;
   try {
     secrets = JSON.parse(plaintext) as Record<string, unknown>;
-  } catch (err) {
+  } catch {
     // Corrupt/undecryptable secret blob — retry rather than deliver without it.
-    throw new Error(
-      `failed to parse decrypted secrets for dest=${destination.id}: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    // JSON.parse may quote the plaintext, so expose only destination identity.
+    throw new Error(`credential_blob_unparseable for dest=${destination.id}`);
   }
   return { ...(destination.config as Record<string, unknown>), ...secrets };
 }
@@ -1064,7 +1162,9 @@ async function deliverS3(
   if (config.endpoint) {
     const epSsrf = validateDestinationUrl(config.endpoint);
     if (epSsrf) {
-      console.error(`[delivery] s3 endpoint blocked (ssrf): ${epSsrf}`);
+      console.error(
+        `[delivery] s3 endpoint blocked (ssrf): ${sanitizeConnectorDiagnosticForStorage(epSsrf)}`,
+      );
       return "dead";
     }
   }
@@ -1560,8 +1660,7 @@ async function drainDeadLetterQueue(
         // re-deliver, and after this consumer's max_retries it'll expire from
         // the queue. We deliberately don't chain to another DLQ; that just
         // hides the problem.
-        const summary = err instanceof Error ? err.message : String(err);
-        console.error(`[dlq-recorder] insert failed (retry): ${summary}`);
+        console.error(`[dlq-recorder] insert failed (retry): ${safeDeliveryDiagnostic(err)}`);
         msg.retry();
       }
     }
@@ -1589,10 +1688,10 @@ function normalizeDeadLetterRow(body: Record<string, unknown>): RouterDeadLetter
         : null,
       r2_key: r.r2_key ?? "",
       reason: r.reason,
-      // Router-level messages are internal diagnostics (declarative/eval-free
-      // transforms reference field paths, not values), so they aren't scrubbed —
-      // scrubbing happens at the connector-error insert points instead.
-      message: r.message,
+      // Treat every queue message as untrusted at the durable storage boundary.
+      // This also protects explicit router failures if an upstream diagnostic
+      // starts including a submitted value in the future.
+      message: sanitizeConnectorDiagnosticForStorage(r.message, 400),
       errored_at: r.errored_at ?? new Date().toISOString(),
     };
   }

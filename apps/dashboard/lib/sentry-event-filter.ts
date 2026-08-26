@@ -1,10 +1,16 @@
 import { isTransientPostgresError } from "@axel/observability";
+import { sanitizeTelemetryValue } from "./telemetry-sanitization";
 
 interface SentryEventHint {
   originalException?: unknown;
 }
 
 interface SentryEventWithMechanism {
+  breadcrumbs?: Array<{
+    data?: Record<string, unknown>;
+    message?: string;
+    [key: string]: unknown;
+  }>;
   contexts?: {
     browser?: {
       browser?: string;
@@ -24,6 +30,18 @@ interface SentryEventWithMechanism {
       };
     }>;
   };
+  request?: {
+    headers?: Record<string, unknown>;
+    query_string?: unknown;
+    url?: string;
+    [key: string]: unknown;
+  };
+  transaction?: string;
+}
+
+/** Scrub browser-owned URL fields immediately before an event can leave. */
+export function scrubDashboardSentryEvent(event: SentryEventWithMechanism): void {
+  Object.assign(event, sanitizeTelemetryValue(event));
 }
 
 function isAndroidWebViewPerfInjectionError(event: SentryEventWithMechanism): boolean {
@@ -106,12 +124,22 @@ export function filterDashboardSentryEvent<T>(
   hint: SentryEventHint = {},
 ): T | null {
   const sentryEvent = event as SentryEventWithMechanism;
+  // Classify known SDK noise before text sanitization changes quoted values
+  // inside the exception message. Every event is still scrubbed before either
+  // returning it or dropping it.
+  const androidWebViewInjection = isAndroidWebViewPerfInjectionError(sentryEvent);
+  const facebookInjection = isFacebookNavigationPerfInjectionError(sentryEvent);
+  const handledDeploymentSkew = isHandledDeploymentSkewError(sentryEvent);
+  // Browser SDK request contexts and fetch/navigation breadcrumbs can contain
+  // the full current URL. Sanitize before every non-dropped return path while
+  // retaining the top-level object identity expected by Sentry.
+  scrubDashboardSentryEvent(sentryEvent);
   // ByteDance Android apps inject this anonymous performance script. Sentry
   // identifies the full TikTok client directly but identifies TikTok Lite as
   // a generic Chrome Mobile WebView, so accept both exact browser families.
   // Keep the exception, anonymous source, and injected function checks narrow
   // so a similarly worded exception from dashboard code remains actionable.
-  if (isAndroidWebViewPerfInjectionError(sentryEvent)) {
+  if (androidWebViewInjection) {
     console.warn("[sentry] dropping Android WebView performance injection error");
     return null;
   }
@@ -120,7 +148,7 @@ export function filterDashboardSentryEvent<T>(
   // It can dispatch one final timer after its native Java bridge has been torn
   // down, causing postMessage to throw during navigation. The exact browser,
   // error, script URL, and injected function pair distinguish this from app code.
-  if (isFacebookNavigationPerfInjectionError(sentryEvent)) {
+  if (facebookInjection) {
     console.warn("[sentry] dropping Facebook navigation performance injection error");
     return null;
   }
@@ -129,7 +157,7 @@ export function filterDashboardSentryEvent<T>(
   // build-specific Server Action id once. Vercel Skew Protection handles the
   // rollout and a refresh self-heals the client, so this handled SDK event is
   // deployment noise rather than an application exception.
-  if (isHandledDeploymentSkewError(sentryEvent)) {
+  if (handledDeploymentSkew) {
     console.warn("[sentry] dropping handled stale Server Action event");
     return null;
   }

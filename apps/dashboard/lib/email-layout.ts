@@ -20,6 +20,8 @@
  * user-controlled values (workspace names, member names, roles) the same way.
  */
 
+import { resolveIngestBaseUrl } from "@axel/shared";
+
 /** Brand palette for email — light body, espresso header, copper/orange accents. */
 export const EMAIL_BRAND = {
   espresso: "#1a1814",
@@ -87,7 +89,7 @@ export function appUrl(): string {
  * the source page. Trailing slash stripped so callers can append a path.
  */
 export function ingestUrl(): string {
-  return (process.env.NEXT_PUBLIC_AXEL_INGEST_URL ?? "https://ingest.axelapp.ai").replace(/\/$/, "");
+  return resolveIngestBaseUrl(process.env);
 }
 
 /**

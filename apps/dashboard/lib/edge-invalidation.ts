@@ -12,7 +12,7 @@ import { captureDashboardException } from "./sentry-capture";
  * Postgres, but the ingest worker reads source config from a KV cache at the
  * edge. Two helpers bridge the gap:
  *
- *   - `pushSourceToEdge(source)`     — write current state into KV (24h TTL)
+ *   - `pushSourceToEdge(source)`     — write current state into KV (5m TTL)
  *   - `invalidateEdgeSourceCache()`  — drop the cached entry by source_id
  *
  * Required env:
@@ -20,7 +20,9 @@ import { captureDashboardException } from "./sentry-capture";
  *                          (we derive /admin/source-cache/{put,invalidate})
  *   - INGEST_ADMIN_TOKEN — must match the ingest worker's ADMIN_TOKEN binding
  *
- * Both unset = no-op. Useful in dev when there's no edge to sync.
+ * Best-effort helpers are a no-op when these values are unset, which is useful
+ * in dev when there is no edge to sync. Auth-sensitive mutations use
+ * `requireEdgeSourceCacheInvalidation`, which fails closed instead.
  */
 
 interface EdgeSource {
@@ -80,14 +82,17 @@ async function adminPost(
   body: unknown,
   token: string,
   options: EdgeInvalidationOptions,
+  required: boolean,
 ): Promise<void> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? 2000;
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
+  let res: Response;
   try {
-    const res = await fetchImpl(url, {
+    res = await fetchImpl(url, {
       method: "POST",
+      redirect: "manual",
       signal: ac.signal,
       headers: {
         "content-type": "application/json",
@@ -95,26 +100,23 @@ async function adminPost(
       },
       body: JSON.stringify(body),
     });
-    if (!res.ok && res.status !== 204) {
-      const text = await res.text().catch(() => "");
-      console.error(`[edge] non-2xx ${res.status} for ${url}: ${text.slice(0, 200)}`);
-      // A failed push leaves the source un-routable in KV until TTL/next-push —
-      // surface it to Sentry instead of only console (audit observability gap).
-      await reportEdgeSyncFailure(
-        options,
-        new Error(`edge admin POST ${res.status}: ${text.slice(0, 200)}`),
-        url,
-        String(res.status),
-      );
-    }
   } catch (err) {
-    // Cache will self-heal via TTL — never let cache errors break the user's
-    // action in the dashboard. But DO report it: a swallowed push failure is
-    // exactly how a source silently stops being routable.
     console.error(`[edge] POST failed for ${url}:`, err);
     await reportEdgeSyncFailure(options, err, url);
+    if (required) {
+      throw new Error(`required edge cache POST failed for ${url}`, { cause: err });
+    }
+    return;
   } finally {
     clearTimeout(timer);
+  }
+
+  if (!res.ok) {
+    const responseText = await res.text().catch(() => "");
+    const failure = new Error(`edge admin POST ${res.status}: ${responseText.slice(0, 200)}`);
+    console.error(`[edge] non-2xx ${res.status} for ${url}: ${responseText.slice(0, 200)}`);
+    await reportEdgeSyncFailure(options, failure, url, String(res.status));
+    if (required) throw failure;
   }
 }
 
@@ -141,18 +143,54 @@ export async function invalidateEdgeSourceCache(
   const token = env.INGEST_ADMIN_TOKEN;
   const urls = endpointUrls(env);
   if (!urls || !token) return;
-  await adminPost(urls.invalidate, { source_id: sourceId }, token, options);
+  await adminPost(urls.invalidate, { source_id: sourceId }, token, options, false);
 }
 
 /**
- * Push the current state of a source to the edge cache. Called from the
- * dashboard on createSource / setSourceStatus / rotateSourceToken so
- * worker lookups see the latest config without waiting for a TTL.
+ * Delete a source cache entry and prove that the worker accepted the delete.
+ * Security-sensitive source mutations call this before and after their
+ * Postgres write to narrow stale-credential and stale-policy races. Missing
+ * admin configuration, transport failures, and non-2xx responses all reject;
+ * the short positive TTL bounds distributed propagation and lookups already
+ * in flight after the last delete.
+ */
+export async function requireEdgeSourceCacheInvalidation(
+  sourceId: string,
+  options: EdgeInvalidationOptions = {},
+): Promise<void> {
+  const env = options.env ?? process.env;
+  const token = env.INGEST_ADMIN_TOKEN;
+  const urls = endpointUrls(env);
+  if (!urls || !token) {
+    throw new Error("required edge cache invalidation is not configured");
+  }
+  await adminPost(urls.invalidate, { source_id: sourceId }, token, options, true);
+}
+
+/** Required invalidation for a workspace-wide status change, with bounded fan-out. */
+export async function requireEdgeSourceCacheInvalidations(
+  sourceIds: readonly string[],
+  options: EdgeInvalidationOptions = {},
+): Promise<void> {
+  const concurrency = 10;
+  for (let index = 0; index < sourceIds.length; index += concurrency) {
+    await Promise.all(
+      sourceIds.slice(index, index + concurrency).map((sourceId) => (
+        requireEdgeSourceCacheInvalidation(sourceId, options)
+      )),
+    );
+  }
+}
+
+/**
+ * Push the current state of a newly created source to warm the edge cache.
+ * Existing-source auth/privacy mutations invalidate instead, so a failed push
+ * can never preserve an older credential or policy.
  *
  * The worker validates the source shape strictly — if the worker rejects it
  * (400 invalid_source_shape), we log and move on rather than failing the
- * dashboard action; the cache remains in its prior state and the worker
- * falls through to its dev-mode lookup.
+ * dashboard action; the worker falls through to its authenticated source
+ * lookup when the cache is empty.
  */
 export async function pushSourceToEdge(
   source: EdgeSource,
@@ -167,6 +205,7 @@ export async function pushSourceToEdge(
     { source_id: source.source_id, source },
     token,
     options,
+    false,
   );
 }
 
@@ -213,27 +252,37 @@ export async function loadSourceForEdge(sourceId: string, workspaceId: string): 
 }
 
 export async function rowToEdgePayload(row: SourceDbRow, overrides: Partial<{ secretTokenHash: string }> = {}) {
-  // Decrypt the at-rest signing secret so the edge worker has the
-  // plaintext it needs to verify HMACs. Best-effort: if decryption
-  // fails (e.g. master key rotated mid-rollout) the provider
-  // verification will see "missing_secret" and reject — same end-state
-  // as if the operator had never set a secret, never silently passes.
   // Decrypt the current + previous signing secrets so the edge worker has the
   // plaintext it needs to verify HMACs (and to keep verifying during a rotation
-  // overlap window). Best-effort: on decrypt failure the provider verification
-  // sees "missing_secret" and rejects — same end-state as no secret, never a
-  // silent pass.
-  const decryptOrUndefined = async (blob: Buffer | null): Promise<string | undefined> => {
+  // overlap window). A configured ciphertext is also the durable signal that
+  // signature verification is required. Never erase that signal by publishing
+  // a payload with an omitted secret: custom-HMAC sources would become
+  // token-only, and a partially decrypted rotation could keep accepting only
+  // the previous secret. Refuse the cache update instead.
+  const decryptConfiguredSecret = async (
+    blob: Buffer | null,
+    label: "current" | "previous",
+  ): Promise<string | undefined> => {
     if (!blob) return undefined;
     try {
-      return await decryptSourceSigningSecret(blob, row.workspace_id, row.id);
+      const plaintext = await decryptSourceSigningSecret(blob, row.workspace_id, row.id);
+      if (plaintext.length === 0) {
+        throw new Error(`${label} signing secret decrypted to an empty value`);
+      }
+      return plaintext;
     } catch (err) {
-      console.error(`[edge] decrypt signing secret failed for source ${row.id}:`, err);
-      return undefined;
+      console.error(`[edge] decrypt ${label} signing secret failed for source ${row.id}:`, err);
+      throw new Error(
+        `${label} signing secret is configured but could not be decrypted for source ${row.id}; refusing to publish an unsigned edge payload`,
+        { cause: err },
+      );
     }
   };
-  const signingSecret = await decryptOrUndefined(row.signing_secret_ciphertext);
-  const signingSecretPrevious = await decryptOrUndefined(row.signing_secret_previous_ciphertext);
+  const signingSecret = await decryptConfiguredSecret(row.signing_secret_ciphertext, "current");
+  const signingSecretPrevious = await decryptConfiguredSecret(
+    row.signing_secret_previous_ciphertext,
+    "previous",
+  );
   return {
     source_id: row.id,
     workspace_id: row.workspace_id,

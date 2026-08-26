@@ -81,17 +81,34 @@ caps; no Resend → no emails; no Sentry/PostHog → no telemetry).
 
 ## Self-hosting
 
-See [`docs/self-hosting.md`](docs/self-hosting.md). Short version: the edge
-pipeline runs on Cloudflare (Workers, Queues, R2, KV — a Cloudflare account
-with the paid Workers plan is required), the delivery service and pull worker
-run on any Node host, the dashboard runs on any Next.js host, and you bring
-Postgres and (optionally) ClickHouse. A self-hosted deployment with no Stripe
-configured has no usage caps or billing UI.
+The low-volume self-host profile uses Cloudflare's free Workers, Queues, and R2
+allowances plus one Docker host you already control. It collapses the 16
+production ingest queues to one queue and sends every destination through one
+Node delivery service. Postgres, migrations, dashboard, cron, delivery, and
+Caddy all run in the included Compose stack.
+
+```sh
+AXEL_PUBLIC_URL=https://axel.example.com \
+AXEL_SITE_ADDRESS=axel.example.com \
+  ./scripts/axel-self-host init
+
+# Add CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN to .env.selfhost.
+# A separate, narrower CLOUDFLARE_RUNTIME_API_TOKEN is optional.
+./scripts/axel-self-host edge
+./scripts/axel-self-host up
+```
+
+This can have a $0 cloud bill when it runs on an existing machine, within the
+provider's free limits. It is not a promise of free hardware, a free domain, or
+an always-on managed database. See [`docs/self-hosting.md`](docs/self-hosting.md)
+for the limits, token permissions, backups, and production topology.
 
 ## Contributing
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md). Security reports: see
-[`SECURITY.md`](SECURITY.md).
+[`SECURITY.md`](SECURITY.md). The latest webhook data-flow review and open
+hardening backlog are in
+[`docs/security-review-2026-08.md`](docs/security-review-2026-08.md).
 
 ## License
 

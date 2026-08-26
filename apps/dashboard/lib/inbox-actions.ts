@@ -5,6 +5,7 @@ import {
   compareBigQuerySchemas,
   executeGraph,
   expectedBigQuerySchema,
+  normalizeBqType,
   parseFilter,
   parsePipelineGraph,
   parseTransform,
@@ -32,10 +33,16 @@ import {
   type InboxRepairSpec,
 } from "./inbox-repair";
 import { dataTypeRepairFor } from "./dead-letter-repair";
+import {
+  findBigQueryField,
+  planBigQueryFieldTypeChange,
+  widenBigQueryDestinationField,
+} from "./bigquery-schema-change";
 import { cacheTags } from "./repositories";
 import { fetchPayloadForR2Key } from "./sample-payload";
 import type { ActionState } from "./action-state";
 import { formValue } from "./form";
+import { humanRepairError } from "./inbox-repair-error";
 
 /**
  * Server actions for the AXE-57 inbox-zero workflow.
@@ -60,13 +67,29 @@ export type RepairPreviewResult =
       proposal: InboxRepairProposal;
       routeId: string;
       destinationId: string;
+      schemaRepair?: BigQuerySchemaRepairPreview;
     }
   | { ok: false; error: string };
+
+export interface BigQuerySchemaRepairPreview {
+  kind: "bigquery_widen";
+  dataset: string;
+  table: string;
+  fieldPath: string;
+  fromType: "INT64";
+  toType: "FLOAT64";
+  status: "needed" | "already_applied";
+}
 
 export interface ApplyInboxRepairInput {
   fingerprint: string;
   exemplarId: string;
   repair: InboxRepairSpec;
+}
+
+export interface ApplyInboxSchemaRepairInput {
+  fingerprint: string;
+  exemplarId: string;
 }
 
 export type ApplyInboxRepairResult =
@@ -180,11 +203,27 @@ export async function previewFingerprintRepair(input: {
             error: "Axel could not identify one safe automatic conversion for this error. Use Investigate for the full payload.",
           };
         }
+        const schemaRepair = await previewBigQuerySchemaRepair(
+          workspaceId,
+          exemplar.route_id,
+          exemplar.destination_id,
+          proposal,
+        ).catch((err) => {
+          // Destination-side widening is an optional, safer alternative to
+          // the existing route transform. A metadata permission failure must
+          // not remove the transform escape hatch from the operator.
+          console.warn(
+            "[previewFingerprintRepair] BigQuery schema option unavailable:",
+            err instanceof Error ? err.message : err,
+          );
+          return null;
+        });
         return {
           ok: true,
           proposal,
           routeId: exemplar.route_id,
           destinationId: exemplar.destination_id,
+          ...(schemaRepair ? { schemaRepair } : {}),
         };
       } catch (err) {
         console.error("[previewFingerprintRepair] failed:", err);
@@ -325,6 +364,166 @@ export async function applyFingerprintRepair(
   );
 }
 
+/**
+ * Preserve fractional values by widening the live BigQuery destination column
+ * before replaying. Unlike applyFingerprintRepair, this does not rewrite the
+ * route payload. The client supplies no dataset, table, path, or target type:
+ * every mutation input is re-derived from the workspace-scoped dead letter,
+ * current route binding, and live tables.get schema to prevent confused-deputy
+ * writes against another destination field.
+ */
+export async function applyFingerprintSchemaRepair(
+  input: ApplyInboxSchemaRepairInput,
+): Promise<ApplyInboxRepairResult> {
+  return withWorkspaceMutation<ApplyInboxRepairResult>(
+    { billing: "replay", gateError: (error) => ({ ok: false, error }) },
+    async ({ workspaceId, actorUserId, audit, tags }) => {
+      const exemplar = await loadRepairExemplar(workspaceId, input.exemplarId, input.fingerprint);
+      if (!exemplar) return { ok: false, error: "This error is no longer active. Refresh the Inbox." };
+      if (!exemplar.route_id || !exemplar.destination_id) {
+        return { ok: false, error: "Axel could not identify the route and destination for this error." };
+      }
+      if (!dataTypeRepairFor({ reason: exemplar.reason, message: exemplar.message })) {
+        return { ok: false, error: "This error is not a permanent data-shape mismatch." };
+      }
+
+      let schemaRepair: BigQuerySchemaRepairPreview | null;
+      try {
+        const proposal = selectRepairProposalForDeliveryError(
+          exemplar.message,
+          repairProposalsFromMessage(exemplar.message),
+        ) ?? await diagnoseLegacyRepair(exemplar, workspaceId);
+        if (!proposal) {
+          return { ok: false, error: "Axel could not confirm the destination field to change." };
+        }
+        schemaRepair = await previewBigQuerySchemaRepair(
+          workspaceId,
+          exemplar.route_id,
+          exemplar.destination_id,
+          proposal,
+        );
+      } catch (err) {
+        console.error("[applyFingerprintSchemaRepair] preparation failed:", err);
+        return {
+          ok: false,
+          error: humanRepairError(
+            err instanceof Error ? err.message : "Could not inspect the current BigQuery schema.",
+          ),
+        };
+      }
+      if (!schemaRepair) {
+        return {
+          ok: false,
+          error: "This column is no longer eligible for the safe INT64-to-FLOAT64 change. Refresh and inspect the latest schema.",
+        };
+      }
+
+      const resolved = await resolveFingerprintIds(workspaceId, input.fingerprint);
+      if (resolved.replays.length === 0) {
+        return { ok: false, error: "No dead letters match this fingerprint anymore." };
+      }
+      const muted = await db().query(
+        `SELECT 1 FROM dead_letter_mutes
+          WHERE workspace_id = $1 AND fingerprint = $2 AND (until IS NULL OR until > now())
+          LIMIT 1`,
+        [workspaceId, input.fingerprint],
+      );
+      if (muted.rowCount) return { ok: false, error: humanRepairError("repair_fingerprint_muted") };
+
+      let schemaChange: Awaited<ReturnType<typeof widenBigQueryDestinationField>>;
+      try {
+        schemaChange = await widenBigQueryDestinationField({
+          destinationId: exemplar.destination_id,
+          workspaceId,
+          dataset: schemaRepair.dataset,
+          table: schemaRepair.table,
+          fieldPath: schemaRepair.fieldPath,
+          fromType: schemaRepair.fromType,
+          toType: schemaRepair.toType,
+        });
+      } catch (err) {
+        console.error("[applyFingerprintSchemaRepair] BigQuery change failed:", err);
+        return {
+          ok: false,
+          error: humanRepairError(err instanceof Error ? err.message : "Could not change the BigQuery column."),
+        };
+      }
+
+      try {
+        const replay = await withTransaction(async (client) => {
+          const mutedAgain = await client.query(
+            `SELECT 1 FROM dead_letter_mutes
+              WHERE workspace_id = $1 AND fingerprint = $2 AND (until IS NULL OR until > now())
+              LIMIT 1`,
+            [workspaceId, input.fingerprint],
+          );
+          if (mutedAgain.rowCount) throw new Error("repair_fingerprint_muted");
+
+          const liveTarget = await loadBigQueryRepairTarget(
+            workspaceId,
+            exemplar.route_id!,
+            exemplar.destination_id!,
+            client,
+          );
+          if (!liveTarget) throw new Error("repair_destination_detached");
+          if (liveTarget.dataset !== schemaRepair.dataset || liveTarget.table !== schemaRepair.table) {
+            throw new Error("repair_destination_binding_changed");
+          }
+
+          const queued = await enqueueFingerprintReplays(client, {
+            workspaceId,
+            userId: actorUserId,
+            fingerprint: input.fingerprint,
+            resolved,
+          });
+          await audit({
+            action: "dead_letter.destination_schema_repaired_and_retried",
+            targetType: "dead_letter_fingerprint",
+            targetId: input.fingerprint,
+            metadata: {
+              route_id: exemplar.route_id,
+              destination_id: exemplar.destination_id,
+              project_id: schemaChange.projectId,
+              dataset: schemaChange.dataset,
+              table: schemaChange.table,
+              field_path: schemaChange.fieldPath,
+              from_type: schemaChange.fromType,
+              to_type: schemaChange.toType,
+              schema_changed: schemaChange.changed,
+              replay_count: queued.queued,
+              skipped: queued.skipped,
+              truncated: resolved.truncated,
+            },
+          }, client);
+          return queued;
+        });
+
+        tags("destinations", "routes", "deadLetters", "replays");
+        const prefix = schemaChange.changed
+          ? `${schemaChange.fieldPath} now uses FLOAT64 in BigQuery`
+          : `${schemaChange.fieldPath} already uses FLOAT64 in BigQuery`;
+        if (replay.queued === 0) {
+          return {
+            ok: true,
+            queued: 0,
+            notice: `${prefix}. Those deliveries already have a replay in flight.`,
+          };
+        }
+        let notice = `${prefix}; ${replay.queued} replay${replay.queued === 1 ? "" : "s"} queued`;
+        if (replay.skipped > 0) notice += ` (${replay.skipped} already in flight)`;
+        if (resolved.truncated) notice += "; run the fix again after this batch to catch the remainder";
+        return { ok: true, queued: replay.queued, notice: `${notice}.` };
+      } catch (err) {
+        console.error("[applyFingerprintSchemaRepair] replay enqueue failed:", err);
+        return {
+          ok: false,
+          error: `${schemaChange.fieldPath} now uses FLOAT64, but Axel could not queue the replays. ${humanRepairError(err instanceof Error ? err.message : "Use Retry from the Inbox.")}`,
+        };
+      }
+    },
+  );
+}
+
 export async function retryFingerprint(
   _state: ActionState,
   formData: FormData,
@@ -399,6 +598,12 @@ interface RouteForRepair {
   pipeline_graph: string | null;
 }
 
+interface BigQueryRepairTarget {
+  projectId: string;
+  dataset: string;
+  table: string;
+}
+
 async function loadRepairExemplar(
   workspaceId: string,
   exemplarId: string,
@@ -423,6 +628,84 @@ async function loadRepairExemplar(
     message: row.message,
   });
   return actual === fingerprint ? row : null;
+}
+
+async function previewBigQuerySchemaRepair(
+  workspaceId: string,
+  routeId: string,
+  destinationId: string,
+  proposal: InboxRepairProposal,
+): Promise<BigQuerySchemaRepairPreview | null> {
+  if (proposal.issue.kind !== "type_conflict") return null;
+  const expected = normalizeIssueScalarType(proposal.issue.expected);
+  const existing = normalizeIssueScalarType(proposal.issue.existing);
+  if (expected !== "FLOAT64" || existing !== "INT64") return null;
+
+  const target = await loadBigQueryRepairTarget(workspaceId, routeId, destinationId);
+  if (!target) return null;
+  const live = await introspectBigQueryDestination(destinationId, workspaceId, {
+    dataset: target.dataset,
+    table: target.table,
+  });
+  if (live.kind === "missing") return null;
+  const field = findBigQueryField(live.fields, proposal.issue.path);
+  if (!field) return null;
+  const liveType = normalizeBqType(field.type);
+  if (liveType !== "INT64" && liveType !== "FLOAT64") return null;
+
+  const plan = planBigQueryFieldTypeChange({
+    projectId: target.projectId,
+    dataset: target.dataset,
+    table: target.table,
+    fields: live.fields,
+    fieldPath: proposal.issue.path,
+    fromType: "INT64",
+    toType: "FLOAT64",
+  });
+  return {
+    kind: "bigquery_widen",
+    dataset: target.dataset,
+    table: target.table,
+    fieldPath: proposal.issue.path,
+    fromType: "INT64",
+    toType: "FLOAT64",
+    status: plan.changed ? "needed" : "already_applied",
+  };
+}
+
+async function loadBigQueryRepairTarget(
+  workspaceId: string,
+  routeId: string,
+  destinationId: string,
+  client: Queryable = db(),
+): Promise<BigQueryRepairTarget | null> {
+  const result = await client.query<{
+    binding: unknown;
+    config: unknown;
+    type: string;
+  }>(
+    `SELECT rd.binding, d.config, d.type
+       FROM route_destinations rd
+       JOIN destinations d
+         ON d.id = rd.destination_id
+        AND d.workspace_id = $3
+      WHERE rd.route_id = $1
+        AND rd.destination_id = $2
+      LIMIT 1`,
+    [routeId, destinationId, workspaceId],
+  );
+  const row = result.rows[0];
+  if (!row || row.type !== "bigquery") return null;
+  const config = recordValue(row.config);
+  const target = { ...config, ...recordValue(row.binding) };
+  const projectId = typeof config.project_id === "string" ? config.project_id.trim() : "";
+  const dataset = typeof target.dataset === "string" ? target.dataset.trim() : "";
+  const table = typeof target.table === "string" ? target.table.trim() : "";
+  return projectId && dataset && table ? { projectId, dataset, table } : null;
+}
+
+function normalizeIssueScalarType(value: string): string {
+  return normalizeBqType(value.replace(/^(?:NULLABLE|REQUIRED|REPEATED)\s+/i, ""));
 }
 
 async function diagnoseLegacyRepair(
@@ -547,16 +830,6 @@ async function enqueueFingerprintReplays(
     },
   });
   return { queued: result.queued, skipped: replays.length - result.queued };
-}
-
-function humanRepairError(message: string): string {
-  if (message === "repair_fingerprint_muted") return "This fingerprint is muted. Unmute it before applying the fix.";
-  if (message === "repair_route_not_found") return "This route no longer exists.";
-  if (message === "repair_destination_detached") return "This destination is no longer attached to the route.";
-  if (message === "repair_destination_not_in_pipeline") return "Axel could not find this destination in the current route pipeline.";
-  if (/graph_too_many_nodes/.test(message)) return "This route is already at its pipeline-step limit. Remove an unused step first.";
-  if (/identifier_rejected/.test(message)) return "The destination table configuration is invalid.";
-  return message.slice(0, 300) || "Could not apply this fix.";
 }
 
 function paramRef(i: number): string {

@@ -233,6 +233,29 @@ describe("backfill-job-worker", () => {
     expect(jobsById.get("bfj_1")?.error_message).toMatch(/clickhouse_500/);
   });
 
+  it("does not read or retain a failed ClickHouse response body", async () => {
+    const { deps, jobsById, fetchImpl } = fakeWorkerDeps({
+      jobs: [{ ...baseJob }],
+      fetchPages: [],
+    });
+    const cancel = vi.fn(async () => undefined);
+    const text = vi.fn(async () => "payload=customer-secret");
+    (fetchImpl as ReturnType<typeof vi.fn>).mockReset();
+    (fetchImpl as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      status: 400,
+      body: { cancel },
+      text,
+    } as never);
+
+    const result = await advanceJob(deps, baseJob as never);
+
+    expect(result).toBe("failed");
+    expect(jobsById.get("bfj_1")?.error_message).toBe("clickhouse_400");
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(text).not.toHaveBeenCalled();
+  });
+
   it("rolls back transaction on bulk-INSERT failure and marks job failed", async () => {
     const events = [
       { event_id: "e1", r2_key: "k", received_at_text: "2026-05-10 00:00:01.000" },

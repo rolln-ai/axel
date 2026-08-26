@@ -144,8 +144,9 @@ services:
     plan: starter
     region: oregon
     branch: main
-    # No dedicated deploy-hook secret exists for this singleton yet, so Render
-    # git auto-deploy remains its deployment authority.
+    # Render git auto-deploy starts this singleton. The exact-SHA GitHub release
+    # workflow reuses that deployment (or starts it if needed) and waits until
+    # it is live, so a green release can no longer leave this worker unverified.
     autoDeploy: true
     buildCommand: npm install -g pnpm@9.12.0 && pnpm install --frozen-lockfile && pnpm --filter @axel/delivery-service build
     startCommand: pnpm --filter @axel/delivery-service start

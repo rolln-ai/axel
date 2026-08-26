@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   detectSensitiveFields,
   inferDeterministic,
@@ -499,6 +499,112 @@ describe("inferDataContract — top-level orchestration", () => {
     expect(byPath.get("email")).toBe("both");
     // weird was model-only.
     expect(byPath.get("weird")).toBe("model");
+  });
+
+  it("aliases clusters and redacts secret-like values before calling the LLM", async () => {
+    const secretType = ["sk", "live", "51Secret", "Webhook", "EventType"].join("_");
+    const jwt = [
+      "eyJhbGci",
+      "OiJIUzI1",
+      "NiJ9.",
+      "eyJzdWIi",
+      "OiJjdXN0",
+      "b21lci0x",
+      "In0.",
+      "c2lnbmF0",
+      "dXJlLXZh",
+      "bHVl",
+    ].join("");
+    const opaque = ["Ab9_cdEf", "GhijKLMN", "opQRstUV", "wxYZ0123", "456789ab"].join("");
+    let observedPrompt = "";
+
+    const out = await inferDataContract(
+      [
+        ev({
+          type: secretType,
+          status: "complete",
+          amount: 1299,
+          password: "hunter2",
+          headers: {
+            Authorization: "Bearer short-auth-value",
+            Cookie: "session=short-cookie",
+          },
+          callback: `https://${"user"}:${"pass"}@example.test/hook?token=query-secret`,
+          note: `${jwt} ${opaque}`,
+        }),
+      ],
+      {
+        apiKey: "fake",
+        callLlm: async (request) => {
+          observedPrompt = request.userPrompt;
+          return {
+            cluster_names: { cluster_1: "Redacted webhook event" },
+            sensitive_field_paths: ["password"],
+            summary: "A redacted webhook event completed.",
+            ms: 4,
+          };
+        },
+      },
+    );
+
+    for (const secret of [
+      secretType,
+      "hunter2",
+      "short-auth-value",
+      "short-cookie",
+      "user:pass",
+      "query-secret",
+      jwt,
+      opaque,
+    ]) {
+      expect(observedPrompt).not.toContain(secret);
+    }
+    expect(observedPrompt).toContain("cluster_id: cluster_1");
+    expect(observedPrompt).toContain("complete");
+    expect(observedPrompt).toContain("amount");
+    expect(out.event_types[0]?.name).toBe("Redacted webhook event");
+    expect(out.sensitive_fields).toContainEqual({ path: "password", reason: "both" });
+  });
+
+  it("refuses to follow redirects from OpenRouter", async () => {
+    let requestInit: RequestInit | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        requestInit = init;
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    cluster_names: { cluster_1: "Invoice paid" },
+                    sensitive_field_paths: [],
+                    summary: "Invoice events.",
+                  }),
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }),
+    );
+
+    try {
+      const out = await inferDataContract([ev({ type: "invoice.paid", amount: 1200 })], {
+        apiKey: ["openrouter", "test", "key"].join("-"),
+      });
+      expect(out.model_metadata.llm_enriched).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+
+    expect(requestInit?.redirect).toBe("manual");
+    const body = JSON.parse(String(requestInit?.body)) as {
+      provider?: { data_collection?: string };
+    };
+    expect(body.provider).toEqual({ data_collection: "deny" });
   });
 
   it("falls back to deterministic if the LLM call throws", async () => {

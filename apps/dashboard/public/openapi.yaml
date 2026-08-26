@@ -133,11 +133,15 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/ForbiddenScope" }
         "409":
-          description: A source with that name already exists.
+          description: The source name already exists, or the workspace became inactive before creation.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
-              example: { error: "Source name already in use.", code: "source_name_taken" }
+              examples:
+                duplicateName:
+                  value: { error: "Source name already in use.", code: "source_name_taken" }
+                workspaceInactive:
+                  value: { error: "Workspace is not active. Source was not created.", code: "workspace_inactive" }
 
   /api/v1/destinations:
     get:

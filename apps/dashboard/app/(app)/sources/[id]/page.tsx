@@ -17,7 +17,11 @@ import { FieldSelectionEditor } from "./FieldSelectionEditor";
 import { IpAllowlistEditor } from "./IpAllowlistEditor";
 import { SubjectKeysEditor } from "./SubjectKeysEditor";
 import { LimitsEditor } from "./LimitsEditor";
-import type { SubjectKeyPath } from "@axel/shared";
+import {
+  resolveIngestBaseUrl,
+  sanitizeConnectorDiagnosticForStorage,
+  type SubjectKeyPath,
+} from "@axel/shared";
 import { TransientModeEditor } from "./TransientModeEditor";
 import { PullSourceSyncPanel } from "./PullSourceSyncPanel";
 import { SendTestEventDialog } from "./SendTestEventDialog";
@@ -160,7 +164,7 @@ export default async function SourceDetailPage({
   if (activeTab === "ingest" && !isWebhook) resolvedTab = "overview";
   if (activeTab === "sync" && isWebhook) resolvedTab = "overview";
 
-  const ingestUrl = `${process.env.NEXT_PUBLIC_AXEL_INGEST_URL ?? "https://ingest.axelapp.ai"}/in/${source.id}`;
+  const ingestUrl = `${resolveIngestBaseUrl(process.env)}/in/${source.id}`;
 
   const _tabs: SourceTab[] = [
     { key: "overview", label: "Overview" },
@@ -631,7 +635,9 @@ async function SyncTab({
                     {formatCount(run.records_emitted)}
                   </TableCell>
                   <TableCell className="max-w-64 truncate text-xs text-muted-foreground">
-                    {run.error_message ?? "—"}
+                    {run.error_message
+                      ? sanitizeConnectorDiagnosticForStorage(run.error_message, 400)
+                      : "—"}
                   </TableCell>
                 </TableRow>
               ))}

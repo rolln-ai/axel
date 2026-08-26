@@ -106,7 +106,7 @@ export function WorkspaceAdminActions({
             ) : null}
             <ConfirmAction
               title="Suspend workspace"
-              body="Suspend this workspace? All source ingestion stops immediately."
+              body="Suspend this workspace? Edge cache deletion is confirmed, but cache propagation or a lookup already in flight can persist for up to five minutes."
               confirmLabel="Suspend"
               destructive
             >
@@ -151,8 +151,9 @@ export function WorkspaceAdminActions({
           <h2 className="text-sm font-semibold text-red-600">Delete workspace</h2>
           <p className="mt-1 text-xs text-muted-foreground">
             Schedules deletion: the workspace flips to <code className="font-mono text-xs">deleting</code>,
-            its sources are disabled immediately, and the teardown cron cancels billing, wipes
-            ClickHouse + R2, and hard-deletes everything. Cannot be undone.
+            source edge-cache deletion is confirmed, and cache propagation or a lookup already in
+            flight can persist for up to five minutes. The teardown cron then cancels billing, wipes ClickHouse
+            + R2, and hard-deletes everything. Cannot be undone.
           </p>
           <form action={deleteAction} className="mt-4 space-y-3">
             <input type="hidden" name="workspace_id" value={workspaceId} />

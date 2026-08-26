@@ -3,6 +3,7 @@ import { PageHeader } from "../../_components/PageHeader";
 import { FirstRunSetupFlow } from "../_components/FirstRunSetupFlow";
 import { listSourcesCached } from "../../../lib/repositories";
 import { requireSession } from "../../../lib/session";
+import { resolveIngestBaseUrl } from "@axel/shared";
 
 export const dynamic = "force-dynamic";
 
@@ -25,6 +26,7 @@ export default async function SetupPage() {
   // Viewers can't create anything; there's nothing for them to do here.
   if (!canMutate) redirect("/dashboard");
 
+  const ingestBase = resolveIngestBaseUrl(process.env);
   let existingSource: { id: string; name: string; ingestUrl: string } | undefined;
   try {
     const sources = await listSourcesCached(session.activeWorkspace.workspace_id);
@@ -33,11 +35,10 @@ export default async function SetupPage() {
     // gone by then, which the flow explains and offers rotation for.
     const latest = sources.find((s) => s.source_kind === "webhook");
     if (latest) {
-      const base = process.env.NEXT_PUBLIC_AXEL_INGEST_URL ?? "https://ingest.axelapp.ai";
       existingSource = {
         id: latest.id,
         name: latest.name,
-        ingestUrl: `${base.replace(/\/$/, "")}/in/${latest.id}`,
+        ingestUrl: `${ingestBase}/in/${latest.id}`,
       };
     }
   } catch {

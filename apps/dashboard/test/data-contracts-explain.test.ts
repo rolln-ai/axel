@@ -1,9 +1,10 @@
 import type pg from "pg";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   approvePatch,
   explainFailure,
   FixturesFailedError,
+  InvalidApprovalReplayTargetsError,
   parsePatchResponse,
   previewPatch,
   type ApprovalInput,
@@ -137,6 +138,122 @@ describe("explainFailure", () => {
     });
   });
 
+  it("redacts payload, response, filter, and connector secrets before calling the LLM", async () => {
+    const filterSecret = ["sk", "live", "51Filter", "SecretValue"].join("_");
+    const jwt = [
+      "eyJhbGci",
+      "OiJIUzI1",
+      "NiJ9.",
+      "eyJzdWIi",
+      "OiJjdXN0",
+      "b21lci0x",
+      "In0.",
+      "c2lnbmF0",
+      "dXJlLXZh",
+      "bHVl",
+    ].join("");
+    const opaque = ["Ab9_cdEf", "GhijKLMN", "opQRstUV", "wxYZ0123", "456789ab"].join("");
+    let observedPrompt = "";
+
+    await explainFailure(
+      context({
+        failed_events: [
+          ev({
+            type: "invoice.paid",
+            status: "complete",
+            password: "hunter2",
+            auth: { bearer: "short-auth-value" },
+            note: `${jwt} ${opaque}`,
+          }),
+        ],
+        current_filter: {
+          kind: "event_type_in",
+          path: "type",
+          values: [filterSecret],
+        },
+        response: {
+          status: 400,
+          body_excerpt:
+            '{"error":"column customer_id is missing","password":"destination-secret","token":"tiny-token"}',
+        },
+        connector_message: "Authorization: Basic dXNlcjpwYXNz",
+      }),
+      {
+        apiKey: "fake",
+        callLlm: async (request) => {
+          observedPrompt = request.userPrompt;
+          return {
+            patch: {
+              likely_cause: "Missing customer_id column",
+              patch_kind: "none",
+              confidence: 0.9,
+              rationale: "The destination rejected the expected field.",
+            },
+            ms: 5,
+          };
+        },
+      },
+    );
+
+    for (const secret of [
+      filterSecret,
+      "hunter2",
+      "short-auth-value",
+      jwt,
+      opaque,
+      "destination-secret",
+      "tiny-token",
+      "dXNlcjpwYXNz",
+    ]) {
+      expect(observedPrompt).not.toContain(secret);
+    }
+    expect(observedPrompt).toContain("complete");
+    expect(observedPrompt).toContain("customer_id");
+    expect(observedPrompt).toContain("[REDACTED]");
+  });
+
+  it("refuses to follow redirects from OpenRouter", async () => {
+    let requestInit: RequestInit | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        requestInit = init;
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    likely_cause: "Missing column",
+                    patch_kind: "none",
+                    confidence: 0.9,
+                    rationale: "The destination rejected the field.",
+                  }),
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }),
+    );
+
+    try {
+      const result = await explainFailure(context(), {
+        apiKey: ["openrouter", "test", "key"].join("-"),
+      });
+      expect(result.likely_cause).toBe("Missing column");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+
+    expect(requestInit?.redirect).toBe("manual");
+    const body = JSON.parse(String(requestInit?.body)) as {
+      provider?: { data_collection?: string };
+    };
+    expect(body.provider).toEqual({ data_collection: "deny" });
+  });
+
   it("falls back to 'none' when the LLM caller throws", async () => {
     const result = await explainFailure(context(), {
       apiKey: "fake",
@@ -265,6 +382,21 @@ describe("approvePatch", () => {
 
     const fakeTxClient = {
       async query(sql: string, params: unknown[]) {
+        if (/WITH requested_replays AS/.test(sql)) {
+          const [workspaceId, dataContractId, eventIds, sourceIds, routeIds, r2Keys] =
+            params as [string, string, string[], string[], string[], string[]];
+          expect(workspaceId).toBe("ws_1");
+          expect(dataContractId).toBe("em_1");
+          return {
+            rows: eventIds.map((event_id, index) => ({
+              event_id,
+              source_id: sourceIds[index],
+              route_id: routeIds[index],
+              r2_key: r2Keys[index],
+            })),
+            rowCount: eventIds.length,
+          };
+        }
         if (/WITH candidates AS/.test(sql)) {
           // enqueueReplays candidate evaluation: echo the UNNEST arrays back
           // as candidate rows (nothing muted, nothing in flight).
@@ -358,7 +490,22 @@ describe("approvePatch", () => {
     // canActivate=false". Test that scenario.
     const failingInput = baseInput({ samples: [] });
     const fakeTxClient = {
-      async query() {
+      async query(sql: string, params: unknown[] = []) {
+        if (/WITH requested_replays AS/.test(sql)) {
+          const eventIds = params[2] as string[];
+          const sourceIds = params[3] as string[];
+          const routeIds = params[4] as string[];
+          const r2Keys = params[5] as string[];
+          return {
+            rows: eventIds.map((event_id, index) => ({
+              event_id,
+              source_id: sourceIds[index],
+              route_id: routeIds[index],
+              r2_key: r2Keys[index],
+            })),
+            rowCount: eventIds.length,
+          };
+        }
         return { rows: [], rowCount: 1 };
       },
     } as unknown as pg.PoolClient;
@@ -393,5 +540,50 @@ describe("approvePatch", () => {
         }),
       }),
     ).rejects.toBeInstanceOf(FixturesFailedError);
+  });
+
+  it("rejects a foreign-workspace R2 key before any patch or replay write", async () => {
+    const foreignR2Key = "events/ws_foreign/2026-08-26/evt_foreign.json";
+    const queries: Array<{ sql: string; params: unknown[] }> = [];
+    const fakeTxClient = {
+      async query(sql: string, params: unknown[] = []) {
+        queries.push({ sql, params });
+        if (/WITH requested_replays AS/.test(sql)) {
+          expect(sql).toContain("dl.workspace_id = $1");
+          expect(sql).toContain("dl.r2_key = requested.r2_key");
+          expect(sql).toContain("dc.workspace_id = $1");
+          expect(sql).toContain("r.workspace_id = $1");
+          expect(params).toEqual([
+            "ws_1",
+            "em_1",
+            ["e1"],
+            ["src_1"],
+            ["rt_1"],
+            [foreignR2Key],
+          ]);
+          // The durable lookup is workspace-scoped, so the known foreign key
+          // cannot resolve even when the caller pairs it with local-looking ids.
+          return { rows: [], rowCount: 0 };
+        }
+        return { rows: [], rowCount: 1 };
+      },
+    } as unknown as pg.PoolClient;
+    const versionAppender = vi.fn();
+
+    await expect(approvePatch(baseInput({
+      failedDeliveries: [{
+        event_id: "e1",
+        source_id: "src_1",
+        route_id: "rt_1",
+        r2_key: foreignR2Key,
+      }],
+    }), {
+      withTx: async (fn) => fn(fakeTxClient),
+      versionAppender,
+    })).rejects.toBeInstanceOf(InvalidApprovalReplayTargetsError);
+
+    expect(versionAppender).not.toHaveBeenCalled();
+    expect(queries.some(({ sql }) => /WITH candidates AS|INSERT INTO replay_requests/.test(sql)))
+      .toBe(false);
   });
 });

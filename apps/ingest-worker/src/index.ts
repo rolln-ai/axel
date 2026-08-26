@@ -179,7 +179,9 @@ export default {
           path: new URL(request.url).pathname,
         },
       }));
-      maybeBeatIngest(env, ctx, err instanceof Error ? err.message : String(err));
+      // Keep raw exception text out of the durable heartbeat row. Sentry receives
+      // the sanitized diagnostic through the capture boundary above.
+      maybeBeatIngest(env, ctx, "ingest_request_failed");
       throw err;
     }
   },
@@ -232,11 +234,8 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       });
     }
     if (url.pathname === "/admin/trigger-event") {
-      const cache =
-        env.__SOURCE_CACHE_OVERRIDE
-        ?? (env.SOURCE_CACHE ? kvSourceCache(env.SOURCE_CACHE) : null);
       return handleTriggerEvent(request, {
-        cache,
+        lookupSource: (sourceId) => lookupSource(env, sourceId),
         adminToken: env.ADMIN_TOKEN,
         rawPayloads: env.EVENTS_RAW,
         queueForShard: (shard) => queueForShard(env, shard),
@@ -321,12 +320,24 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
 
     // AXE-23: per-provider signature verification. Must run BEFORE R2
     // write + queue enqueue — a spoofed payload that gets through here
-    // is durable, billable, and will fan out to destinations. The
-    // dispatch is no-op when the source has no signing_secret
-    // configured (legacy token-only sources keep working).
+    // is durable, billable, and will fan out to destinations. Custom sources
+    // may remain token-only for backwards compatibility. A
+    // named provider, however, must never degrade to token-only merely because
+    // its decrypted secret is absent from the edge Source shape.
     const provider = source.provider ?? "custom";
-    if ((source.signing_secret?.length ?? 0) > 0 || (source.signing_secret_previous?.length ?? 0) > 0) {
-      const headerMap = collectHeaders(request);
+    const hasSigningSecret =
+      (source.signing_secret?.length ?? 0) > 0
+      || (source.signing_secret_previous?.length ?? 0) > 0;
+    if (provider !== "custom" && !hasSigningSecret) {
+      throw new SourceLookupUnavailableError(
+        `signing secret missing for provider source ${source.source_id} (${provider}) — refusing to skip verification`,
+      );
+    }
+    if (hasSigningSecret) {
+      // Verification needs the exact inbound auth headers. Chargebee signs via
+      // HTTP Basic auth, so using the sanitized persistence map here would
+      // strip `authorization` and reject every valid Chargebee webhook.
+      const headerMap = collectVerificationHeaders(request);
       // Verify against the current secret first, then the previous one during a
       // rotation overlap window — a webhook signed with the old secret while the
       // customer rotates still passes until the previous secret is retired.
@@ -541,12 +552,65 @@ export async function lookupSourceUncached(env: Env, sourceId: string): Promise<
 // or propagated (queue message → delivery). x-axel-token is the source ingest
 // secret, already validated before this runs; the rest are generic auth carriers.
 // Keys arrive lowercased from the Headers iterator.
-const REDACTED_INBOUND_HEADERS = new Set(["x-axel-token", "authorization", "cookie", "x-api-key"]);
+const REDACTED_INBOUND_HEADERS = new Set([
+  "x-axel-token",
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+  "x-api-key",
+  "x-auth-token",
+  "x-access-token",
+  "x-authorization",
+  "cf-access-jwt-assertion",
+  "stripe-signature",
+  "x-hub-signature",
+  "x-hub-signature-256",
+  "x-shopify-hmac-sha256",
+  "x-axel-signature",
+]);
+
+const REDACTED_QUERY_KEYS = new Set([
+  "token",
+  "access_token",
+  "refresh_token",
+  "id_token",
+  "client_secret",
+  "api_key",
+  "api-key",
+  "apikey",
+  "key",
+  "secret",
+  "private_key",
+  "signature",
+  "sig",
+  "jwt",
+  "code",
+  "auth",
+  "bearer",
+  "authorization",
+  "credential",
+  "password",
+]);
+
+const SECRET_NAME_PART = /(^|[-_])(authorization|cookie|credential|jwt|password|secret|signature|token)([-_]|$)|(^|[-_])api[-_]?key([-_]|$)/;
+
+function hasSecretBearingName(name: string): boolean {
+  return SECRET_NAME_PART.test(name.toLowerCase());
+}
+
+function collectVerificationHeaders(request: Request): Record<string, string> {
+  const out: Record<string, string> = {};
+  request.headers.forEach((value, key) => {
+    out[key] = value;
+  });
+  return out;
+}
 
 function collectHeaders(request: Request): Record<string, string> {
   const out: Record<string, string> = {};
   request.headers.forEach((value, key) => {
-    if (REDACTED_INBOUND_HEADERS.has(key.toLowerCase())) return;
+    const lower = key.toLowerCase();
+    if (REDACTED_INBOUND_HEADERS.has(lower) || hasSecretBearingName(lower)) return;
     out[key] = value;
   });
   return out;
@@ -555,7 +619,14 @@ function collectHeaders(request: Request): Record<string, string> {
 function collectQuery(url: URL): Record<string, string> {
   const out: Record<string, string> = {};
   url.searchParams.forEach((value, key) => {
-    if (key !== "token") out[key] = value;
+    const lower = key.toLowerCase();
+    if (
+      REDACTED_QUERY_KEYS.has(lower)
+      || hasSecretBearingName(lower)
+      || lower.startsWith("x-amz-")
+      || lower.startsWith("x-goog-")
+    ) return;
+    out[key] = value;
   });
   return out;
 }

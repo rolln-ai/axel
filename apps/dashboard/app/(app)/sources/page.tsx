@@ -19,6 +19,7 @@ import {
   type SourceEventCounts,
 } from "../../../lib/usage";
 import { Badge } from "@/components/ui/badge";
+import { resolveIngestBaseUrl } from "@axel/shared";
 import {
   Table,
   TableBody,
@@ -52,7 +53,7 @@ export default async function SourcesPage() {
   const canDelete = session.activeWorkspace.role === "owner";
   // Same derivation as the source detail page — the Quick View panel's
   // copyable ingest snippet must point at this deployment's ingest host.
-  const ingestBase = process.env.NEXT_PUBLIC_AXEL_INGEST_URL ?? "https://ingest.axelapp.ai";
+  const ingestBase = resolveIngestBaseUrl(process.env);
   const visibleSources = sources.filter((source) => source.source_kind === "webhook");
   // Pull-source creation is intentionally retired (webhook-only wizard), but a
   // workspace that already has pull sources must still see them — they keep

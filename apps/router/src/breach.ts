@@ -1,3 +1,5 @@
+import { sanitizeConnectorDiagnosticForStorage } from "@axel/shared";
+
 // Breach handler. When the declarative engine fails to evaluate a route
 // (invalid JSON, unsafe path, unknown DSL kind, etc.), the router must:
 //
@@ -52,9 +54,10 @@ export async function handleBreach(
   breach: Breach,
 ): Promise<void> {
   const now = (deps.now ?? (() => new Date()))().toISOString();
+  const safeMessage = sanitizeConnectorDiagnosticForStorage(breach.message, 400);
   let markError: unknown = null;
   try {
-    await deps.routes.markErrored(ctx.route_id, breach.reason, breach.message);
+    await deps.routes.markErrored(ctx.route_id, breach.reason, safeMessage);
   } catch (err) {
     markError = err;
   }
@@ -67,7 +70,7 @@ export async function handleBreach(
     route_id: ctx.route_id,
     r2_key: ctx.r2_key,
     reason: breach.reason,
-    message: breach.message,
+    message: safeMessage,
     errored_at: now,
   });
   if (markError) {

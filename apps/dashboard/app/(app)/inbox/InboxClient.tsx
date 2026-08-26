@@ -3,9 +3,10 @@
 import { useActionState, useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { AlertTriangle, BellOff, CheckCircle2, Keyboard, Loader2, RotateCw, Sparkles, VolumeX, Wrench } from "lucide-react";
+import { AlertTriangle, BellOff, CheckCircle2, Database, Keyboard, Loader2, RotateCw, Sparkles, VolumeX, Wrench } from "lucide-react";
 import {
   applyFingerprintRepair,
+  applyFingerprintSchemaRepair,
   muteFingerprint,
   previewFingerprintRepair,
   retryFingerprint,
@@ -86,6 +87,7 @@ export function InboxClient({ groups, showResolved }: Props) {
   const [repairPreview, setRepairPreview] = useState<RepairPreviewResult | null>(null);
   const [repairNotice, setRepairNotice] = useState<string | null>(null);
   const [repairError, setRepairError] = useState<string | null>(null);
+  const [repairStrategy, setRepairStrategy] = useState<"destination" | "transform">("destination");
   const [rounding, setRounding] = useState<"round" | "floor" | "ceil" | "truncate">("round");
   const [arrayFormat, setArrayFormat] = useState<"json" | "join">("json");
   const [separator, setSeparator] = useState(", ");
@@ -102,6 +104,7 @@ export function InboxClient({ groups, showResolved }: Props) {
     setRepairGroup(group);
     setRepairPreview(null);
     setRepairError(null);
+    setRepairStrategy("destination");
     setRounding("round");
     setArrayFormat("json");
     setSeparator(", ");
@@ -129,11 +132,17 @@ export function InboxClient({ groups, showResolved }: Props) {
         : proposed;
     setRepairError(null);
     startApply(async () => {
-      const result = await applyFingerprintRepair({
-        fingerprint: repairGroup.fingerprint,
-        exemplarId: repairGroup.exemplar_id,
-        repair,
-      });
+      const useDestinationSchema = repairStrategy === "destination" && repairPreview.schemaRepair;
+      const result = useDestinationSchema
+        ? await applyFingerprintSchemaRepair({
+            fingerprint: repairGroup.fingerprint,
+            exemplarId: repairGroup.exemplar_id,
+          })
+        : await applyFingerprintRepair({
+            fingerprint: repairGroup.fingerprint,
+            exemplarId: repairGroup.exemplar_id,
+            repair,
+          });
       if (!result.ok) {
         setRepairError(result.error);
         return;
@@ -280,6 +289,8 @@ export function InboxClient({ groups, showResolved }: Props) {
         previewPending={previewPending}
         applyPending={applyPending}
         error={repairError}
+        strategy={repairStrategy}
+        onStrategyChange={setRepairStrategy}
         rounding={rounding}
         onRoundingChange={setRounding}
         arrayFormat={arrayFormat}
@@ -484,6 +495,8 @@ function RepairDialog({
   previewPending,
   applyPending,
   error,
+  strategy,
+  onStrategyChange,
   rounding,
   onRoundingChange,
   arrayFormat,
@@ -498,6 +511,8 @@ function RepairDialog({
   previewPending: boolean;
   applyPending: boolean;
   error: string | null;
+  strategy: "destination" | "transform";
+  onStrategyChange: (value: "destination" | "transform") => void;
   rounding: "round" | "floor" | "ceil" | "truncate";
   onRoundingChange: (value: "round" | "floor" | "ceil" | "truncate") => void;
   arrayFormat: "json" | "join";
@@ -509,16 +524,27 @@ function RepairDialog({
 }) {
   const proposal = preview?.ok ? preview.proposal : null;
   const repair = proposal?.repair;
+  const schemaRepair = preview?.ok ? preview.schemaRepair : undefined;
+  const useDestinationSchema = Boolean(schemaRepair && strategy === "destination");
   return (
     <Dialog open={group !== null} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg" onClick={(event) => event.stopPropagation()}>
+      <DialogContent
+        className="max-h-[90vh] overflow-y-auto sm:max-w-lg"
+        onClick={(event) => event.stopPropagation()}
+      >
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Wrench className="size-4 text-amber-600" />
+            {schemaRepair ? (
+              <Database className="size-4 text-amber-600" />
+            ) : (
+              <Wrench className="size-4 text-amber-600" />
+            )}
             {proposal?.title ?? "Prepare an automatic fix"}
           </DialogTitle>
           <DialogDescription>
-            Axel will add this conversion only on the path to the affected destination. Other route outputs stay unchanged.
+            {schemaRepair
+              ? "Choose whether to preserve the incoming decimals in BigQuery or convert them before delivery."
+              : "Axel will add this conversion only on the path to the affected destination. Other route outputs stay unchanged."}
           </DialogDescription>
         </DialogHeader>
 
@@ -543,7 +569,63 @@ function RepairDialog({
               </dl>
             </div>
 
-            {repair.kind === "coerce" && repair.to === "integer" ? (
+            {schemaRepair ? (
+              <fieldset className="space-y-2">
+                <legend className="text-sm font-medium">How should Axel resolve it?</legend>
+                <label
+                  className={`flex cursor-pointer gap-3 rounded-lg border p-3 transition-colors ${
+                    strategy === "destination"
+                      ? "border-primary bg-primary/5"
+                      : "border-border hover:bg-muted/30"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="repair-strategy"
+                    value="destination"
+                    checked={strategy === "destination"}
+                    onChange={() => onStrategyChange("destination")}
+                    className="mt-1"
+                  />
+                  <span className="min-w-0 space-y-1">
+                    <span className="flex items-center gap-2 text-sm font-medium">
+                      <Database className="size-4" />
+                      Preserve decimals
+                      <Badge variant="secondary" className="text-[10px]">Recommended</Badge>
+                    </span>
+                    <span className="block text-xs text-muted-foreground">
+                      {schemaRepair.status === "needed"
+                        ? <>Change <code>{schemaRepair.dataset}.{schemaRepair.table}</code> field <code>{schemaRepair.fieldPath}</code> from INT64 to FLOAT64, then replay. Event values stay unchanged.</>
+                        : <>The destination field already uses FLOAT64. Replay without changing route data.</>}
+                    </span>
+                  </span>
+                </label>
+                <label
+                  className={`flex cursor-pointer gap-3 rounded-lg border p-3 transition-colors ${
+                    strategy === "transform"
+                      ? "border-primary bg-primary/5"
+                      : "border-border hover:bg-muted/30"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="repair-strategy"
+                    value="transform"
+                    checked={strategy === "transform"}
+                    onChange={() => onStrategyChange("transform")}
+                    className="mt-1"
+                  />
+                  <span className="min-w-0 space-y-1">
+                    <span className="block text-sm font-medium">Keep the destination as INT64</span>
+                    <span className="block text-xs text-muted-foreground">
+                      Convert values in this route before delivery. Fractional precision will be permanently removed.
+                    </span>
+                  </span>
+                </label>
+              </fieldset>
+            ) : null}
+
+            {repair.kind === "coerce" && repair.to === "integer" && !useDestinationSchema ? (
               <div className="space-y-2">
                 <Label htmlFor="repair-rounding">How should decimals become integers?</Label>
                 <Select value={rounding} onValueChange={(value) => onRoundingChange(value as typeof rounding)}>
@@ -587,7 +669,9 @@ function RepairDialog({
             ) : null}
 
             <p className="text-xs text-muted-foreground">
-              Confirming updates the route and immediately replays {group?.count ?? 0} failed {group?.count === 1 ? "delivery" : "deliveries"}. The change is recorded in the audit log.
+              {useDestinationSchema
+                ? <>Confirming {schemaRepair?.status === "needed" ? "updates the BigQuery schema and " : ""}immediately replays {group?.count ?? 0} failed {group?.count === 1 ? "delivery" : "deliveries"}. The destination service account must be allowed to run jobs and update the table. The change is recorded in the audit log.</>
+                : <>Confirming updates the route and immediately replays {group?.count ?? 0} failed {group?.count === 1 ? "delivery" : "deliveries"}. The change is recorded in the audit log.</>}
             </p>
           </div>
         ) : null}
@@ -599,8 +683,20 @@ function RepairDialog({
             Cancel
           </Button>
           <Button type="button" disabled={!proposal || applyPending || previewPending} onClick={onApply}>
-            {applyPending ? <Loader2 className="size-4 animate-spin" /> : <Wrench className="size-4" />}
-            {applyPending ? "Applying fix…" : `Apply fix & replay ${group?.count ?? 0}`}
+            {applyPending ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : useDestinationSchema ? (
+              <Database className="size-4" />
+            ) : (
+              <Wrench className="size-4" />
+            )}
+            {applyPending
+              ? useDestinationSchema ? "Updating BigQuery…" : "Applying fix…"
+              : useDestinationSchema
+                ? schemaRepair?.status === "needed"
+                  ? `Change type & replay ${group?.count ?? 0}`
+                  : `Replay ${group?.count ?? 0}`
+                : `Apply conversion & replay ${group?.count ?? 0}`}
           </Button>
         </DialogFooter>
       </DialogContent>

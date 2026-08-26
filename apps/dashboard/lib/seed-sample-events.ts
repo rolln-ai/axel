@@ -1,5 +1,6 @@
 "use server";
 
+import { resolveIngestBaseUrl } from "@axel/shared";
 import { db } from "./db";
 import { withWorkspaceMutation } from "./with-mutation";
 import { TEST_PAYLOADS } from "./test-payloads";
@@ -39,7 +40,12 @@ export async function seedSampleEvents(
       return { error: "Source not found in this workspace." };
     }
 
-    const ingestBase = process.env.AXEL_INGEST_URL ?? "https://ingest.axelapp.ai";
+    let ingestBase: string;
+    try {
+      ingestBase = resolveIngestBaseUrl(process.env);
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : "Invalid ingest configuration." };
+    }
     const adminToken = process.env.INGEST_ADMIN_TOKEN;
     if (!adminToken) {
       return {
@@ -66,6 +72,7 @@ export async function seedSampleEvents(
           try {
             const res = await fetch(`${ingestBase.replace(/\/$/, "")}/admin/trigger-event`, {
               method: "POST",
+              redirect: "manual",
               headers: {
                 "content-type": "application/json",
                 "x-axel-admin-token": adminToken,

@@ -18,10 +18,11 @@ import type { Source } from "@axel/shared";
  *   within ~30s without an explicit invalidation.
  *
  * Invalidation:
- * - Token rotation and source disable propagate within `positiveTtlSeconds`
- *   (5 minutes by default). For faster propagation, the control plane can
- *   POST `/admin/source-cache/invalidate` (TODO future). The TTL gives us
- *   eventual consistency without coordination today.
+ * - Token rotation, source disable, and privacy-policy changes use required
+ *   control-plane invalidation before and after their database write. The
+ *   five-minute TTL bounds post-commit edge failure, distributed KV
+ *   propagation, and an old lookup already in flight when the final delete
+ *   lands.
  */
 
 export interface SourceCacheLookup {
@@ -34,8 +35,7 @@ export interface SourceCache {
   /**
    * Drop the cached entry for a single source, regardless of TTL. Called from
    * the admin invalidation endpoint when the control plane mutates a source
-   * (token rotated, status flipped, deleted) and wants the change to land at
-   * the edge faster than `positiveTtlSeconds`.
+   * (token rotated, disabled, deleted) and must prove the stale entry is gone.
    */
   invalidate(sourceId: string): Promise<void>;
 }
@@ -89,8 +89,10 @@ export async function resolveSource(
  * Wrap a Cloudflare KV namespace into a `SourceCache`. Values are stored as
  * compact JSON; KV's minimum TTL is 60s so we clamp negative TTLs accordingly.
  *
- * The implementation tolerates KV being temporarily unavailable: any thrown
- * error is treated as a cache miss and the upstream lookup is invoked.
+ * Reads and writes tolerate KV being temporarily unavailable: a failed read is
+ * treated as a cache miss and a failed write only costs another upstream
+ * lookup. Invalidation is different: callers use it to prove a revoked token
+ * or tightened policy is no longer cached, so delete failures must propagate.
  */
 export interface KVNamespaceLike {
   get(key: string, type?: "text" | "json"): Promise<unknown>;
@@ -98,15 +100,23 @@ export interface KVNamespaceLike {
   delete(key: string): Promise<void>;
 }
 
+// Bump when a previously cached Source shape could change authentication
+// semantics. Version 3 also invalidates already-deployed v2 positives that may
+// still carry the former one-year admin TTL, forcing them to repopulate under
+// the five-minute revocation bound.
+const SOURCE_CACHE_SCHEMA_VERSION = 3;
+
 export function kvSourceCache(kv: KVNamespaceLike): SourceCache {
   return {
     async get(sourceId) {
       try {
         const raw = await kv.get(`src:${sourceId}`, "text");
         if (typeof raw !== "string") return undefined;
-        const parsed = JSON.parse(raw) as CachedLookup;
-        if (parsed.kind !== "hit" && parsed.kind !== "miss") return undefined;
-        return parsed;
+        const parsed = JSON.parse(raw) as CachedLookup & { cache_schema_version?: unknown };
+        if (parsed.kind === "miss") return parsed;
+        if (parsed.kind !== "hit") return undefined;
+        if (parsed.cache_schema_version !== SOURCE_CACHE_SCHEMA_VERSION) return undefined;
+        return { kind: "hit", source: parsed.source };
       } catch {
         // KV miss / KV down / corrupted entry: behave like an empty cache
         // so the caller falls through to upstream lookup.
@@ -115,7 +125,10 @@ export function kvSourceCache(kv: KVNamespaceLike): SourceCache {
     },
     async put(sourceId, value, ttlSeconds) {
       try {
-        await kv.put(`src:${sourceId}`, JSON.stringify(value), {
+        const stored = value.kind === "hit"
+          ? { ...value, cache_schema_version: SOURCE_CACHE_SCHEMA_VERSION }
+          : value;
+        await kv.put(`src:${sourceId}`, JSON.stringify(stored), {
           expirationTtl: Math.max(60, Math.floor(ttlSeconds)),
         });
       } catch {
@@ -124,12 +137,7 @@ export function kvSourceCache(kv: KVNamespaceLike): SourceCache {
       }
     },
     async invalidate(sourceId) {
-      try {
-        await kv.delete(`src:${sourceId}`);
-      } catch {
-        // If the delete fails, the cached entry will TTL out within
-        // `positiveTtlSeconds`. Worst-case latency, never wrong correctness.
-      }
+      await kv.delete(`src:${sourceId}`);
     },
   };
 }

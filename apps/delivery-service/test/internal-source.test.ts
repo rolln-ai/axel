@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { sourceSigningSecretAadString } from "@axel/shared";
 import {
   handleInternalSourceRequest,
+  isInternalSecretAuthorized,
   loadInternalSource,
   resolveInternalSourceAuthSecrets,
   type InternalSourceRow,
@@ -237,5 +238,15 @@ describe("POST /internal/source", () => {
     expect(response.status).toBe(503);
     expect(response.body).toEqual({ ok: false, error: "source_lookup_unavailable" });
     expect(JSON.stringify(response.body)).not.toContain("CREDENTIALS_MASTER_KEY");
+  });
+});
+
+describe("internal shared-secret comparison", () => {
+  it("accepts only an exact string match", () => {
+    expect(isInternalSecretAuthorized("same-secret", "same-secret")).toBe(true);
+    expect(isInternalSecretAuthorized("same-secret-x", "same-secret")).toBe(false);
+    expect(isInternalSecretAuthorized(["same-secret"], "same-secret")).toBe(false);
+    expect(isInternalSecretAuthorized(undefined, "same-secret")).toBe(false);
+    expect(isInternalSecretAuthorized("", "")).toBe(false);
   });
 });

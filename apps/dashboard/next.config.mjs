@@ -40,6 +40,17 @@ const nextConfig = {
   // / Turbopack needs them transpiled rather than bundled as-is, since
   // there are no compiled `.js` files in the source trees.
   transpilePackages: ["@axel/shared", "@axel/observability", "@axel/pull-connectors"],
+  // The authenticated app includes one-shot credentials in a few URL query
+  // strings. Never forward the current page URL as a Referer, including to the
+  // same-origin analytics proxy.
+  async headers() {
+    return [
+      {
+        source: "/:path*",
+        headers: [{ key: "Referrer-Policy", value: "no-referrer" }],
+      },
+    ];
+  },
   // Reverse proxy for PostHog. The browser talks to same-origin `/ingest/*`,
   // which we forward to PostHog US. This keeps analytics working behind ad
   // blockers that block requests to posthog.com directly. Static/array assets

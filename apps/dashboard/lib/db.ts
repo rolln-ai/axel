@@ -1,6 +1,6 @@
 import "server-only";
 import pg from "pg";
-import { controlPlaneDbSslVerify } from "@axel/shared";
+import { controlPlanePgSslOption } from "@axel/shared";
 import { isTransientPostgresError } from "@axel/observability";
 
 const { Pool } = pg;
@@ -39,9 +39,10 @@ export function db(): pg.Pool {
     const poolMax = IS_VERCEL ? Math.min(configuredPoolMax, 2) : configuredPoolMax;
     const pool = new Pool({
       connectionString: process.env.DATABASE_URL,
-      ssl: process.env.DATABASE_URL.includes("localhost")
-        ? false
-        : { rejectUnauthorized: controlPlaneDbSslVerify(process.env.CONTROL_PLANE_DB_SSL_VERIFY) },
+      ssl: controlPlanePgSslOption(
+        process.env.DATABASE_URL,
+        process.env.CONTROL_PLANE_DB_SSL_VERIFY,
+      ),
       max: poolMax,
       maxUses: Number.parseInt(process.env.DATABASE_POOL_MAX_USES ?? (IS_VERCEL ? "50" : "20"), 10),
       // Render's external Postgres handshake can be slow from Vercel, so keep

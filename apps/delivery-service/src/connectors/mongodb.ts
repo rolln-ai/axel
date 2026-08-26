@@ -1,6 +1,7 @@
 import { MongoClient, type Document } from "mongodb";
 import type { Connector, DeliveryContext } from "@axel/connectors";
 import { connectionHostSsrfReason, type Destination, type DeliveryAttempt, type MongoBinding } from "@axel/shared";
+import { safeLookup } from "../safe-dns.js";
 
 /**
  * MongoDB destination connector.
@@ -57,6 +58,7 @@ async function getClient(connectionString: string): Promise<MongoClient> {
       maxPoolSize: 4,
       serverSelectionTimeoutMS: 8_000,
       connectTimeoutMS: 8_000,
+      lookup: safeLookup,
     });
     await client.connect();
     clients.set(connectionString, client);

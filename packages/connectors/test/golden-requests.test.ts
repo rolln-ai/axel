@@ -228,6 +228,33 @@ describe("golden request — http connector", () => {
     expect(rec.calls[0]!.method).toBe("POST");
     expect(rec.calls[0]!.headers).toEqual({ "content-type": "application/json" });
   });
+
+  it.each(["node", "edge"] as const)(
+    "%s runtime drops routing and request-smuggling headers at the connector boundary",
+    async (name) => {
+      const rec = recorder(204);
+      const runtime = runtimes(rec.fetch).find((candidate) => candidate.name === name)!;
+      await runtime.http.deliver(
+        payloadBuffer(),
+        destination("http", {
+          url: "https://receiver.golden.test/plain",
+          headers: {
+            Host: "internal.service",
+            "Content-Length": "0",
+            "Transfer-Encoding": "chunked",
+            "X-Smuggle": "ok\r\nX-Injected: yes",
+            "X-Safe": "kept",
+          },
+        }) as never,
+        { eventId: EVENT_ID },
+      );
+
+      expect(rec.calls[0]!.headers).toEqual({
+        "content-type": "application/json",
+        "X-Safe": "kept",
+      });
+    },
+  );
 });
 
 // ---- Webhook ------------------------------------------------------------ //
@@ -317,7 +344,7 @@ describe("golden request — signed webhook connector", () => {
     }
   });
 
-  it("omits the signature header (and reports signed:false) for an empty secret", async () => {
+  it("fails closed for an empty signing secret", async () => {
     const rec = recorder(200);
     const r = runtimes(rec.fetch)[1]!; // edge
     const attempt = await r.webhook.deliver(
@@ -325,8 +352,11 @@ describe("golden request — signed webhook connector", () => {
       destination("webhook", { ...config, signing_secret: "" }) as never,
       { eventId: EVENT_ID },
     );
-    expect(rec.calls[0]!.headers["X-Axel-Signature"]).toBeUndefined();
-    expect(attempt.response).toMatchObject({ signed: false });
+    expect(rec.calls).toHaveLength(0);
+    expect(attempt.status).toBe("dead");
+    expect(attempt.response).toEqual({
+      error: "missing_signing_secret: signed webhook delivery refused",
+    });
   });
 });
 
@@ -405,7 +435,10 @@ describe("shared status classification", () => {
       );
       const webhook = await r.webhook.deliver(
         payloadBuffer(),
-        destination("webhook", { url: "https://receiver.golden.test/x" }) as never,
+        destination("webhook", {
+          url: "https://receiver.golden.test/x",
+          signing_secret: SIGNING_SECRET,
+        }) as never,
         { eventId: EVENT_ID },
       );
       expect(http.status).toBe("retry");
@@ -436,16 +469,159 @@ describe("shared status classification", () => {
     expect(rec.calls).toHaveLength(0);
   });
 
-  it("captures at most 2048 bytes of the response body in both runtimes", async () => {
-    const rec = recorder(200, "x".repeat(5000));
-    for (const r of runtimes(rec.fetch)) {
+  it("blocks a redirect to a private target before sending the webhook body there", async () => {
+    const calls: string[] = [];
+    const redirectingFetch: FetchLike = async (url) => {
+      calls.push(url);
+      return {
+        status: 307,
+        async text() { return ""; },
+        headers: { get: (name) => name.toLowerCase() === "location" ? "http://169.254.169.254/latest/meta-data/" : null },
+      };
+    };
+    for (const r of runtimes(redirectingFetch)) {
+      const http = await r.http.deliver(
+        payloadBuffer(),
+        destination("http", { url: "https://receiver.golden.test/redirect" }) as never,
+        { eventId: EVENT_ID },
+      );
+      const webhook = await r.webhook.deliver(
+        payloadBuffer(),
+        destination("webhook", {
+          url: "https://receiver.golden.test/redirect",
+          signing_secret: SIGNING_SECRET,
+        }) as never,
+        { eventId: EVENT_ID },
+      );
+      expect(http.status).toBe("dead");
+      expect(webhook.status).toBe("dead");
+      expect((http.response as { error: string }).error).toMatch(/^ssrf_blocked: /);
+      expect((webhook.response as { error: string }).error).toMatch(/^ssrf_blocked: /);
+    }
+    expect(calls).toHaveLength(4);
+    expect(calls).not.toContain("http://169.254.169.254/latest/meta-data/");
+  });
+
+  it("blocks cross-origin redirects before forwarding webhook data or credentials", async () => {
+    const calls: string[] = [];
+    const redirectingFetch: FetchLike = async (url) => {
+      calls.push(url);
+      return {
+        status: 307,
+        async text() { return ""; },
+        headers: {
+          get: (name) => name.toLowerCase() === "location"
+            ? "https://other-origin.example/collect"
+            : null,
+        },
+      };
+    };
+
+    for (const r of runtimes(redirectingFetch)) {
+      const http = await r.http.deliver(
+        payloadBuffer(),
+        destination("http", {
+          url: "https://receiver.golden.test/redirect",
+          headers: { authorization: "Bearer destination-secret" },
+        }) as never,
+        { eventId: EVENT_ID },
+      );
+      const webhook = await r.webhook.deliver(
+        payloadBuffer(),
+        destination("webhook", {
+          url: "https://receiver.golden.test/redirect",
+          signing_secret: SIGNING_SECRET,
+        }) as never,
+        { eventId: EVENT_ID },
+      );
+      expect(http.status).toBe("dead");
+      expect(webhook.status).toBe("dead");
+      expect((http.response as { error: string }).error).toMatch(/^redirect_blocked: /);
+      expect((webhook.response as { error: string }).error).toMatch(/^redirect_blocked: /);
+    }
+
+    expect(calls).toHaveLength(4);
+    expect(calls).not.toContain("https://other-origin.example/collect");
+  });
+
+  it("cancels redirect bodies before following a validated Location", async () => {
+    const calls: string[] = [];
+    let redirectCancels = 0;
+    const redirectingFetch: FetchLike = async (url) => {
+      calls.push(url);
+      if (url.endsWith("/redirect")) {
+        return {
+          status: 307,
+          async text() { return "must-not-be-read"; },
+          headers: {
+            get: (name) => name.toLowerCase() === "location" ? "/accepted" : null,
+          },
+          body: {
+            async cancel() {
+              redirectCancels += 1;
+            },
+          },
+        };
+      }
+      return { status: 204, async text() { return ""; } };
+    };
+
+    for (const r of runtimes(redirectingFetch)) {
+      const http = await r.http.deliver(
+        payloadBuffer(),
+        destination("http", { url: "https://receiver.golden.test/redirect" }) as never,
+        { eventId: EVENT_ID },
+      );
+      const webhook = await r.webhook.deliver(
+        payloadBuffer(),
+        destination("webhook", {
+          url: "https://receiver.golden.test/redirect",
+          signing_secret: SIGNING_SECRET,
+        }) as never,
+        { eventId: EVENT_ID },
+      );
+      expect(http.status).toBe("success");
+      expect(webhook.status).toBe("success");
+    }
+
+    expect(calls).toHaveLength(8);
+    expect(redirectCancels).toBe(4);
+  });
+
+  it("does not read or retain a receiver-controlled response body", async () => {
+    let reads = 0;
+    let cancels = 0;
+    const fetchImpl: FetchLike = async () => ({
+      status: 500,
+      async text() {
+        reads += 1;
+        return '{"echoed_webhook_secret":"must-not-leave"}';
+      },
+      body: {
+        async cancel() {
+          cancels += 1;
+        },
+      },
+    });
+    for (const r of runtimes(fetchImpl)) {
       const http = await r.http.deliver(
         payloadBuffer(),
         destination("http", { url: "https://receiver.golden.test/x" }) as never,
         { eventId: EVENT_ID },
       );
-      expect((http.response as { body: string }).body).toHaveLength(2048);
+      const webhook = await r.webhook.deliver(
+        payloadBuffer(),
+        destination("webhook", {
+          url: "https://receiver.golden.test/x",
+          signing_secret: SIGNING_SECRET,
+        }) as never,
+        { eventId: EVENT_ID },
+      );
+      expect(http.response).toEqual({ status: 500 });
+      expect(webhook.response).not.toHaveProperty("body");
     }
+    expect(reads).toBe(0);
+    expect(cancels).toBe(4);
   });
 });
 
@@ -482,6 +658,7 @@ describe("timeout override chain", () => {
       destination("webhook", {
         url: "https://receiver.golden.test/x",
         timeout_ms: 5_000,
+        signing_secret: SIGNING_SECRET,
       }) as never,
       { eventId: EVENT_ID },
     );

@@ -128,6 +128,23 @@ export function controlPlaneDbSslVerify(flag: string | undefined): boolean {
 }
 
 /**
+ * Build the node-postgres TLS option for Axel's control-plane database.
+ * `sslmode=disable` is an explicit local/self-host opt-out; loopback keeps its
+ * historical plaintext behavior. Remote databases stay encrypted and may opt
+ * into certificate verification with CONTROL_PLANE_DB_SSL_VERIFY=true.
+ */
+export function controlPlanePgSslOption(
+  connectionString: string,
+  verifyFlag: string | undefined,
+): PgSslOption {
+  const mode = readSslMode(connectionString);
+  if (mode === "disable" || isLoopbackConnection(connectionString)) return false;
+  if (mode && NO_VERIFY_MODES.has(mode)) return { rejectUnauthorized: false };
+  if (mode === "verify-ca" || mode === "verify-full") return { rejectUnauthorized: true };
+  return { rejectUnauthorized: controlPlaneDbSslVerify(verifyFlag) };
+}
+
+/**
  * Return `connectionString` with `sslmode=no-verify` applied, so a customer DB
  * that can only present a self-signed / private-CA certificate connects with
  * TLS encryption but no chain verification. This is the machine-applied form of

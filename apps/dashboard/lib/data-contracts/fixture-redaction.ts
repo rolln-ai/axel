@@ -1,5 +1,9 @@
 import "server-only";
-import { maskPiiInText } from "@axel/shared";
+import {
+  isSecretLikeWebhookKey,
+  isWebhookHeaderContainerKey,
+  redactSecretLikeText,
+} from "@axel/shared";
 import { isSensitivePath } from "./inference";
 
 /**
@@ -15,8 +19,8 @@ import { isSensitivePath } from "./inference";
  *   - path-based: a leaf whose field path is flagged sensitive (isSensitivePath —
  *     email/ssn/card/phone/etc. by name) is replaced with a type-preserving
  *     marker.
- *   - value-based: any remaining string leaf is run through maskPiiInText to
- *     catch emails and long digit runs embedded in non-obviously-named fields.
+ *   - value-based: any remaining string leaf is checked for common PII,
+ *     credentials, signed URLs, private keys, and opaque tokens.
  *
  * Consistency guarantee: the generated Data Contract transforms are purely
  * structural (pick-by-path / wrap / passthrough — never value-deriving), so
@@ -25,30 +29,36 @@ import { isSensitivePath } from "./inference";
  * the fixture pair valid while removing PII from both sides.
  */
 export function redactFixturePayload(value: unknown): unknown {
-  return redactAt(value, "");
+  return redactAt(value, "", false);
 }
 
 const REDACTED = "[REDACTED]";
 
-function redactAt(value: unknown, path: string): unknown {
+function redactAt(value: unknown, path: string, secretContainer: boolean): unknown {
   if (value === null || value === undefined) return value;
   if (Array.isArray(value)) {
-    return value.map((item) => redactAt(item, `${path}[]`));
+    return value.map((item) => redactAt(item, `${path}[]`, secretContainer));
   }
   if (typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = redactAt(child, path ? `${path}.${key}` : key);
+      out[key] = redactAt(
+        child,
+        path ? `${path}.${key}` : key,
+        secretContainer ||
+          isSecretLikeWebhookKey(key) ||
+          isWebhookHeaderContainerKey(key),
+      );
     }
     return out;
   }
   // Leaf value.
-  if (path && isSensitivePath(path)) {
+  if (path && (secretContainer || isSensitivePath(path) || isSecretLikeWebhookKey(path))) {
     // Preserve the type so structural transforms behave identically.
     if (typeof value === "string") return REDACTED;
     if (typeof value === "number") return 0;
     return value; // booleans / other scalars aren't PII on their own
   }
-  if (typeof value === "string") return maskPiiInText(value);
+  if (typeof value === "string") return redactSecretLikeText(value);
   return value;
 }

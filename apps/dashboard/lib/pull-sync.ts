@@ -1,12 +1,19 @@
 import "server-only";
 import {
+  resolveIngestBaseUrl,
+  sanitizeConnectorDiagnosticForStorage,
   tryAcquirePullSourceLock,
   type PullSourceLockClient,
 } from "@axel/shared";
-import { runPullSync } from "@axel/pull-connectors";
+import {
+  chargebeeApiBaseUrl,
+  runPullSync,
+  sanitizePullRunSummaryForStorage,
+} from "@axel/pull-connectors";
 import { decryptCredentialBlob, pullSourceCredentialAad, type CredentialBlob } from "./credentials";
 import { db } from "./db";
 import { buildDbPullConnector, isDbPullType } from "./pull-db-connectors";
+import { safeDashboardFetch } from "./safe-egress";
 import { prefixedId } from "./ids";
 
 type PullSourceType =
@@ -134,7 +141,7 @@ export async function runDashboardPullSync(input: {
       await lease.release();
     } catch (err) {
       console.error(
-        `[pull-sync] failed to release source lock ${row.id}: ${err instanceof Error ? err.message : String(err)}`,
+        `[pull-sync] failed to release source lock ${row.id}: ${safePullDiagnostic(err)}`,
       );
     }
   }
@@ -157,7 +164,7 @@ async function runLockedDashboardPullSync(
   try {
     const stateStore = new DashboardPullStateStore(pool);
     const sink = new DashboardHttpIngestSink({
-      ingestBaseUrl: process.env.NEXT_PUBLIC_AXEL_INGEST_URL ?? "https://ingest.axelapp.ai",
+      ingestBaseUrl: resolveIngestBaseUrl(process.env),
       token: requireString(source.config.ingest_token, "pull source credential is missing ingest_token"),
     });
     const maxPagesPerStream = Number.parseInt(process.env.DASHBOARD_PULL_SYNC_MAX_PAGES ?? "5", 10);
@@ -183,7 +190,9 @@ async function runLockedDashboardPullSync(
         try {
           await connector.close?.();
         } catch (closeErr) {
-          console.error(`[pull-sync] connector close failed for ${source.source_id}:`, closeErr);
+          console.error(
+            `[pull-sync] connector close failed for ${source.source_id}: ${safePullDiagnostic(closeErr)}`,
+          );
         }
       }
     } else {
@@ -206,8 +215,16 @@ async function runLockedDashboardPullSync(
         runStatus,
         now().toISOString(),
         records,
-        failedStream?.error ?? partialStream?.error ?? null,
-        JSON.stringify({ ...summary, triggered_by: "dashboard", actor_user_id: input.actorUserId }),
+        failedStream?.error
+          ? safePullDiagnostic(failedStream.error)
+          : partialStream?.error
+            ? safePullDiagnostic(partialStream.error)
+            : null,
+        JSON.stringify({
+          ...sanitizePullRunSummaryForStorage(summary),
+          triggered_by: "dashboard",
+          actor_user_id: input.actorUserId,
+        }),
       ],
     );
     if (failedStream) throw new Error(failedStream.error ?? "Sync failed.");
@@ -219,7 +236,7 @@ async function runLockedDashboardPullSync(
               finished_at = $2,
               error_message = $3
         WHERE id = $1 AND status = 'running'`,
-      [runId, now().toISOString(), err instanceof Error ? err.message : String(err)],
+      [runId, now().toISOString(), safePullDiagnostic(err)],
     );
     throw err;
   }
@@ -229,7 +246,12 @@ async function sourceFromRow(
   row: PullSourceRow,
   pool: Pick<PullSourceLockClient, "query"> = db(),
 ): Promise<PullSource<Record<string, unknown>>> {
-  const credentials = await fetchCredentials(row.credentials_ref, pool);
+  const credentials = await fetchCredentials(
+    row.credentials_ref,
+    row.workspace_id,
+    row.id,
+    pool,
+  );
   return {
     source_id: row.id,
     workspace_id: row.workspace_id,
@@ -242,6 +264,8 @@ async function sourceFromRow(
 
 async function fetchCredentials(
   credentialsRef: string | null,
+  workspaceId: string,
+  pullSourceId: string,
   pool: Pick<PullSourceLockClient, "query"> = db(),
 ): Promise<Record<string, unknown>> {
   if (!credentialsRef) return {};
@@ -249,14 +273,16 @@ async function fetchCredentials(
     `SELECT ciphertext, nonce, auth_tag, encryption_version, workspace_id, pull_source_id
        FROM pull_source_credentials
       WHERE id = $1
+        AND workspace_id = $2
+        AND pull_source_id = $3
       LIMIT 1`,
-    [credentialsRef],
+    [credentialsRef, workspaceId, pullSourceId],
   );
   const row = result.rows[0];
   if (!row) throw new Error("pull_credential_not_found");
   // v2 creds require their (workspace, source) AAD; v1 ignore it.
   return JSON.parse(
-    await decryptCredentialBlob(row, pullSourceCredentialAad(row.workspace_id, row.pull_source_id)),
+    await decryptCredentialBlob(row, pullSourceCredentialAad(workspaceId, pullSourceId)),
   ) as Record<string, unknown>;
 }
 
@@ -335,10 +361,11 @@ class DashboardHttpIngestSink implements PullRecordSink {
       },
       body: JSON.stringify(record),
       cache: "no-store",
+      redirect: "manual",
     });
     if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      throw new Error(`Ingest rejected pull record: HTTP ${response.status} ${body.slice(0, 300)}`);
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(`Ingest rejected pull record: HTTP ${response.status}`);
     }
   }
 }
@@ -363,12 +390,12 @@ async function runGenericSync(input: {
       summaries.push(summary);
     } catch (err) {
       summaries.push({
-        stream,
+        stream: sanitizeConnectorDiagnosticForStorage(stream, 160) || "pull_stream",
         records: 0,
         pages: 0,
         cursor: persistedState?.streams[stream]?.cursor ?? null,
         status: "failed",
-        error: err instanceof Error ? err.message : String(err),
+        error: safePullDiagnostic(err),
       });
     }
   }
@@ -468,30 +495,46 @@ async function readPage(
   pageCursor: string | undefined,
 ): Promise<{ entries: Record<string, unknown>[]; nextCursor?: string }> {
   if (source.type === "chargebee") {
-    const response = await fetch(chargebeeStreamUrl(source.config, stream, cursor, pageCursor), {
+    const response = await safeDashboardFetch(chargebeeStreamUrl(source.config, stream, cursor, pageCursor), {
       headers: {
         accept: "application/json",
         authorization: basicAuthHeader(requireString(source.config.api_key, "Chargebee api_key is required.")),
       },
       cache: "no-store",
+      // Chargebee API calls do not need redirects. Keeping them manual prevents
+      // the runtime from replaying the Basic credential to a Location target.
+      redirect: "manual",
     });
-    if (!response.ok) throw new Error(chargebeeErrorMessage(response.status, await response.text().catch(() => "")));
-    const body = await response.json() as { list?: Array<Record<string, unknown>>; next_offset?: string };
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(chargebeeErrorMessage(response.status));
+    }
+    const body = await parsePullJson<{
+      list?: Array<Record<string, unknown>>;
+      next_offset?: string;
+    }>(response, "Chargebee");
     return {
       entries: (body.list ?? []).map((entry) => entry[chargebeeResourceKey(stream)] ?? entry) as Record<string, unknown>[],
       ...(body.next_offset ? { nextCursor: body.next_offset } : {}),
     };
   }
   if (source.type === "stripe") {
-    const response = await fetch(stripeStreamUrl(source.config, stream, cursor, pageCursor), {
+    const response = await safeDashboardFetch(stripeStreamUrl(source.config, stream, cursor, pageCursor), {
       headers: {
         accept: "application/json",
         authorization: `Bearer ${requireString(source.config.api_key, "Stripe api_key is required.")}`,
       },
       cache: "no-store",
+      redirect: "manual",
     });
-    if (!response.ok) throw new Error(`Stripe connection failed with HTTP ${response.status}. ${(await response.text()).slice(0, 240)}`);
-    const body = await response.json() as { data?: Array<Record<string, unknown>>; has_more?: boolean };
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(`Stripe connection failed with HTTP ${response.status}.`);
+    }
+    const body = await parsePullJson<{
+      data?: Array<Record<string, unknown>>;
+      has_more?: boolean;
+    }>(response, "Stripe");
     const last = body.data?.[body.data.length - 1];
     const lastId = last && typeof last.id === "string" ? last.id : undefined;
     return {
@@ -521,15 +564,19 @@ async function readPage(
   const shopHost = shopifyShopHost(source.config);
   const targetUrl = pageCursor ?? shopifyStreamUrl(source.config, stream, cursor);
   if (pageCursor) assertSameShopifyHost(targetUrl, shopHost);
-  const response = await fetch(targetUrl, {
+  const response = await safeDashboardFetch(targetUrl, {
     headers: {
       accept: "application/json",
       "x-shopify-access-token": requireString(source.config.access_token, "Shopify access_token is required."),
     },
     cache: "no-store",
+    redirect: "manual",
   });
-  if (!response.ok) throw new Error(`Shopify connection failed with HTTP ${response.status}. ${(await response.text()).slice(0, 240)}`);
-  const body = await response.json() as Record<string, unknown[] | undefined>;
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error(`Shopify connection failed with HTTP ${response.status}.`);
+  }
+  const body = await parsePullJson<Record<string, unknown[] | undefined>>(response, "Shopify");
   return {
     entries: (body[stream] ?? []) as Record<string, unknown>[],
     ...(nextLink(response.headers.get("link")) ? { nextCursor: nextLink(response.headers.get("link")) } : {}),
@@ -537,11 +584,7 @@ async function readPage(
 }
 
 function chargebeeListUrl(site: string, domain: string | undefined, stream: string, limit: number): string {
-  const cleanSite = site.replace(/^https?:\/\//i, "").replace(/\.chargebee\.com\/?$/i, "").trim();
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9-]*$/.test(cleanSite)) throw new Error("Enter the Chargebee site name, for example acme-test.");
-  const cleanDomain = domain?.trim() || "chargebee.com";
-  if (!/^[a-zA-Z0-9.-]+$/.test(cleanDomain)) throw new Error("Chargebee domain must be a hostname.");
-  const url = new URL(`/api/v2/${stream}`, `https://${cleanSite}.${cleanDomain}`);
+  const url = new URL(`/api/v2/${stream}`, chargebeeApiBaseUrl(site, domain));
   url.searchParams.set("limit", String(limit));
   return url.toString();
 }
@@ -652,17 +695,22 @@ function basicAuthHeader(apiKey: string): string {
   return `Basic ${Buffer.from(`${apiKey}:`).toString("base64")}`;
 }
 
-function chargebeeErrorMessage(status: number, body: string): string {
-  let detail = body.slice(0, 240);
-  try {
-    const parsed = JSON.parse(body) as { message?: unknown; error_msg?: unknown };
-    detail = String(parsed.message ?? parsed.error_msg ?? detail);
-  } catch {
-    // Use raw body snippet.
-  }
-  if (status === 401 || status === 403) return `Chargebee rejected the API key (${status}). ${detail}`.trim();
+function chargebeeErrorMessage(status: number): string {
+  if (status === 401 || status === 403) return `Chargebee rejected the API key (${status}).`;
   if (status === 404) return `Chargebee site was not found (${status}). Check the site prefix.`;
-  return `Chargebee connection failed with HTTP ${status}. ${detail}`.trim();
+  return `Chargebee connection failed with HTTP ${status}.`;
+}
+
+async function parsePullJson<T>(
+  response: { json(): Promise<unknown> },
+  provider: string,
+): Promise<T> {
+  try {
+    return await response.json() as T;
+  } catch {
+    // Response.json() SyntaxErrors can include an excerpt of the invalid body.
+    throw new Error(`${provider} returned invalid JSON.`);
+  }
 }
 
 function requireString(value: unknown, message: string): string {
@@ -744,4 +792,11 @@ function isCursor(value: unknown): value is PullStreamState["cursor"] {
         || typeof (value as { value?: unknown }).value === "number"
         || (value as { value?: unknown }).value === null
       );
+}
+
+function safePullDiagnostic(value: unknown): string {
+  return sanitizeConnectorDiagnosticForStorage(
+    value instanceof Error ? value.message : value,
+    500,
+  ) || "pull_sync_failed";
 }

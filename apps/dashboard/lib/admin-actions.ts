@@ -15,7 +15,10 @@ import {
   escapeHtml,
   renderBrandedEmail,
 } from "./email-layout";
-import { invalidateEdgeSourceCache } from "./edge-invalidation";
+import {
+  invalidateEdgeSourceCache,
+  requireEdgeSourceCacheInvalidations,
+} from "./edge-invalidation";
 import { teardownSingleWorkspace } from "./workspace-teardown";
 import { issuePasswordResetToken } from "./password-reset";
 import { bustWorkspaceTags } from "./repositories";
@@ -55,7 +58,14 @@ export async function suspendWorkspaceAction(
         [workspaceId],
       );
       if (!wsResult.rows[0]) throw new Error("not_found");
-      if (wsResult.rows[0].status === "suspended") throw new Error("already_suspended");
+      if (wsResult.rows[0].status === "suspended") {
+        const sources = await client.query<{ id: string }>(
+          "SELECT id FROM sources WHERE workspace_id = $1",
+          [workspaceId],
+        );
+        await requireEdgeSourceCacheInvalidations(sources.rows.map((source) => source.id));
+        throw new Error("already_suspended");
+      }
 
       const ownsResult = await client.query<{ c: string }>(
         `SELECT count(*)::text AS c FROM workspace_members
@@ -65,6 +75,13 @@ export async function suspendWorkspaceAction(
       if (Number(ownsResult.rows[0]?.c ?? 0) > 0 && !confirmSelf) {
         throw new Error("self_suspend_unconfirmed");
       }
+
+      const sourcesResult = await client.query<{ id: string; status: string }>(
+        "SELECT id, status FROM sources WHERE workspace_id = $1",
+        [workspaceId],
+      );
+      const prior: PriorSourceStatus[] = sourcesResult.rows;
+      await requireEdgeSourceCacheInvalidations(prior.map((source) => source.id));
 
       await client.query(
         `UPDATE workspaces
@@ -76,11 +93,6 @@ export async function suspendWorkspaceAction(
         [workspaceId, auth.user.id, reason],
       );
 
-      const sourcesResult = await client.query<{ id: string; status: string }>(
-        "SELECT id, status FROM sources WHERE workspace_id = $1",
-        [workspaceId],
-      );
-      const prior: PriorSourceStatus[] = sourcesResult.rows;
       if (prior.length > 0) {
         await client.query(
           "UPDATE sources SET status = 'disabled', updated_at = now() WHERE workspace_id = $1",
@@ -100,11 +112,7 @@ export async function suspendWorkspaceAction(
       return prior;
     });
 
-    // Fire-and-forget edge cache invalidation per source so the ingest worker
-    // stops accepting webhooks immediately. If env not set this is a no-op.
-    for (const src of priorSourceStatuses) {
-      void invalidateEdgeSourceCache(src.id);
-    }
+    await requireEdgeSourceCacheInvalidations(priorSourceStatuses.map((source) => source.id));
   } catch (err) {
     if (err instanceof Error && err.message === "not_found") return { error: "Workspace not found." };
     if (err instanceof Error && err.message === "already_suspended") return { error: "Workspace is already suspended." };
@@ -118,7 +126,9 @@ export async function suspendWorkspaceAction(
   bustWorkspaceTags(workspaceId);
   revalidatePath(`/admin/workspaces/${workspaceId}`);
   revalidatePath("/admin/workspaces");
-  return { notice: "Workspace suspended." };
+  return {
+    notice: "Workspace suspended. Edge cache deletion was confirmed; distributed cache propagation or a lookup already in flight can retain old source state for up to five minutes.",
+  };
 }
 
 export async function unsuspendWorkspaceAction(
@@ -187,9 +197,10 @@ export async function unsuspendWorkspaceAction(
       return restored;
     });
 
-    for (const sourceId of restoredSourceIds) {
-      void invalidateEdgeSourceCache(sourceId);
-    }
+    // Re-enabling affects availability, not revocation. Await the best-effort
+    // delete so success is prompt when the edge is configured; the short TTL
+    // remains a safe fallback when it is not.
+    await Promise.all(restoredSourceIds.map((sourceId) => invalidateEdgeSourceCache(sourceId)));
   } catch (err) {
     if (err instanceof Error && err.message === "not_found") return { error: "Workspace not found." };
     if (err instanceof Error && err.message === "not_suspended") return { error: "Workspace is not suspended." };
@@ -361,7 +372,23 @@ export async function deleteWorkspaceAction(
       const ws = wsResult.rows[0];
       if (!ws) throw new Error("not_found");
       if (ws.name !== typedName) throw new Error("name_mismatch");
-      if (ws.status === "deleting") return []; // teardown already scheduled — idempotent
+      if (ws.status === "deleting") {
+        // A prior attempt may have committed and then lost its post-delete
+        // cache call. Return every source id so an idempotent retry confirms
+        // revocation instead of silently redirecting.
+        const sources = await client.query<{ id: string }>(
+          "SELECT id FROM sources WHERE workspace_id = $1",
+          [workspaceId],
+        );
+        return sources.rows.map((source) => source.id);
+      }
+
+      const sourcesResult = await client.query<{ id: string }>(
+        "SELECT id FROM sources WHERE workspace_id = $1",
+        [workspaceId],
+      );
+      const ids = sourcesResult.rows.map((source) => source.id);
+      await requireEdgeSourceCacheInvalidations(ids);
 
       // Audit while workspace_id is still a live FK target (FK is ON DELETE SET
       // NULL, so the row survives the eventual hard delete in teardown).
@@ -376,17 +403,16 @@ export async function deleteWorkspaceAction(
 
       // Stop the edge from accepting NEW webhooks before the async teardown
       // starts wiping, so nothing re-orphans the stores we're about to clear.
-      const srcResult = await client.query<{ id: string }>(
+      await client.query(
         `UPDATE sources SET status = 'disabled', updated_at = now()
-          WHERE workspace_id = $1 AND status <> 'disabled'
-          RETURNING id`,
+          WHERE workspace_id = $1 AND status <> 'disabled'`,
         [workspaceId],
       );
       await client.query(
         "UPDATE workspaces SET status = 'deleting', deleted_at = now() WHERE id = $1",
         [workspaceId],
       );
-      return srcResult.rows.map((r) => r.id);
+      return ids;
     });
   } catch (err) {
     if (err instanceof Error && err.message === "not_found") return { error: "Workspace not found." };
@@ -395,8 +421,11 @@ export async function deleteWorkspaceAction(
     return { error: "Could not delete workspace." };
   }
 
-  for (const sourceId of sourceIds) {
-    void invalidateEdgeSourceCache(sourceId);
+  try {
+    await requireEdgeSourceCacheInvalidations(sourceIds);
+  } catch (err) {
+    console.error("[admin] deleteWorkspaceAction post-commit invalidation failed:", err);
+    return { error: "Workspace deletion was scheduled, but edge revocation could not be confirmed. Retry immediately." };
   }
   bustWorkspaceTags(workspaceId);
 

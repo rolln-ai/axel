@@ -49,6 +49,9 @@ export function validateDestinationUrl(
   if (options.requireHttps && url.protocol !== "https:") {
     return "URL must use https.";
   }
+  if (url.username || url.password) {
+    return "URL must not include username or password credentials; use an encrypted authentication field instead.";
+  }
   const host = url.hostname.toLowerCase();
   if (host === "") return "URL is missing a hostname.";
 
@@ -79,6 +82,23 @@ export function validateDestinationUrl(
  */
 export function connectionHostSsrfReason(value: string): string | null {
   if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    for (const queryHost of parsed.searchParams.getAll("host")) {
+      if (!queryHost) continue;
+      if (queryHost.startsWith("/") || queryHost.startsWith("\\")) {
+        return "Connection URI overrides the host with a local socket path — refusing to connect.";
+      }
+      for (const entry of queryHost.split(",")) {
+        const hostport = entry.trim();
+        if (!hostport) continue;
+        const reason = validateDestinationUrl(`https://${hostport}`);
+        if (reason) return reason;
+      }
+    }
+  } catch {
+    // The authority parser below returns the normal malformed/unsafe reason.
+  }
   const afterScheme = value.replace(/^[a-z][a-z0-9+\-.]*:\/\//i, "");
   const at = afterScheme.indexOf("@");
   const authority = (at === -1 ? afterScheme : afterScheme.slice(at + 1)).split(/[/?]/)[0] ?? "";
@@ -145,6 +165,9 @@ export async function assertResolvedHostSafe(
 function isPrivateOrUnsafeHost(host: string): boolean {
   // Strip IPv6 brackets if present.
   if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
+  // DNS treats a trailing dot as the same absolute name. Normalise it before
+  // checking localhost/metadata names so `localhost.` cannot bypass the guard.
+  if (host.endsWith(".")) host = host.slice(0, -1);
   // localhost catches DNS-resolved loopback regardless of IP family.
   if (host === "localhost" || host.endsWith(".localhost")) return true;
   if (BLOCKED_HOSTNAMES.has(host)) return true;
@@ -168,22 +191,91 @@ function isBlockedIpv4(ip: string): boolean {
   if (a === 127) return true; // 127/8 loopback
   if (a === 169 && b === 254) return true; // 169.254/16 link-local incl. AWS/GCP/Azure metadata
   if (a === 172 && b >= 16 && b <= 31) return true; // 172.16/12
+  if (a === 192 && b === 0 && parts[2]! === 0) return true; // 192.0.0/24 IETF protocol assignments
+  if (a === 192 && b === 0 && parts[2]! === 2) return true; // 192.0.2/24 TEST-NET-1
+  if (a === 192 && b === 88 && parts[2]! === 99) return true; // 192.88.99/24 deprecated relay
   if (a === 192 && b === 168) return true; // 192.168/16
+  if (a === 198 && (b === 18 || b === 19)) return true; // 198.18/15 benchmark testing
+  if (a === 198 && b === 51 && parts[2]! === 100) return true; // 198.51.100/24 TEST-NET-2
+  if (a === 203 && b === 0 && parts[2]! === 113) return true; // 203.0.113/24 TEST-NET-3
   if (a === 100 && b >= 64 && b <= 127) return true; // 100.64/10 CGNAT
   if (a >= 224) return true; // 224/4 multicast + 240/4 reserved
   return false;
 }
 
 function isBlockedIpv6(ip: string): boolean {
-  const lower = ip.toLowerCase();
-  if (lower === "::" || lower === "::1") return true;
-  if (lower.startsWith("fc") || lower.startsWith("fd")) return true; // fc00::/7
-  if (lower.startsWith("fe80")) return true; // fe80::/10 link-local
-  if (lower.startsWith("ff")) return true; // multicast
-  // IPv4-mapped IPv6 (::ffff:a.b.c.d) — extract embedded IPv4
-  const v4mappedMatch = lower.match(/::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
-  if (v4mappedMatch) return isBlockedIpv4(v4mappedMatch[1]!);
+  const hextets = parseIpv6Hextets(ip);
+  if (!hextets) return false;
+
+  const [first] = hextets;
+  if (hextets.slice(0, 7).every((part) => part === 0) && hextets[7]! <= 1) return true;
+
+  // IPv4-mapped IPv6 is commonly canonicalised from dotted decimal into the
+  // final two hexadecimal hextets (for example ::ffff:127.0.0.1 becomes
+  // ::ffff:7f00:1). Decode those bits before applying the IPv4 block list.
+  if (hextets.slice(0, 5).every((part) => part === 0) && hextets[5] === 0xffff) {
+    const high = hextets[6]!;
+    const low = hextets[7]!;
+    const mappedIpv4 = `${high >>> 8}.${high & 0xff}.${low >>> 8}.${low & 0xff}`;
+    return isBlockedIpv4(mappedIpv4);
+  }
+
+  // Be conservative with literal/resolved IPv6 destinations: ordinary global
+  // unicast lives in 2000::/3. Everything else includes local, translation,
+  // discard, multicast, deprecated site-local, and otherwise special-use
+  // space that can acquire surprising meaning inside the runtime network.
+  if ((first! & 0xe000) !== 0x2000) return true;
+
+  // Non-global or transition ranges inside 2000::/3. Blocking the whole
+  // 2001::/23 protocol-assignment block is intentionally conservative; the
+  // few globally reachable anycast exceptions are not sensible webhook or
+  // database destinations.
+  const second = hextets[1]!;
+  if (first === 0x2001 && second <= 0x01ff) return true; // 2001::/23
+  if (first === 0x2001 && second === 0x0db8) return true; // 2001:db8::/32 documentation
+  if (first === 0x2002) return true; // 2002::/16 6to4
+  if (first === 0x3fff && (second & 0xf000) === 0) return true; // 3fff::/20 documentation
   return false;
+}
+
+function parseIpv6Hextets(ip: string): number[] | null {
+  let value = ip.toLowerCase();
+  const zoneIndex = value.indexOf("%");
+  if (zoneIndex !== -1) value = value.slice(0, zoneIndex);
+
+  // Convert a dotted IPv4 tail into the two hextets it represents before
+  // expanding IPv6 compression.
+  if (value.includes(".")) {
+    const lastColon = value.lastIndexOf(":");
+    if (lastColon === -1) return null;
+    const ipv4 = value.slice(lastColon + 1);
+    if (!looksLikeIpv4(ipv4)) return null;
+    const octets = ipv4.split(".").map((part) => Number(part));
+    if (octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return null;
+    const high = (octets[0]! << 8) | octets[1]!;
+    const low = (octets[2]! << 8) | octets[3]!;
+    value = `${value.slice(0, lastColon)}:${high.toString(16)}:${low.toString(16)}`;
+  }
+
+  const compressionIndex = value.indexOf("::");
+  if (compressionIndex !== value.lastIndexOf("::")) return null;
+
+  let parts: string[];
+  if (compressionIndex === -1) {
+    parts = value.split(":");
+    if (parts.length !== 8) return null;
+  } else {
+    const left = value.slice(0, compressionIndex);
+    const right = value.slice(compressionIndex + 2);
+    const leftParts = left ? left.split(":") : [];
+    const rightParts = right ? right.split(":") : [];
+    const missing = 8 - leftParts.length - rightParts.length;
+    if (missing < 1) return null;
+    parts = [...leftParts, ...Array.from({ length: missing }, () => "0"), ...rightParts];
+  }
+
+  if (parts.some((part) => !/^[0-9a-f]{1,4}$/.test(part))) return null;
+  return parts.map((part) => Number.parseInt(part, 16));
 }
 
 function containsBlockedIpFragment(host: string): boolean {

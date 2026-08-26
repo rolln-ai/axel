@@ -52,7 +52,7 @@ The following Sub-processor is engaged only for optional, feature-specific funct
 
 | Sub-processor | Purpose / Service | Categories of data processed | Location |
 | --- | --- | --- | --- |
-| OpenRouter (OpenRouter, Inc.) | Optional AI-assisted features only: explaining delivery failures ("Fix with AI") and inferring data-contract schemas. OpenRouter acts as a gateway that routes the request to a third-party large-language-model provider to generate the response. | Excerpts of event payloads and delivery-error details supplied as prompt context. Excerpts are truncated and machine-redacted for common identifiers (such as email addresses and long digit sequences) before transmission, but may still contain Personal Data. | United States (OpenRouter routes prompts to model providers that may process in the United States or other regions) |
+| OpenRouter (OpenRouter, Inc.) | Optional AI-assisted features only: explaining delivery failures ("Fix with AI") and inferring data-contract schemas. OpenRouter acts as a gateway that routes the request to a third-party large-language-model provider to generate the response. | Bounded excerpts of event payloads and delivery-error details supplied as prompt context. Before transmission, Axel redacts values under secret-bearing and header fields, common credential formats, signed URL values, email addresses, and long digit sequences. Ordinary free text may still contain Personal Data. | United States (OpenRouter routes prompts to model providers that may process in the United States or other regions) |
 
 ## Infrastructure and CDN providers
 

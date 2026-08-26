@@ -4,6 +4,7 @@ set -euo pipefail
 marketing_url="${AXEL_MARKETING_URL:-https://axelapp.ai}"
 app_url="${AXEL_APP_URL:-https://app.axelapp.ai}"
 ingest_url="${AXEL_INGEST_URL:-https://ingest.axelapp.ai}"
+delivery_url="${AXEL_DELIVERY_URL:-https://axel-delivery-native.onrender.com}"
 
 marketing_bypass_secret="${VERCEL_AUTOMATION_BYPASS_SECRET_MARKETING:-${VERCEL_AUTOMATION_BYPASS_SECRET:-}}"
 dashboard_bypass_secret="${VERCEL_AUTOMATION_BYPASS_SECRET_DASHBOARD:-${VERCEL_AUTOMATION_BYPASS_SECRET:-}}"
@@ -29,6 +30,16 @@ check_status() {
 
 check_status "marketing" "$marketing_url" "^2[0-9][0-9]$" "$marketing_bypass_secret"
 check_status "dashboard-login" "${app_url%/}/login" "^2[0-9][0-9]$" "$dashboard_bypass_secret"
+check_status "dashboard-status" "${app_url%/}/status" "^2[0-9][0-9]$" "$dashboard_bypass_secret"
+if [[ "${AXEL_REQUIRE_OPERATIONAL_STATUS:-0}" == "1" ]] \
+  && ! grep -Fq "All systems operational" /tmp/axel-smoke-body; then
+  echo "Smoke check failed for dashboard status: production is not fully operational" >&2
+  head -c 500 /tmp/axel-smoke-body >&2 || true
+  exit 1
+fi
+
+check_status "ingest-health" "${ingest_url%/}/health" "^2[0-9][0-9]$"
+check_status "delivery-health" "${delivery_url%/}/health" "^2[0-9][0-9]$"
 
 if [[ -n "${AXEL_OPS_TEST_TOKEN:-}" ]]; then
   if [[ -n "$dashboard_bypass_secret" ]]; then

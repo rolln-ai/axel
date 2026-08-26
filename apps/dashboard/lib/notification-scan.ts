@@ -1,5 +1,6 @@
 import "server-only";
 import { isTransientPostgresError } from "@axel/observability";
+import { sanitizeConnectorDiagnosticForStorage } from "@axel/shared";
 import { db, type Queryable } from "./db";
 import { loadInboxGroups, type InboxGroup } from "./inbox";
 import {
@@ -195,11 +196,17 @@ export function buildNewErrorNotification(
   workspaceId: string,
 ): ImmediateAlertNotification {
   const noun = group.count === 1 ? "delivery is" : "deliveries are";
-  const excerpt = group.message_excerpt.replace(/\s+/g, " ").trim().slice(0, 240);
+  const excerpt = sanitizeConnectorDiagnosticForStorage(
+    group.message_excerpt.replace(/\s+/g, " ").trim(),
+    240,
+  );
   return {
     kind: NEW_ERROR_KIND,
     severity: "high",
-    title: `New delivery error: ${group.reason}`,
+    title: sanitizeConnectorDiagnosticForStorage(
+      `New delivery error: ${group.reason}`,
+      200,
+    ),
     body_md: `${group.count} ${noun} failing — ${excerpt}`,
     // This route verifies membership, activates the workspace in the session,
     // then redirects to /inbox. A plain /inbox link opens whichever workspace

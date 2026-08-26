@@ -186,8 +186,11 @@ export async function handleInternalSourceRequest(
     "content-type": "application/json",
     "cache-control": "no-store",
   };
-  const currentAuthorized = authorized(request.providedSecret, dependencies.sharedSecret);
-  const previousAuthorized = authorized(
+  const currentAuthorized = isInternalSecretAuthorized(
+    request.providedSecret,
+    dependencies.sharedSecret,
+  );
+  const previousAuthorized = isInternalSecretAuthorized(
     request.providedSecret,
     dependencies.previousSharedSecret ?? "",
   );
@@ -238,7 +241,10 @@ export async function handleInternalSourceRequest(
   }
 }
 
-function authorized(provided: string | string[] | undefined, expected: string): boolean {
+export function isInternalSecretAuthorized(
+  provided: string | string[] | undefined,
+  expected: string,
+): boolean {
   if (!expected || typeof provided !== "string") return false;
   const providedBytes = Buffer.from(provided);
   const expectedBytes = Buffer.from(expected);

@@ -105,6 +105,20 @@ describe("replay-worker — ReplayStore (Postgres)", () => {
     expect(calls).toHaveLength(1);
   });
 
+  it("markFailed strips payload echoes and secrets from replay_requests", async () => {
+    const { pool, calls } = fakePool([{ rows: [] }]);
+    const store = createPgReplayStore(pool);
+    await store.markFailed(
+      "rpl_1",
+      'dispatch failed: payload={"email":"victim@example.test"}; password=hunter2',
+    );
+
+    const stored = calls[0]?.params[1] as string;
+    expect(stored).not.toContain("victim@example.test");
+    expect(stored).not.toContain("hunter2");
+    expect(stored).toContain("payload=[REDACTED]");
+  });
+
   it("markFailed advances + finishes the tracked job (the dispatch-failed terminal path)", async () => {
     const { pool, calls } = fakePool([
       // markFailed UPDATE replay_requests ... RETURNING replay_job_id
@@ -247,6 +261,32 @@ describe("replay-worker — DeadLetterSink (Postgres)", () => {
       await deadLetterFingerprint({ route_id: "rt_1", reason: "filter_invalid", message: "boom" }),
     );
   });
+
+  it("sanitizes the message before inserting and fingerprinting", async () => {
+    const { pool, calls } = fakePool([{ rows: [] }]);
+    const sink = createPgDeadLetterSink(pool);
+    await sink.push({
+      workspace_id: "ws_1",
+      event_id: "evt_1",
+      source_id: "src_1",
+      route_id: "rt_1",
+      r2_key: "events/ws_1/evt_1.json",
+      reason: "connector_failed",
+      message: 'row rejected: payload={"note":"private webhook text"}; api_key=opaque-secret',
+      errored_at: "2026-05-18T00:00:00Z",
+    });
+
+    const stored = calls[0]?.params[6] as string;
+    expect(stored).not.toContain("private webhook text");
+    expect(stored).not.toContain("opaque-secret");
+    expect(calls[0]?.params[8]).toBe(
+      await deadLetterFingerprint({
+        route_id: "rt_1",
+        reason: "connector_failed",
+        message: stored,
+      }),
+    );
+  });
 });
 
 describe("replay-worker — R2 raw payload store", () => {
@@ -262,7 +302,7 @@ describe("replay-worker — R2 raw payload store", () => {
     expect(result).toBeNull();
   });
 
-  it("returns the bytes on success and URL-encodes the key", async () => {
+  it("returns the bytes and keeps R2 key slashes literal", async () => {
     const fetchImpl = vi.fn(async () => new Response("hello", { status: 200 }));
     const store = createR2HttpRawPayloadStore({
       cloudflareAccountId: "acc",
@@ -273,7 +313,8 @@ describe("replay-worker — R2 raw payload store", () => {
     const result = await store.get("events/ws/some key.json");
     expect(result).not.toBeNull();
     const url = String(fetchImpl.mock.calls[0]?.[0]);
-    expect(url).toContain("events%2Fws%2Fsome%20key.json");
+    expect(url).toContain("/objects/events/ws/some%20key.json");
+    expect(url).not.toContain("%2F");
   });
 
   it("throws on non-404 errors so the replay row is marked failed", async () => {
@@ -339,6 +380,10 @@ describe("replay-worker — R2 spill reader", () => {
     const result = await reader.get(SPILL_KEY);
     expect(result).not.toBeNull();
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toContain(
+      "/objects/queue-spill/ws-1/evt-1/dst-1/1.json",
+    );
+    expect(String(fetchImpl.mock.calls[0]?.[0])).not.toContain("%2F");
   });
 
   it("collapses a Cloudflare HTML error page to a single fingerprintable marker", async () => {
@@ -404,7 +449,7 @@ describe("replay-worker — R2 spill reader", () => {
 });
 
 describe("replay-worker — R2 object store (r2 destination connector)", () => {
-  it("PUTs the event bytes to the URL-encoded key with subject metadata headers", async () => {
+  it("PUTs the event bytes with literal key slashes and subject metadata headers", async () => {
     const fetchImpl = vi.fn(async () => new Response("", { status: 200 }));
     const store = createR2HttpObjectStore({
       cloudflareAccountId: "acc",
@@ -416,7 +461,8 @@ describe("replay-worker — R2 object store (r2 destination connector)", () => {
     await store.put("ws_1/123-dest_1.json", body, { workspace_id: "ws_1", destination_id: "dest_1" });
 
     const [url, init] = fetchImpl.mock.calls[0] ?? [];
-    expect(String(url)).toContain("/r2/buckets/axel-events-raw/objects/ws_1%2F123-dest_1.json");
+    expect(String(url)).toContain("/r2/buckets/axel-events-raw/objects/ws_1/123-dest_1.json");
+    expect(String(url)).not.toContain("%2F");
     expect((init as RequestInit).method).toBe("PUT");
     const headers = (init as RequestInit).headers as Record<string, string>;
     expect(headers.authorization).toBe("Bearer tok");

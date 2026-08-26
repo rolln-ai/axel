@@ -146,7 +146,7 @@ export function SyncBehaviorNotice() {
         {"Webhook sources start receiving events the moment you create them — there's no historical record to backfill. " +
           "Point your provider at the ingest URL Axel returns to start the stream. " +
           "After you create the source, Axel generates a unique ingest URL like " +
-          "https://ingest.axelapp.ai/in/<id>?token=<token> — copy it to your provider in the next step. " +
+          "https://<your-ingest-host>/in/<id>?token=<token> — copy it to your provider in the next step. " +
           "Your consumer should verify the X-Axel-Signature header (HMAC-SHA256, format t=<timestamp>,v1=<hex>) on each delivery."}
       </p>
     </div>

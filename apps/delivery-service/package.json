@@ -18,10 +18,12 @@
     "@axel/observability": "workspace:*",
     "@axel/router": "workspace:*",
     "@axel/shared": "workspace:*",
+    "@smithy/node-http-handler": "4.7.6",
     "mongodb": "^7.2.0",
     "parquetjs-lite": "^0.8.7",
     "pg": "^8.21.0",
-    "tsx": "^4.22.4"
+    "tsx": "^4.22.4",
+    "undici": "7.29.0"
   },
   "devDependencies": {
     "@axel/test-utils": "workspace:*",

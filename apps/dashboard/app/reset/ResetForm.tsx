@@ -4,6 +4,7 @@ import { useActionState } from "react";
 import { resetPassword } from "../../lib/auth-actions";
 import type { ActionState } from "../../lib/action-data";
 import { PasswordInput } from "../_components/PasswordInput";
+import { ScrubQueryParameter } from "../_components/ScrubQueryParameter";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -12,6 +13,7 @@ export function ResetForm({ token }: { token: string }) {
   const [state, formAction, pending] = useActionState<ActionState, FormData>(resetPassword, {});
   return (
     <form action={formAction} className="space-y-4">
+      <ScrubQueryParameter name="token" />
       <input type="hidden" name="token" value={token} />
       {state.error ? (
         <Alert variant="destructive">

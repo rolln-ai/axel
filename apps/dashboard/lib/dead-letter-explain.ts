@@ -13,15 +13,19 @@
  * be able to surface a "Why?" answer in plain English.
  *
  * Privacy:
- *   - The prompt is built from the raw payload + the destination
- *     response. Both go through `redactObvious()` first to scrub the
- *     usual suspects (email addresses, phone numbers, card numbers,
- *     bearer tokens, URLs with secrets in the query string).
+ *   - A shared structured redactor removes secret-bearing fields and common
+ *     credential formats before prompt construction. The final prompt passes
+ *     through the text redactor again at the OpenRouter boundary.
  *   - Cached output is plain text → safe to render unescaped through
  *     a styled container.
  */
 
 import type { ActionState as ActionStateBase } from "./action-state";
+import {
+  redactAiPrompt,
+  redactSecretLikeText,
+  redactWebhookDataForAi,
+} from "@axel/shared";
 import { appBaseUrl } from "./app-url";
 import { db } from "./db";
 import { fetchPayloadForR2Key } from "./sample-payload";
@@ -60,12 +64,12 @@ interface RouteRow {
 
 const DEFAULT_MODEL = "anthropic/claude-haiku-4.5";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const PROMPT_VERSION = "axe-54:v1";
+const PROMPT_VERSION = "axe-54:v2";
 
 const SYSTEM_PROMPT = `You are helping an Axel operator understand why a webhook delivery failed.
 
 Inputs you'll receive:
-- The raw event payload (truncated, PII redacted).
+- The event payload (truncated, with secret-like values and common PII redacted).
 - The destination's HTTP response (status + body excerpt) and/or the connector's structured failure reason.
 - The destination type (postgres, mongodb, http, webhook, s3, r2, …).
 - The route's filter/transform DSL, if any.
@@ -155,7 +159,7 @@ export async function explainDeadLetter(
   const userPrompt = buildUserPrompt({
     reason: dl.reason,
     message: dl.message,
-    payload: redactObvious(payload),
+    payload,
     destination,
     route,
   });
@@ -163,12 +167,13 @@ export async function explainDeadLetter(
   let summary: string;
   let suggestedAction: string;
   try {
-    const result = await callOpenRouter(userPrompt);
+    const result = await callDeadLetterOpenRouter(userPrompt);
     summary = result.summary;
     suggestedAction = result.suggested_action;
   } catch (err: unknown) {
+    const message = redactSecretLikeText(err instanceof Error ? err.message : String(err));
     return {
-      error: `Couldn't reach the AI service: ${err instanceof Error ? err.message : String(err)}`,
+      error: `Couldn't reach the AI service: ${message}`,
     };
   }
 
@@ -227,33 +232,37 @@ interface PromptInputs {
 
 function buildUserPrompt(p: PromptInputs): string {
   const lines: string[] = [];
-  lines.push(`Failure reason (Axel-side): ${p.reason}`);
-  if (p.message) lines.push(`Failure message: ${truncate(p.message, 800)}`);
+  lines.push(`Failure reason (Axel-side): ${redactSecretLikeText(p.reason)}`);
+  if (p.message) {
+    lines.push(`Failure message: ${truncate(redactSecretLikeText(p.message), 800)}`);
+  }
   if (p.destination) {
-    lines.push(`Destination type: ${p.destination.type}`);
-    if (p.destination.name) lines.push(`Destination name: ${p.destination.name}`);
+    lines.push(`Destination type: ${redactSecretLikeText(p.destination.type)}`);
+    if (p.destination.name) {
+      lines.push(`Destination name: ${redactSecretLikeText(p.destination.name)}`);
+    }
   }
   if (p.route) {
     lines.push(
-      `Route filter (DSL JSON): ${p.route.filter_expression ?? "(none)"}`,
+      `Route filter (DSL JSON): ${redactSecretLikeText(p.route.filter_expression ?? "(none)")}`,
     );
     lines.push(
-      `Route transform (DSL JSON): ${p.route.transform_script ?? "(none — passthrough)"}`,
+      `Route transform (DSL JSON): ${redactSecretLikeText(p.route.transform_script ?? "(none — passthrough)")}`,
     );
   }
   if (p.payload !== null) {
     let payloadJson: string;
     try {
-      payloadJson = JSON.stringify(p.payload);
+      payloadJson = JSON.stringify(redactWebhookDataForAi(p.payload));
     } catch {
-      payloadJson = String(p.payload);
+      payloadJson = "[unavailable]";
     }
     lines.push(`Event payload (PII redacted, truncated):\n${truncate(payloadJson, 1500)}`);
   }
-  return lines.join("\n\n");
+  return redactAiPrompt(lines.join("\n\n"));
 }
 
-async function callOpenRouter(userPrompt: string): Promise<{
+async function callDeadLetterOpenRouter(userPrompt: string): Promise<{
   summary: string;
   suggested_action: string;
 }> {
@@ -261,6 +270,7 @@ async function callOpenRouter(userPrompt: string): Promise<{
   const model = process.env.OPENROUTER_MODEL ?? DEFAULT_MODEL;
   const res = await fetch(OPENROUTER_URL, {
     method: "POST",
+    redirect: "manual",
     headers: {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
@@ -277,13 +287,13 @@ async function callOpenRouter(userPrompt: string): Promise<{
       provider: { data_collection: "deny" },
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: userPrompt },
+        { role: "user", content: redactAiPrompt(userPrompt) },
       ],
     }),
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`OpenRouter ${res.status}: ${body.slice(0, 200)}`);
+    throw new Error(`OpenRouter ${res.status}: ${redactSecretLikeText(body).slice(0, 200)}`);
   }
   const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
   const text = json.choices?.[0]?.message?.content ?? "";
@@ -309,56 +319,6 @@ function parseExplanation(text: string): { summary: string; suggested_action: st
     summary: typeof obj.summary === "string" ? obj.summary : "",
     suggested_action: typeof obj.suggested_action === "string" ? obj.suggested_action : "",
   };
-}
-
-/**
- * Strip the PII patterns we'd never want to ship to a third-party LLM
- * even with a zero-data-retention contract. Recursive, bounded depth.
- * The patterns are intentionally over-eager: better to redact a real
- * value than to leak it once.
- */
-function redactObvious(value: unknown, depth = 0): unknown {
-  if (depth > 8) return "[depth-capped]";
-  if (value === null || value === undefined) return value;
-  if (typeof value === "string") return redactString(value);
-  if (typeof value === "number" || typeof value === "boolean") return value;
-  if (Array.isArray(value)) {
-    return value.slice(0, 50).map((v) => redactObvious(v, depth + 1));
-  }
-  if (typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    let i = 0;
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      if (i++ > 100) break;
-      // Field-name redactions: anything that looks secret-shaped goes
-      // straight to a placeholder regardless of contents.
-      if (/(token|secret|password|api[_-]?key|authorization|bearer)/i.test(k)) {
-        out[k] = "[redacted]";
-        continue;
-      }
-      out[k] = redactObvious(v, depth + 1);
-    }
-    return out;
-  }
-  return value;
-}
-
-function redactString(s: string): string {
-  if (s.length === 0) return s;
-  // Truncate FIRST, then redact — long values (>5000) were returned RAW
-  // (unredacted), leaking PII to the LLM (audit). Cap, then run every pattern.
-  const capped = s.length > 5000 ? s.slice(0, 5000) : s;
-  return capped
-    // emails
-    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[email]")
-    // phone numbers (loose)
-    .replace(/\b\+?\d{1,3}[\s\-.]?\(?\d{2,4}\)?[\s\-.]?\d{3,4}[\s\-.]?\d{3,4}\b/g, "[phone]")
-    // 13-19 digit number sequences (cards, account numbers)
-    .replace(/\b\d{13,19}\b/g, "[long-digits]")
-    // Bearer tokens / sk_/whsec_/api keys
-    .replace(/\b(?:sk|pk|whsec|rk|api)_[A-Za-z0-9_-]{16,}/g, "[api-key]")
-    // URLs with credentials
-    .replace(/(https?:\/\/)([^\s/:@]+:[^\s/@]+)@/gi, "$1[creds]@");
 }
 
 function truncate(s: string, max: number): string {

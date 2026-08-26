@@ -11,6 +11,7 @@ import type {
   PullStreamState,
   PullStreamSummary,
 } from "./types";
+import { sanitizeConnectorDiagnosticForStorage } from "@axel/shared";
 
 export async function runPullSync<TConfig>(
   input: {
@@ -50,12 +51,12 @@ export async function runPullSync<TConfig>(
       summaries.push(summary);
     } catch (err) {
       summaries.push({
-        stream: stream.name,
+        stream: safeStreamName(stream.name),
         records: 0,
         pages: 0,
         cursor: persistedState?.streams[stream.name]?.cursor ?? null,
         status: "failed",
-        error: err instanceof Error ? err.message : String(err),
+        error: safePullDiagnostic(err),
       });
     }
   }
@@ -158,7 +159,7 @@ async function runStream<TConfig>(input: {
     // fall through to the clean-drain finalizer below.
     const hitRecordsCap = records >= input.maxRecords;
     return {
-      stream: input.stream.name,
+      stream: safeStreamName(input.stream.name),
       records,
       pages,
       cursor: baseCursor,
@@ -179,7 +180,7 @@ async function runStream<TConfig>(input: {
   await input.stateStore.setStreamState(input.source.source_id, input.stream.name, nextState);
 
   return {
-    stream: input.stream.name,
+    stream: safeStreamName(input.stream.name),
     records,
     pages,
     cursor: nextState.cursor,
@@ -199,7 +200,7 @@ function selectStreams<TConfig>(
 
   return fallbackNames.map((name) => {
     const stream = byName.get(name);
-    if (!stream) throw new Error(`unknown pull stream: ${name}`);
+    if (!stream) throw new Error("unknown pull stream configured");
     return {
       stream,
       config: configured.find((item) => item.name === name) ?? {
@@ -210,6 +211,39 @@ function selectStreams<TConfig>(
       },
     };
   });
+}
+
+/**
+ * Persistence-safe pull summary. Cursor values originate in customer records
+ * and can themselves be PII or secrets, so the diagnostic copy records only
+ * whether a cursor exists. Live cursor state remains in pull_source_stream_state.
+ */
+export function sanitizePullRunSummaryForStorage(summary: PullRunSummary): Record<string, unknown> {
+  return {
+    source_id: summary.source_id,
+    source_type: summary.source_type,
+    started_at: summary.started_at,
+    finished_at: summary.finished_at,
+    streams: summary.streams.slice(0, 100).map((stream) => ({
+      stream: safeStreamName(stream.stream),
+      records: stream.records,
+      pages: stream.pages,
+      cursor_present: stream.cursor !== null,
+      status: stream.status,
+      ...(stream.error ? { error: safePullDiagnostic(stream.error) } : {}),
+    })),
+  };
+}
+
+function safeStreamName(value: string): string {
+  return sanitizeConnectorDiagnosticForStorage(value, 160) || "pull_stream";
+}
+
+function safePullDiagnostic(value: unknown): string {
+  return sanitizeConnectorDiagnosticForStorage(
+    value instanceof Error ? value.message : value,
+    500,
+  ) || "pull_stream_failed";
 }
 
 function readConfiguredStreams(config: unknown): PullStreamConfig[] {

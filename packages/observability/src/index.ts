@@ -179,16 +179,16 @@ export function createSentryClient(options: SentryClientOptions): SentryClient {
           values: [exceptionValue(error)],
         },
         tags: context?.tags,
-        extra: context?.extra,
+        extra: sanitizeSentryValue(context?.extra),
         user: context?.user,
       });
     },
     async captureMessage(message, context) {
       await sendEvent({
         level: context?.level ?? "info",
-        message,
+        message: sanitizeSentryText(message),
         tags: context?.tags,
-        extra: context?.extra,
+        extra: sanitizeSentryValue(context?.extra),
         user: context?.user,
       });
     },
@@ -210,7 +210,7 @@ export function createSentryClient(options: SentryClientOptions): SentryClient {
           },
           spans: [],
           tags: input.tags,
-          extra: input.extra,
+          extra: sanitizeSentryValue(input.extra),
         },
         "transaction",
         timestamp,
@@ -592,7 +592,10 @@ export function installNodeSentryHandlers(
     // The process is already committed to exit; capture exactly one root cause.
     if (terminating) return;
     terminating = true;
-    console.error(`[fatal] ${kind}`, reason);
+    console.error(
+      `[fatal] ${kind}`,
+      sanitizeSentryText(reason instanceof Error ? reason.message : String(reason)),
+    );
     const transientPostgres = isTransientPostgresError(reason);
     void captureExceptionBeforeExit(
       client,
@@ -722,7 +725,7 @@ function exceptionValue(error: unknown): Record<string, unknown> {
   if (error instanceof Error) {
     return {
       type: error.name,
-      value: error.message,
+      value: sanitizeSentryText(error.message),
       stacktrace: {
         frames: stackFrames(error.stack),
       },
@@ -730,8 +733,58 @@ function exceptionValue(error: unknown): Record<string, unknown> {
   }
   return {
     type: typeof error,
-    value: String(error),
+    value: sanitizeSentryText(String(error)),
   };
+}
+
+const SENTRY_EMAIL_RE = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
+const SENTRY_LONG_DIGITS_RE = /\b\d(?:[\d -]{6,})\d\b/g;
+const SENTRY_AUTH_RE = /\b(Bearer|Basic)\s+[^\s,;]+/gi;
+const SENTRY_TOKEN_RE = /\b(?:axe_pat|whsec|sk|rk|ghp|github_pat)_[A-Za-z0-9_-]{8,}\b/gi;
+const SENTRY_QUERY_RE = /([?&][A-Za-z0-9_.~-]{1,128}=)[^&#\s]*/g;
+const SENTRY_URI_USERINFO_RE = /(\b[a-z][a-z0-9+.-]*:\/\/[^:\s/@]+:)[^@\s/]+@/gi;
+const SENTRY_HTTP_DETAIL_RE = /(\b(?:HTTP\s+\d{3}|[A-Za-z0-9_-]+_http_\d{3}|delivery_service_\d{3})\s*:\s*)[\s\S]*/i;
+const SENTRY_SECRET_ASSIGNMENT_RE = /(\b(?:authorization|client[_ -]?secret|cookie|credential|password|passwd|private[_ -]?key|refresh[_ -]?token|secret|secret[_ -]?access[_ -]?key|signature|token|api[_ -]?key|access[_ -]?key)\b\s*(?:=|:|\bis\b)\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)/gi;
+const SENTRY_PAYLOAD_ASSIGNMENT_RE = /(\b(?:body|data|document|event|input|payload|raw|record|response[_ -]?body|row|value)\b\s*(?:=|:)\s*)(?:\{[^\r\n]{0,2000}\}|\[[^\r\n]{0,2000}\]|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)/gi;
+const SENTRY_PRIVATE_KEY_RE = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*/gi;
+const SENTRY_SECRET_KEY_RE =
+  /(?:authorization|body|cookie|credential|password|payload|raw|secret|signature|token|api[_-]?key)/i;
+
+function sanitizeSentryText(input: string): string {
+  return input
+    .replace(SENTRY_HTTP_DETAIL_RE, "$1[REDACTED]")
+    .replace(SENTRY_URI_USERINFO_RE, "$1[REDACTED]@")
+    .replace(SENTRY_PRIVATE_KEY_RE, "[REDACTED PRIVATE KEY]")
+    .replace(SENTRY_EMAIL_RE, "[EMAIL]")
+    .replace(SENTRY_LONG_DIGITS_RE, "[NUM]")
+    .replace(SENTRY_AUTH_RE, "$1 [REDACTED]")
+    .replace(SENTRY_TOKEN_RE, "[REDACTED]")
+    .replace(SENTRY_QUERY_RE, "$1[REDACTED]")
+    .replace(SENTRY_SECRET_ASSIGNMENT_RE, "$1[REDACTED]")
+    .replace(SENTRY_PAYLOAD_ASSIGNMENT_RE, "$1[REDACTED]")
+    .replace(/"(?:\\.|[^"\\])*"/g, '"[REDACTED]"')
+    .replace(/'(?:\\.|[^'\\])*'/g, "'[REDACTED]'")
+    .slice(0, 1_000);
+}
+
+function sanitizeSentryValue(value: unknown, depth = 0): unknown {
+  if (value === undefined || value === null || typeof value === "boolean" || typeof value === "number") {
+    return value;
+  }
+  if (typeof value === "string") return sanitizeSentryText(value);
+  if (depth >= 8) return "[TRUNCATED]";
+  if (Array.isArray(value)) {
+    return value.slice(0, 32).map((item) => sanitizeSentryValue(item, depth + 1));
+  }
+  if (typeof value !== "object") return sanitizeSentryText(String(value));
+
+  const out: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value as Record<string, unknown>).slice(0, 64)) {
+    out[key] = SENTRY_SECRET_KEY_RE.test(key)
+      ? "[REDACTED]"
+      : sanitizeSentryValue(child, depth + 1);
+  }
+  return out;
 }
 
 function stackFrames(stack: string | undefined): Array<Record<string, unknown>> {

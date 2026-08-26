@@ -63,6 +63,7 @@ describe("delivery-service source lookup client", () => {
     expect(url).toBe("https://delivery.example/internal/source");
     expect(init).toMatchObject({
       method: "POST",
+      redirect: "manual",
       headers: {
         "content-type": "application/json",
         "x-axel-shared-secret": "source-lookup-secret",

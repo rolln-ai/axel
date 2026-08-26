@@ -28,7 +28,7 @@
  * DI-shaped (inject `lister` + `deleter`) so the orchestration unit-tests
  * without touching the network, ClickHouse, or Postgres.
  */
-import { sleep } from "@axel/shared";
+import { cloudflareR2ObjectUrl, sleep } from "@axel/shared";
 import type pg from "pg";
 import type { R2HttpDeps, ClickhouseHttpDeps } from "./replay-worker.js";
 
@@ -213,7 +213,12 @@ export function createClickhouseR2KeyLister(deps: ClickhouseHttpDeps): R2KeyList
         "X-ClickHouse-User": deps.user ?? "default",
       };
       if (deps.password) headers["X-ClickHouse-Key"] = deps.password;
-      const res = await fetchImpl(url, { method: "POST", body: sql, headers });
+      const res = await fetchImpl(url, {
+        method: "POST",
+        redirect: "manual",
+        body: sql,
+        headers,
+      });
       if (!res.ok) {
         throw new Error(`r2_retention_ch_${res.status}: ${(await res.text().catch(() => "")).slice(0, 200)}`);
       }
@@ -234,10 +239,15 @@ export function createR2HttpDeleter(deps: R2HttpDeps): R2Deleter {
   const maxAttempts = 5;
   return {
     async delete(key: string): Promise<void> {
-      const url = `https://api.cloudflare.com/client/v4/accounts/${deps.cloudflareAccountId}/r2/buckets/${deps.rawPayloadBucket}/objects/${encodeURIComponent(key)}`;
+      const url = cloudflareR2ObjectUrl(
+        deps.cloudflareAccountId,
+        deps.rawPayloadBucket,
+        key,
+      );
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         const res = await fetchImpl(url, {
           method: "DELETE",
+          redirect: "manual",
           headers: { authorization: `Bearer ${deps.cloudflareApiToken}` },
         });
         if (res.ok || res.status === 404) return;
@@ -250,4 +260,3 @@ export function createR2HttpDeleter(deps: R2HttpDeps): R2Deleter {
     },
   };
 }
-

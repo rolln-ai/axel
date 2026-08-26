@@ -120,6 +120,30 @@ describe("source-lookup-pg — mapSourceRow (matches dashboard rowToEdgePayload)
     );
   });
 
+  it("FAILS CLOSED for a configured custom-HMAC source when only the previous secret is corrupt", async () => {
+    await expect(mapSourceRow(row({
+      provider: "custom",
+      signing_secret_previous_ciphertext: new Uint8Array(8),
+    }), HEX_KEY)).rejects.toThrow(/previous signing secret.*undecryptable|refusing to skip verification/);
+  });
+
+  it("FAILS CLOSED on a partial rotation instead of accepting only the current secret", async () => {
+    const current = encryptBlob("whsec_current", HEX_KEY);
+    await expect(mapSourceRow(row({
+      provider: "stripe",
+      signing_secret_ciphertext: current,
+      signing_secret_previous_ciphertext: new Uint8Array(8),
+    }), HEX_KEY)).rejects.toThrow(/previous signing secret.*undecryptable|refusing to skip verification/);
+  });
+
+  it("FAILS CLOSED when a configured ciphertext decrypts to an empty secret", async () => {
+    const empty = encryptBlob("", HEX_KEY);
+    await expect(mapSourceRow(row({
+      provider: "custom",
+      signing_secret_ciphertext: empty,
+    }), HEX_KEY)).rejects.toThrow(/current signing secret.*undecryptable|refusing to skip verification/);
+  });
+
   it("propagates redact_paths, signing_secret_previous, and ordering (Theme A — were dropped)", async () => {
     const prev = encryptBlob("whsec_old", HEX_KEY);
     const src = await mapSourceRow(

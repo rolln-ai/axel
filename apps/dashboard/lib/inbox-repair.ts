@@ -137,6 +137,7 @@ export function repairProposalFromIssue(issue: BqCompatIssue): InboxRepairPropos
   }
 
   if (issue.kind !== "type_conflict") return null;
+  const expectedType = expected.replace(/^(NULLABLE|REQUIRED|REPEATED)\s+/, "");
   const existingType = existing.replace(/^(NULLABLE|REQUIRED|REPEATED)\s+/, "");
   if (existingType === "STRING") {
     return {
@@ -150,8 +151,10 @@ export function repairProposalFromIssue(issue: BqCompatIssue): InboxRepairPropos
     return {
       issue,
       repair: { kind: "coerce", path: issue.path, to: "integer", rounding: "round" },
-      title: `Convert ${issue.path} to an integer`,
-      summary: "Choose how Axel should handle a fractional value before sending it to this destination.",
+      title: `Fix ${issue.path} data type`,
+      summary: expectedType === "FLOAT64" || expectedType === "FLOAT"
+        ? "Preserve decimal values by widening the destination column, or explicitly choose how Axel should convert them to integers."
+        : "Choose how Axel should convert this value to an integer before sending it to this destination.",
     };
   }
   if (["FLOAT64", "FLOAT", "NUMERIC", "BIGNUMERIC"].includes(existingType)) {

@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const configUrl = new URL("../next.config.mjs", import.meta.url).href;
@@ -73,6 +74,32 @@ function loadDashboardEnv(overrides: Partial<NodeJS.ProcessEnv>): {
   };
 }
 
+function loadDashboardHeaders(): {
+  status: number | null;
+  headers?: Array<{
+    headers: Array<{ key: string; value: string }>;
+    source: string;
+  }>;
+} {
+  const marker = "__DASHBOARD_HEADERS__";
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `const config = await import(${JSON.stringify(configUrl)}); process.stdout.write(${JSON.stringify(marker)} + JSON.stringify(await config.default.headers()));`,
+    ],
+    { env: { ...process.env, VERCEL: "", CI: "" }, encoding: "utf8" },
+  );
+  const markerIndex = result.stdout.lastIndexOf(marker);
+  return {
+    status: result.status,
+    ...(markerIndex >= 0
+      ? { headers: JSON.parse(result.stdout.slice(markerIndex + marker.length)) }
+      : {}),
+  };
+}
+
 describe("dashboard Sentry build config", () => {
   it("fails a hosted production build before deploying without an upload token", () => {
     const result = loadConfig({
@@ -129,5 +156,21 @@ describe("dashboard Sentry build config", () => {
     expect(result.env?.NEXT_PUBLIC_SENTRY_DSN).toBe(
       "https://server-preferred@example.invalid/1",
     );
+  });
+
+  it("sends no referrer in hosted and self-hosted deployments", () => {
+    const hosted = loadDashboardHeaders();
+    const caddyfile = readFileSync(
+      new URL("../../../infra/self-host/Caddyfile", import.meta.url),
+      "utf8",
+    );
+
+    expect(hosted.status).toBe(0);
+    expect(hosted.headers).toContainEqual({
+      source: "/:path*",
+      headers: [{ key: "Referrer-Policy", value: "no-referrer" }],
+    });
+    expect(caddyfile).toMatch(/Referrer-Policy\s+no-referrer/);
+    expect(caddyfile).not.toContain("strict-origin-when-cross-origin");
   });
 });

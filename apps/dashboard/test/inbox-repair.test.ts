@@ -22,7 +22,7 @@ describe("inbox repair proposals", () => {
       }],
     }));
     expect(proposal).toMatchObject({
-      title: "Convert amount to an integer",
+      title: "Fix amount data type",
       repair: { kind: "coerce", path: "amount", to: "integer", rounding: "round" },
     });
   });

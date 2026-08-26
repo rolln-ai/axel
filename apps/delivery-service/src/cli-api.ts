@@ -22,6 +22,7 @@ import http from "node:http";
 import { createHash } from "node:crypto";
 import type pg from "pg";
 import { captureException } from "@axel/observability";
+import { cloudflareR2ObjectUrl } from "@axel/shared";
 import { handleListenStream } from "./cli-events-stream.js";
 
 // Loosely typed sentry client — observability exposes a SentryClient
@@ -29,7 +30,9 @@ import { handleListenStream } from "./cli-events-stream.js";
 // nullable shape rather than re-import the strict type.
 type SentryClient = Parameters<typeof captureException>[0];
 
-interface CliAuthCtx {
+export type CliMembershipRole = "owner" | "admin" | "member";
+
+export interface CliAuthCtx {
   user_id: string;
   user_email: string;
   workspace_id: string;
@@ -37,6 +40,7 @@ interface CliAuthCtx {
   token_id: string;
   token_name: string;
   token_created_at: string;
+  membership_role: CliMembershipRole;
 }
 
 const TOKEN_PREFIX = "axe_pat_";
@@ -46,7 +50,7 @@ function hashToken(plaintext: string): string {
   return createHash("sha256").update(plaintext).digest("hex");
 }
 
-async function authenticate(
+export async function authenticateCliRequest(
   req: http.IncomingMessage,
   pool: pg.Pool,
 ): Promise<CliAuthCtx | { error: { status: number; code: string; message: string } }> {
@@ -69,16 +73,23 @@ async function authenticate(
     user_email: string;
     workspace_id: string;
     workspace_name: string;
+    workspace_status: "active" | "suspended" | "deleted";
+    membership_role: CliMembershipRole;
   }>(
     `SELECT pat.id AS pat_id, pat.name AS pat_name,
             pat.created_at::text AS pat_created_at,
             pat.expires_at::text AS pat_expires_at,
             pat.revoked_at::text AS pat_revoked_at,
             u.id AS user_id, u.email AS user_email,
-            w.id AS workspace_id, w.name AS workspace_name
+            w.id AS workspace_id, w.name AS workspace_name,
+            w.status AS workspace_status,
+            wm.role AS membership_role
        FROM personal_access_tokens pat
        JOIN users u ON u.id = pat.user_id
        JOIN workspaces w ON w.id = pat.workspace_id
+       JOIN workspace_members wm
+         ON wm.workspace_id = pat.workspace_id
+        AND wm.user_id = pat.user_id
       WHERE pat.token_hash = $1
       LIMIT 1`,
     [tokenHash],
@@ -92,6 +103,9 @@ async function authenticate(
   }
   if (row.pat_expires_at && new Date(row.pat_expires_at).getTime() < Date.now()) {
     return { error: { status: 401, code: "expired_token", message: "Token has expired." } };
+  }
+  if (row.workspace_status !== "active") {
+    return { error: { status: 401, code: "inactive_workspace", message: "Workspace is not active." } };
   }
   // Fire-and-forget — don't block the request on the bookkeeping.
   pool
@@ -107,11 +121,20 @@ async function authenticate(
     token_id: row.pat_id,
     token_name: row.pat_name,
     token_created_at: row.pat_created_at,
+    membership_role: row.membership_role,
   };
 }
 
+export function cliRoleAllowsWrite(role: CliMembershipRole): boolean {
+  return role === "owner" || role === "admin";
+}
+
 function jsonResponse(res: http.ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { "content-type": "application/json" });
+  res.writeHead(status, {
+    "content-type": "application/json",
+    "cache-control": "private, no-store",
+    "x-content-type-options": "nosniff",
+  });
   res.end(JSON.stringify(body));
 }
 
@@ -158,7 +181,7 @@ export async function handleCliApi(
   const path = parsedUrl.pathname;
 
   // Every /v1/cli/* route requires authentication.
-  const authResult = await authenticate(req, deps.pool);
+  const authResult = await authenticateCliRequest(req, deps.pool);
   if ("error" in authResult) {
     jsonResponse(res, authResult.error.status, {
       error: authResult.error.code,
@@ -178,6 +201,13 @@ export async function handleCliApi(
   }
 
   if (req.method === "POST" && path === "/v1/cli/trigger") {
+    if (!cliRoleAllowsWrite(ctx.membership_role)) {
+      jsonResponse(res, 403, {
+        error: "insufficient_role",
+        message: "Only workspace owners and admins can trigger events.",
+      });
+      return true;
+    }
     await handleTrigger(req, res, ctx, deps);
     return true;
   }
@@ -259,6 +289,7 @@ async function handleTrigger(
   try {
     ingestRes = await fetch(ingestUrl, {
       method: "POST",
+      redirect: "manual",
       headers: {
         "content-type": "application/json",
         "x-axel-admin-token": deps.ingestAdminToken,
@@ -333,7 +364,7 @@ async function handleEventPayload(
   chUrl.searchParams.set("param_event_id", eventId);
   let chRes: Response;
   try {
-    chRes = await fetch(chUrl, { headers: chHeaders });
+    chRes = await fetch(chUrl, { headers: chHeaders, redirect: "manual" });
   } catch (err: unknown) {
     void captureException(deps.sentry, err, {
       tags: { component: "cli_event_payload", workspace_id: ctx.workspace_id },
@@ -374,14 +405,19 @@ async function handleEventPayload(
   // Pull raw bytes from R2 via the Cloudflare account-scoped HTTP API
   // (delivery-service has no Wrangler binding because it lives on
   // Render). Same URL shape the dashboard uses.
-  const r2Url = `https://api.cloudflare.com/client/v4/accounts/${deps.cloudflareAccountId}/r2/buckets/${deps.rawPayloadBucket}/objects/${encodeURIComponent(event.r2_key)}`;
+  const r2Url = cloudflareR2ObjectUrl(
+    deps.cloudflareAccountId,
+    deps.rawPayloadBucket,
+    event.r2_key,
+  );
   const r2Res = await fetch(r2Url, {
+    redirect: "manual",
     headers: { authorization: `Bearer ${deps.cloudflareApiToken}` },
   });
   if (!r2Res.ok) {
     jsonResponse(res, 502, {
       error: `r2_${r2Res.status}`,
-      message: await r2Res.text().then((t) => t.slice(0, 200)).catch(() => ""),
+      message: "Raw payload storage request failed.",
     });
     return;
   }

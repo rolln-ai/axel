@@ -1,5 +1,11 @@
 import "server-only";
-import { extractEventTypeFromValue, extractEventTypeFromHeaders, maskPiiInText } from "@axel/shared";
+import {
+  extractEventTypeFromHeaders,
+  extractEventTypeFromValue,
+  redactAiPrompt,
+  redactSecretLikeText,
+  redactWebhookDataForAi,
+} from "@axel/shared";
 import { appBaseUrl } from "../app-url";
 import type { SampledEvent } from "./sampler";
 
@@ -147,7 +153,7 @@ export interface ModelMetadata {
   ms: number | null;
 }
 
-const PROMPT_VERSION = "axe-42:v1";
+const PROMPT_VERSION = "axe-42:v2";
 const DEFAULT_MODEL = "anthropic/claude-haiku-4.5";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -211,12 +217,13 @@ export async function inferDataContract(
   }
 
   try {
+    const prompt = buildUserPrompt(samples, det);
     const llm = await caller({
       model,
       systemPrompt: SYSTEM_PROMPT,
-      userPrompt: buildUserPrompt(samples, det),
+      userPrompt: prompt.userPrompt,
     });
-    return finalise(mergeLlm(det, llm), {
+    return finalise(mergeLlm(det, remapClusterNames(llm, prompt, det)), {
       model,
       prompt_version: PROMPT_VERSION,
       sample_count: samples.length,
@@ -873,7 +880,7 @@ function buildDeterministicSummary(
 
 const SYSTEM_PROMPT = `You are analyzing a webhook source for the Axel platform.
 
-Input: a set of clustered event shapes plus 1–2 example payloads per cluster. Some payloads are truncated.
+Input: a set of clustered event shapes plus 1–2 redacted example payloads per cluster. Some payloads are truncated.
 
 Output ONLY a JSON object with exactly these keys:
 - "cluster_names": object mapping cluster_id -> short human-readable name (e.g. "Invoice paid", "Order created"). Use the same cluster_id strings you were given.
@@ -888,14 +895,20 @@ Rules:
 function buildUserPrompt(
   samples: SampledEvent[],
   det: Omit<InferredDataContract, "model_metadata">,
-): string {
-  const clusterById = new Map<string, EventTypeCluster>();
-  for (const c of det.event_types) clusterById.set(c.cluster_id, c);
+): {
+  userPrompt: string;
+  clusterAliasToId: Map<string, string>;
+} {
+  const clusterAliasToId = new Map<string, string>();
+  const clusterIdToAlias = new Map<string, string>();
+  det.event_types.forEach((cluster, index) => {
+    const alias = `cluster_${index + 1}`;
+    clusterAliasToId.set(alias, cluster.cluster_id);
+    clusterIdToAlias.set(cluster.cluster_id, alias);
+  });
 
-  // Group by clusterIdFor (the SAME key clusterById uses) — NOT shape_hash. For
-  // typed sources clusterIdFor returns "t:<type>", so keying on shape_hash made
-  // every clusterById.get() miss and the LLM received zero example payloads
-  // (names defaulted, sensitive-field detection degraded — audit high).
+  // Group by clusterIdFor, not shape_hash. Typed sources use "t:<type>", so
+  // shape_hash would leave typed clusters without examples.
   const byCluster = new Map<string, SampledEvent[]>();
   for (const s of samples) {
     const id = clusterIdFor(s);
@@ -905,25 +918,42 @@ function buildUserPrompt(
   }
 
   const blocks: string[] = [];
-  for (const [id, evs] of byCluster) {
-    const cluster = clusterById.get(id);
-    if (!cluster) continue;
+  for (const cluster of det.event_types) {
+    const id = cluster.cluster_id;
+    const evs = byCluster.get(id) ?? [];
+    const alias = clusterIdToAlias.get(id);
+    if (!alias) continue;
     blocks.push(
-      `### cluster_id: ${id}\nobserved_name_hint: ${cluster.name}\nsample_count: ${cluster.sample_count}\n` +
+      `### cluster_id: ${alias}\nobserved_name_hint: ${redactSecretLikeText(cluster.name)}\nsample_count: ${cluster.sample_count}\n` +
         `examples:\n${evs
           .slice(0, 2)
-          .map((e) => maskPiiInText(truncateJson(e.payload, 1200)))
+          .map((e) => truncateJson(redactWebhookDataForAi(e.payload), 1200))
           .join("\n---\n")}`,
     );
   }
   const knownPaths = Object.keys(det.fields).filter((p) => p !== "$");
-  return [
+  const userPrompt = [
     `Known paths in the union of these shapes (${knownPaths.length} total):`,
-    knownPaths.slice(0, 150).join(", "),
+    knownPaths.slice(0, 150).map(redactSecretLikeText).join(", "),
     "",
     "Clusters:",
     blocks.join("\n\n"),
   ].join("\n");
+  return { userPrompt: redactAiPrompt(userPrompt), clusterAliasToId };
+}
+
+function remapClusterNames(
+  llm: LlmResponse,
+  prompt: { clusterAliasToId: Map<string, string> },
+  det: Omit<InferredDataContract, "model_metadata">,
+): LlmResponse {
+  const validIds = new Set(det.event_types.map((cluster) => cluster.cluster_id));
+  const clusterNames: Record<string, string> = {};
+  for (const [key, value] of Object.entries(llm.cluster_names)) {
+    const id = prompt.clusterAliasToId.get(key) ?? (validIds.has(key) ? key : null);
+    if (id) clusterNames[id] = value;
+  }
+  return { ...llm, cluster_names: clusterNames };
 }
 
 function truncateJson(value: unknown, maxLen: number): string {
@@ -937,6 +967,7 @@ function defaultLlmCaller(apiKey: string): (req: LlmRequest) => Promise<LlmRespo
     const start = Date.now();
     const res = await fetch(OPENROUTER_URL, {
       method: "POST",
+      redirect: "manual",
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
@@ -948,16 +979,19 @@ function defaultLlmCaller(apiKey: string): (req: LlmRequest) => Promise<LlmRespo
         temperature: 0,
         max_tokens: 1200,
         response_format: { type: "json_object" },
+        // Examples may contain residual customer data after masking. Keep the
+        // same zero-data-retention routing policy as dead-letter explain.
+        provider: { data_collection: "deny" },
         messages: [
           { role: "system", content: req.systemPrompt },
-          { role: "user", content: req.userPrompt },
+          { role: "user", content: redactAiPrompt(req.userPrompt) },
         ],
       }),
     });
     const ms = Date.now() - start;
     if (!res.ok) {
       const body = await res.text().catch(() => "");
-      throw new Error(`OpenRouter ${res.status}: ${body.slice(0, 400)}`);
+      throw new Error(`OpenRouter ${res.status}: ${redactSecretLikeText(body).slice(0, 400)}`);
     }
     const json = (await res.json()) as {
       choices?: Array<{ message?: { content?: string } }>;

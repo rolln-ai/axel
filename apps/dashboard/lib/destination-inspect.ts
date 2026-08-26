@@ -11,6 +11,7 @@ import {
   BIGQUERY_API_ROOT,
   BIGQUERY_SCOPE,
 } from "./bigquery-auth";
+import { createSafePgStream, safeDashboardFetch, safeLookup } from "./safe-egress";
 
 /**
  * Read-only "data viewer" for destination types where it makes sense.
@@ -149,6 +150,7 @@ export async function listPostgresTables(
 
   const pool = new Pool({
     connectionString: connStr,
+    stream: createSafePgStream,
     ssl: pgSslOption(connStr),
     connectionTimeoutMillis: CONNECTION_TIMEOUT_MS,
     idleTimeoutMillis: 1_000,
@@ -190,6 +192,7 @@ async function inspectPostgresDestination(
 
   const pool = new Pool({
     connectionString: connStr,
+    stream: createSafePgStream,
     ssl: pgSslOption(connStr),
     connectionTimeoutMillis: CONNECTION_TIMEOUT_MS,
     idleTimeoutMillis: 1_000,
@@ -277,6 +280,7 @@ export async function listMongoCollections(
     serverSelectionTimeoutMS: CONNECTION_TIMEOUT_MS,
     connectTimeoutMS: CONNECTION_TIMEOUT_MS,
     maxPoolSize: 1,
+    lookup: safeLookup,
   });
   try {
     await client.connect();
@@ -316,6 +320,7 @@ async function inspectMongoDestination(
     serverSelectionTimeoutMS: CONNECTION_TIMEOUT_MS,
     connectTimeoutMS: CONNECTION_TIMEOUT_MS,
     maxPoolSize: 1,
+    lookup: safeLookup,
   });
   try {
     await client.connect();
@@ -425,6 +430,28 @@ async function loadBigQueryCreds(row: DestinationRowWithBlob): Promise<BigQueryC
 
 function bigQueryToken(creds: BigQueryCreds): Promise<string> {
   return mintGoogleAccessToken(parseServiceAccountJson(creds.serviceAccountJson), BIGQUERY_SCOPE);
+}
+
+/**
+ * Resolve a saved BigQuery destination to the short-lived credentials needed
+ * by a bounded server-side mutation. Kept here so schema repair and the
+ * read-only inspector share the exact same workspace scoping, credential AAD,
+ * project validation, and OAuth flow.
+ *
+ * This is server-only internal plumbing: callers must never serialize the
+ * returned access token into a client component or action result.
+ */
+export async function getBigQueryDestinationAccess(
+  destinationId: string,
+  workspaceId: string,
+): Promise<{ projectId: string; accessToken: string }> {
+  const row = await loadDestinationWithBlob(destinationId, workspaceId);
+  if (!row || row.type !== "bigquery") throw new Error("not_bigquery_destination");
+  const creds = await loadBigQueryCreds(row);
+  return {
+    projectId: creds.projectId,
+    accessToken: await bigQueryToken(creds),
+  };
 }
 
 /** Render a jobs.query cell value for the preview grid. */
@@ -619,6 +646,7 @@ async function bigQueryGet<T>(
   signal: AbortSignal,
 ): Promise<T> {
   const res = await fetch(url, {
+    redirect: "manual",
     headers: { authorization: `Bearer ${token}` },
     signal,
   });
@@ -710,6 +738,7 @@ export async function inspectBigQueryDestination(
   try {
     const res = await fetch(url, {
       method: "POST",
+      redirect: "manual",
       headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
       body: JSON.stringify({ query, useLegacySql: false, maxResults: limit, timeoutMs: 25_000 }),
       signal: controller.signal,
@@ -797,7 +826,7 @@ async function runDatabricksStatement(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), CONNECTION_TIMEOUT_MS + 25_000);
   try {
-    const res = await fetch(url, {
+    const res = await safeDashboardFetch(url, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -812,6 +841,7 @@ async function runDatabricksStatement(
         disposition: "INLINE",
       }),
       signal: controller.signal,
+      redirect: "manual",
     });
     const text = await res.text();
     if (!res.ok) {

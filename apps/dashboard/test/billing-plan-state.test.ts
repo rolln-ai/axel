@@ -160,7 +160,12 @@ describe("pushPlanStates", () => {
   });
 
   it("rewrites the admin URL to /admin/workspace-plan/put", async () => {
-    const calls: Array<{ url: string; body: unknown; headers: Record<string, string> }> = [];
+    const calls: Array<{
+      url: string;
+      body: unknown;
+      headers: Record<string, string>;
+      redirect: RequestRedirect | undefined;
+    }> = [];
     const fakeFetch: typeof fetch = async (input, init) => {
       const headers: Record<string, string> = {};
       const initHeaders = (init?.headers ?? {}) as Record<string, string>;
@@ -169,6 +174,7 @@ describe("pushPlanStates", () => {
         url: String(input),
         body: JSON.parse(String(init?.body)),
         headers,
+        redirect: init?.redirect,
       });
       return new Response(null, { status: 204 });
     };
@@ -186,6 +192,7 @@ describe("pushPlanStates", () => {
     expect(summary.pushed).toBe(1);
     expect(summary.errors).toBe(0);
     expect(calls[0]?.url).toBe("https://ingest.axelapp.ai/admin/workspace-plan/put");
+    expect(calls[0]?.redirect).toBe("manual");
     expect(calls[0]?.headers["x-axel-admin-token"]).toBe("test-admin-token");
     // ttl_seconds must outlive the cron interval (hourly = 3600s) so a
     // single missed push doesn't leave the gate stale. Bug recurrence

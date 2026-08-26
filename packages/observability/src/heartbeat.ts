@@ -88,6 +88,7 @@ export async function recordHeartbeatHttp(
   try {
     const response = await fetchImpl(url, {
       method: "POST",
+      redirect: "manual",
       headers: {
         "content-type": "application/json",
         "x-axel-shared-secret": sharedSecret,

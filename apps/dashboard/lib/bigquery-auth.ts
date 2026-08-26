@@ -82,6 +82,7 @@ export async function mintGoogleAccessToken(
   try {
     const res = await fetch(DEFAULT_TOKEN_URI, {
       method: "POST",
+      redirect: "manual",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",

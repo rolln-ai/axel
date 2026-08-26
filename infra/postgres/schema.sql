@@ -453,6 +453,8 @@ CREATE TABLE IF NOT EXISTS delivery_idempotency (
   state text NOT NULL CHECK (state IN ('in_flight', 'completed', 'failed')),
   attempt_id text,
   updated_at timestamptz NOT NULL DEFAULT now(),
+  -- Renewable claim deadline while in_flight; 14-day retention deadline after
+  -- completed/failed settlement. Both runtimes use the shared SQL protocol.
   expires_at timestamptz NOT NULL
 );
 
@@ -518,7 +520,17 @@ CREATE TABLE IF NOT EXISTS replay_requests (
   requested_at timestamptz NOT NULL DEFAULT now(),
   started_at timestamptz,
   finished_at timestamptz,
-  error_message text
+  error_message text,
+  CONSTRAINT replay_requests_workspace_r2_key_check CHECK (
+    state IN ('done', 'failed')
+    OR (
+      split_part(r2_key, '/', 1) IN ('events', 'pull')
+      AND split_part(r2_key, '/', 2) = workspace_id
+      AND split_part(r2_key, '/', 3) <> ''
+      AND r2_key NOT LIKE '%//%'
+      AND r2_key !~ '(^|/)([.]{1,2})(/|$)'
+    )
+  )
 );
 
 CREATE INDEX IF NOT EXISTS replay_requests_workspace_time_idx
@@ -724,9 +736,10 @@ CREATE INDEX IF NOT EXISTS replay_requests_replay_job_idx
 -- Fingerprint columns (last4 + sha256_prefix) let the UI confirm "this is
 -- the credential I just rotated" without ever decrypting.
 --
--- destinations.credentials_ref points at this table's id (text reference,
--- not a foreign key, so a destination can exist without a credential —
--- e.g. R2 destinations using our shared bucket).
+-- destinations.credentials_ref points at this table's id. The deferred
+-- composite foreign key below binds a non-null reference to the same
+-- destination and workspace while still allowing both circular rows to be
+-- created in one transaction. A destination can remain credential-free.
 CREATE TABLE IF NOT EXISTS destination_credentials (
   id text PRIMARY KEY,
   destination_id text NOT NULL REFERENCES destinations(id) ON DELETE CASCADE,
@@ -742,6 +755,26 @@ CREATE TABLE IF NOT EXISTS destination_credentials (
 
 CREATE INDEX IF NOT EXISTS destination_credentials_destination_idx
   ON destination_credentials (destination_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS destination_credentials_binding_idx
+  ON destination_credentials (id, destination_id, workspace_id);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+      FROM pg_constraint
+     WHERE conname = 'destinations_credentials_binding_fkey'
+       AND conrelid = 'destinations'::regclass
+  ) THEN
+    ALTER TABLE destinations
+      ADD CONSTRAINT destinations_credentials_binding_fkey
+      FOREIGN KEY (credentials_ref, id, workspace_id)
+      REFERENCES destination_credentials(id, destination_id, workspace_id)
+      DEFERRABLE INITIALLY DEFERRED;
+  END IF;
+END
+$$;
 
 -- Optional name column on destinations to give the UI a friendly label.
 -- Kept as an ALTER for existing databases; fresh databases get the column in
@@ -799,6 +832,29 @@ CREATE TABLE IF NOT EXISTS pull_source_credentials (
 
 CREATE INDEX IF NOT EXISTS pull_source_credentials_source_idx
   ON pull_source_credentials (pull_source_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS pull_source_credentials_binding_idx
+  ON pull_source_credentials (id, pull_source_id, workspace_id);
+
+-- Match the destination credential invariant above: a non-null current
+-- credential must belong to this exact pull source and workspace. Deferred so
+-- the circular source + credential rows can be created in one transaction.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+      FROM pg_constraint
+     WHERE conname = 'pull_sources_credentials_binding_fkey'
+       AND conrelid = 'pull_sources'::regclass
+  ) THEN
+    ALTER TABLE pull_sources
+      ADD CONSTRAINT pull_sources_credentials_binding_fkey
+      FOREIGN KEY (credentials_ref, id, workspace_id)
+      REFERENCES pull_source_credentials(id, pull_source_id, workspace_id)
+      DEFERRABLE INITIALLY DEFERRED;
+  END IF;
+END
+$$;
 
 CREATE TABLE IF NOT EXISTS pull_source_stream_state (
   pull_source_id text NOT NULL REFERENCES pull_sources(id) ON DELETE CASCADE,
@@ -1066,7 +1122,10 @@ CREATE TABLE IF NOT EXISTS personal_access_tokens (
   created_at timestamptz NOT NULL DEFAULT now(),
   last_used_at timestamptz,
   expires_at timestamptz,
-  revoked_at timestamptz
+  revoked_at timestamptz,
+  CONSTRAINT personal_access_tokens_membership_fkey
+    FOREIGN KEY (workspace_id, user_id)
+    REFERENCES workspace_members(workspace_id, user_id) ON DELETE CASCADE
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS personal_access_tokens_hash_idx

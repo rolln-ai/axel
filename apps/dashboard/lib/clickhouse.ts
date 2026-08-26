@@ -102,6 +102,7 @@ export function clickhouse(options?: {
         try {
           const res = await fetchImpl(url, {
             method: "POST",
+            redirect: "manual",
             body: sql,
             signal: controller?.signal,
             headers: {

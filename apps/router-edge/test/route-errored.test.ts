@@ -29,6 +29,7 @@ describe("markRouteErrored", () => {
       "https://delivery.example/internal/routes/errored",
       expect.objectContaining({
         method: "POST",
+        redirect: "manual",
         headers: expect.objectContaining({ "x-axel-shared-secret": "shh" }),
       }),
     );

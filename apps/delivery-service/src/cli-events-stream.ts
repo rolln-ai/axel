@@ -23,6 +23,7 @@
 
 import { Buffer } from "node:buffer";
 import http from "node:http";
+import { cloudflareR2ObjectUrl } from "@axel/shared";
 import type { CliApiDeps } from "./cli-api.js";
 
 interface EventRow {
@@ -90,7 +91,7 @@ export async function handleListenStream(
 
   let chRes: Response;
   try {
-    chRes = await fetch(chUrl, { headers: chHeaders });
+    chRes = await fetch(chUrl, { headers: chHeaders, redirect: "manual" });
   } catch (err: unknown) {
     console.error("[/v1/cli/events] clickhouse fetch failed:", err);
     return jsonResponse(res, 502, {
@@ -113,9 +114,14 @@ export async function handleListenStream(
   // on one bad object; the CLI will see them on the next tick.
   const events = await Promise.all(
     rows.map(async (row) => {
-      const r2Url = `https://api.cloudflare.com/client/v4/accounts/${deps.cloudflareAccountId}/r2/buckets/${deps.rawPayloadBucket}/objects/${encodeURIComponent(row.r2_key)}`;
+      const r2Url = cloudflareR2ObjectUrl(
+        deps.cloudflareAccountId,
+        deps.rawPayloadBucket,
+        row.r2_key,
+      );
       try {
         const r2Res = await fetch(r2Url, {
+          redirect: "manual",
           headers: { authorization: `Bearer ${deps.cloudflareApiToken}` },
         });
         if (!r2Res.ok) return null;
@@ -147,6 +153,10 @@ export async function handleListenStream(
 }
 
 function jsonResponse(res: http.ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { "content-type": "application/json" });
+  res.writeHead(status, {
+    "content-type": "application/json",
+    "cache-control": "private, no-store",
+    "x-content-type-options": "nosniff",
+  });
   res.end(JSON.stringify(body));
 }

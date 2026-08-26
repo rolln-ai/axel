@@ -26,6 +26,62 @@ describe("sentry client", () => {
     expect(calls[0]?.init.body).toContain("\"value\":\"boom\"");
   });
 
+  it("redacts webhook values and secret-bearing context before sending", async () => {
+    const calls: RequestInit[] = [];
+    const client = createSentryClient({
+      dsn: "https://public@example.sentry.io/12345",
+      service: "delivery-service",
+      fetchImpl: (async (_url, init) => {
+        calls.push(init as RequestInit);
+        return new Response(null, { status: 200 });
+      }) as typeof fetch,
+    });
+
+    await client.captureException(
+      new Error(
+        'destination echoed "alice@example.test" with Bearer top-secret and https://receiver.test/x?token=value',
+      ),
+      {
+        extra: {
+          payload: { password: "webhook-secret" },
+          detail: "card 4111111111111111",
+        },
+      },
+    );
+
+    const envelope = String(calls[0]?.body);
+    expect(envelope).not.toContain("alice@example.test");
+    expect(envelope).not.toContain("top-secret");
+    expect(envelope).not.toContain("token=value");
+    expect(envelope).not.toContain("4111111111111111");
+    expect(envelope).not.toContain("webhook-secret");
+    expect(envelope).toContain("[REDACTED]");
+  });
+
+  it("drops unlabeled receiver response tails and URL credentials", async () => {
+    const calls: RequestInit[] = [];
+    const client = createSentryClient({
+      dsn: "https://public@example.sentry.io/12345",
+      service: "delivery-service",
+      fetchImpl: (async (_url, init) => {
+        calls.push(init as RequestInit);
+        return new Response(null, { status: 200 });
+      }) as typeof fetch,
+    });
+
+    await client.captureException(
+      new Error(
+        "HTTP 400: hunter2 from postgres://alice:db-password@db.example.test/main?sslkey=private-key",
+      ),
+    );
+
+    const envelope = String(calls[0]?.body);
+    expect(envelope).toContain("HTTP 400: [REDACTED]");
+    expect(envelope).not.toContain("hunter2");
+    expect(envelope).not.toContain("db-password");
+    expect(envelope).not.toContain("private-key");
+  });
+
   it("marks repository stack frames as in-app for Sentry grouping and source links", async () => {
     const calls: Array<{ init: RequestInit }> = [];
     const fetchImpl: typeof fetch = (async (_url, init) => {

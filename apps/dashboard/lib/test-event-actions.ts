@@ -2,6 +2,7 @@
 
 // Test-event server actions: send a test event and observe its routing/delivery outcome.
 
+import { resolveIngestBaseUrl } from "@axel/shared";
 import { db } from "./db";
 import { withWorkspaceMutation } from "./with-mutation";
 import { clickhouse } from "./clickhouse";
@@ -45,9 +46,12 @@ export async function sendTestEvent(_state: ActionState, formData: FormData): Pr
       return { error: "Source not found in this workspace." };
     }
 
-    const ingestBase = process.env.AXEL_INGEST_URL
-      ?? process.env.NEXT_PUBLIC_AXEL_INGEST_URL
-      ?? "https://ingest.axelapp.ai";
+    let ingestBase: string;
+    try {
+      ingestBase = resolveIngestBaseUrl(process.env);
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : "Invalid ingest configuration." };
+    }
     const adminToken = process.env.INGEST_ADMIN_TOKEN;
     if (!adminToken) {
       return { error: "INGEST_ADMIN_TOKEN not configured on the dashboard — can't send test events." };
@@ -56,6 +60,7 @@ export async function sendTestEvent(_state: ActionState, formData: FormData): Pr
     try {
       const res = await fetch(`${ingestBase.replace(/\/$/, "")}/admin/trigger-event`, {
         method: "POST",
+        redirect: "manual",
         headers: {
           "content-type": "application/json",
           "x-axel-admin-token": adminToken,

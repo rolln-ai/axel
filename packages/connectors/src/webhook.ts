@@ -40,9 +40,10 @@
  * ./classify.ts.
  */
 
-import type { Connector, FetchLike } from "./index.js";
+import type { Connector, FetchLike, FetchResponseLike } from "./index.js";
 import { classifyDeliveryStatus } from "./classify.js";
 import { assertResolvedHostSafe, isSafeHeaderName, isSafeHeaderValue, validateDestinationUrl, type Destination, type DnsLookupAll } from "@axel/shared";
+import { fetchWithValidatedRedirects, UnsafeDestinationError } from "./safe-fetch.js";
 
 export type WebhookSigningAlgorithm = "hmac-sha256" | "hmac-sha512";
 
@@ -290,6 +291,15 @@ export function createWebhookConnector(
           });
         }
       }
+      if (!destination.config.signing_secret) {
+        return makeAttempt({
+          eventId: context?.eventId ?? "unknown",
+          destinationId: destination.destination_id,
+          status: "dead",
+          response: { error: "missing_signing_secret: signed webhook delivery refused" },
+          started,
+        });
+      }
       // Request timeout — same override chain as the HTTP connector
       // (per-attempt override → destination config → runtime default).
       // Until this landed the webhook connector documented `timeout_ms`
@@ -306,20 +316,24 @@ export function createWebhookConnector(
           eventId: context?.eventId ?? "unknown",
           destinationId: destination.destination_id,
         });
-        const response = await fetchImpl(req.url, {
-          method: req.method,
-          headers: req.headers,
-          body: req.body,
-          ...(ac ? { signal: ac.signal } : {}),
+        const response = await fetchWithValidatedRedirects({
+          fetchImpl,
+          url: req.url,
+          ...(lookup ? { lookup } : {}),
+          init: {
+            method: req.method,
+            headers: req.headers,
+            body: req.body,
+            ...(ac ? { signal: ac.signal } : {}),
+          },
         });
-        const responseText = await response.text();
+        await discardResponseBody(response);
         return makeAttempt({
           eventId: context?.eventId ?? "unknown",
           destinationId: destination.destination_id,
           status: classifyDeliveryStatus(response.status),
           response: {
             status: response.status,
-            body: responseText.slice(0, 2048),
             timestamp: req.timestamp,
             // Don't echo the signature header back into the log — it's not
             // a secret per se but it is unique-per-attempt noise. Reports
@@ -334,7 +348,7 @@ export function createWebhookConnector(
         return makeAttempt({
           eventId: context?.eventId ?? "unknown",
           destinationId: destination.destination_id,
-          status: "retry",
+          status: err instanceof UnsafeDestinationError ? "dead" : "retry",
           response: { error: err instanceof Error ? err.message : String(err) },
           started,
         });
@@ -343,6 +357,15 @@ export function createWebhookConnector(
       }
     },
   };
+}
+
+async function discardResponseBody(response: FetchResponseLike): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // The response body is deliberately not a delivery diagnostic: a receiver
+    // can echo the submitted webhook bytes or return an unbounded body.
+  }
 }
 
 function makeAttempt(input: {

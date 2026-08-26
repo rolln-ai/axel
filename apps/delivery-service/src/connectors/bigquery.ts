@@ -281,6 +281,7 @@ async function getAccessToken(sa: ServiceAccountKey): Promise<string> {
   try {
     res = await fetch(DEFAULT_TOKEN_URI, {
       method: "POST",
+      redirect: "manual",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
@@ -784,6 +785,7 @@ async function bqApi(
   try {
     const res = await fetch(url, {
       method,
+      redirect: "manual",
       headers: {
         authorization: `Bearer ${token}`,
         ...(body !== undefined ? { "content-type": "application/json" } : {}),
@@ -1117,6 +1119,7 @@ export function createBigQueryConnector(): Connector<BigQueryConfig> {
         try {
           const res = await fetch(url, {
             method: "POST",
+            redirect: "manual",
             headers: { "content-type": "application/json", authorization: `Bearer ${accessToken}` },
             body: JSON.stringify(requestBody),
             signal: controller.signal,

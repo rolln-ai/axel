@@ -1,5 +1,6 @@
 import "server-only";
 
+import { cloudflareR2ObjectUrl, resolveRawPayloadBucket } from "@axel/shared";
 import { GENERIC_SAMPLE, TEST_PAYLOADS } from "./test-payloads";
 
 /**
@@ -42,13 +43,14 @@ export async function fetchPayloadForR2Key(
   const env = options.env ?? process.env;
   const token = env.CLOUDFLARE_API_TOKEN;
   const accountId = env.CLOUDFLARE_ACCOUNT_ID;
-  const bucket = options.bucket ?? "axel-events-raw";
+  const bucket = options.bucket ?? resolveRawPayloadBucket(env);
   if (!token || !accountId) return null;
 
-  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/r2/buckets/${bucket}/objects/${encodeURIComponent(r2Key)}`;
+  const url = cloudflareR2ObjectUrl(accountId, bucket, r2Key);
   try {
     const fetchImpl = options.fetchImpl ?? fetch;
     const res = await fetchImpl(url, {
+      redirect: "manual",
       headers: { authorization: `Bearer ${token}` },
     });
     if (!res.ok) return null;
@@ -79,13 +81,14 @@ export async function fetchRawPayloadBase64ForR2Key(
   const env = options.env ?? process.env;
   const token = env.CLOUDFLARE_API_TOKEN;
   const accountId = env.CLOUDFLARE_ACCOUNT_ID;
-  const bucket = options.bucket ?? "axel-events-raw";
+  const bucket = options.bucket ?? resolveRawPayloadBucket(env);
   if (!token || !accountId) return null;
 
-  const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/r2/buckets/${bucket}/objects/${encodeURIComponent(r2Key)}`;
+  const url = cloudflareR2ObjectUrl(accountId, bucket, r2Key);
   try {
     const fetchImpl = options.fetchImpl ?? fetch;
     const res = await fetchImpl(url, {
+      redirect: "manual",
       headers: { authorization: `Bearer ${token}` },
     });
     if (!res.ok) return null;

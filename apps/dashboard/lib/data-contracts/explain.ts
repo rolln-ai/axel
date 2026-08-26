@@ -1,5 +1,9 @@
 import "server-only";
-import { maskPiiInText } from "@axel/shared";
+import {
+  redactAiPrompt,
+  redactSecretLikeText,
+  redactWebhookDataForAi,
+} from "@axel/shared";
 import {
   buildFixturesFromSamples,
   canActivate,
@@ -81,7 +85,7 @@ export interface ExplainOptions {
   model?: string;
 }
 
-const PROMPT_VERSION = "axe-49:v1";
+const PROMPT_VERSION = "axe-49:v2";
 const DEFAULT_MODEL = "anthropic/claude-haiku-4.5";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -90,7 +94,7 @@ const SYSTEM_PROMPT = `You are helping an Axel operator understand why an event 
 Inputs:
 - The Data Contract's inferred schema.
 - The current declarative transform.
-- A small set of failed event payloads (raw input).
+- A small set of failed event payloads with secret-like values redacted.
 - The destination's response status + body excerpt.
 - An optional connector error message.
 
@@ -141,11 +145,12 @@ export async function explainFailure(
       prompt_version: PROMPT_VERSION,
     };
   } catch (err) {
+    const message = redactSecretLikeText(err instanceof Error ? err.message : String(err));
     return {
       likely_cause: "LLM call failed.",
       patch_kind: "none",
       confidence: 0,
-      rationale: `${err instanceof Error ? err.message : String(err)}. The patched transform can be edited and approved manually instead.`,
+      rationale: `${message}. The patched transform can be edited and approved manually instead.`,
       ms: null,
       model,
       prompt_version: PROMPT_VERSION,
@@ -154,19 +159,22 @@ export async function explainFailure(
 }
 
 function buildUserPrompt(c: FailureContext): string {
-  // Mask obvious PII (emails, long digit runs — cards/accounts/SSNs) before the
-  // payload excerpt leaves for the OpenRouter LLM. Best-effort; see ROL-317 note
-  // on sub-processor disclosure for the full data-flow decision.
   const sample = c.failed_events
     .slice(0, 3)
-    .map((e) => maskPiiInText(JSON.stringify(e.payload).slice(0, 1200)))
+    .map((e) => truncateJson(redactWebhookDataForAi(e.payload), 1200))
     .join("\n---\n");
-  return [
+  const eventTypes = c.inferred_schema.event_types.slice(0, 5).map((eventType) => ({
+    name: redactSecretLikeText(eventType.name),
+    sample_count: eventType.sample_count,
+  }));
+  const userPrompt = [
     "Inferred schema (truncated):",
     JSON.stringify(
       {
-        event_types: c.inferred_schema.event_types.slice(0, 5),
-        fields: Object.keys(c.inferred_schema.fields).slice(0, 40),
+        event_types: eventTypes,
+        fields: Object.keys(c.inferred_schema.fields)
+          .slice(0, 40)
+          .map(redactSecretLikeText),
       },
       null,
       2,
@@ -178,13 +186,22 @@ function buildUserPrompt(c: FailureContext): string {
     "Current filter:",
     c.current_filter ? JSON.stringify(c.current_filter, null, 2) : "(none)",
     "",
-    "Failed events (raw):",
+    "Failed events (redacted):",
     sample,
     "",
     "Destination response:",
-    `status=${c.response.status}\n${c.response.body_excerpt.slice(0, 600)}`,
-    c.connector_message ? `\nConnector error: ${c.connector_message}` : "",
+    `status=${c.response.status}\n${redactSecretLikeText(c.response.body_excerpt).slice(0, 600)}`,
+    c.connector_message
+      ? `\nConnector error: ${redactSecretLikeText(c.connector_message)}`
+      : "",
   ].join("\n");
+  return redactAiPrompt(userPrompt);
+}
+
+function truncateJson(value: unknown, maxLen: number): string {
+  const text = JSON.stringify(value) ?? "";
+  if (text.length <= maxLen) return text;
+  return `${text.slice(0, maxLen)}…[truncated]`;
 }
 
 function defaultLlmCaller(
@@ -194,6 +211,7 @@ function defaultLlmCaller(
     const start = Date.now();
     const res = await fetch(OPENROUTER_URL, {
       method: "POST",
+      redirect: "manual",
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
@@ -205,16 +223,19 @@ function defaultLlmCaller(
         temperature: 0,
         max_tokens: 1200,
         response_format: { type: "json_object" },
+        // Payload excerpts can contain residual customer data after masking.
+        // Restrict routing to providers that deny storage/training.
+        provider: { data_collection: "deny" },
         messages: [
           { role: "system", content: req.systemPrompt },
-          { role: "user", content: req.userPrompt },
+          { role: "user", content: redactAiPrompt(req.userPrompt) },
         ],
       }),
     });
     const ms = Date.now() - start;
     if (!res.ok) {
       const body = await res.text().catch(() => "");
-      throw new Error(`OpenRouter ${res.status}: ${body.slice(0, 400)}`);
+      throw new Error(`OpenRouter ${res.status}: ${redactSecretLikeText(body).slice(0, 400)}`);
     }
     const json = (await res.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
@@ -315,7 +336,11 @@ export interface ApprovalInput {
   patch: ProposedPatch;
   /** Carried forward from the previous version. */
   currentVersion: DataContractVersionRow;
-  /** Replay candidates (R2 keys, route_id, event_id, source_id). */
+  /**
+   * Untrusted replay selectors supplied by the browser. approvePatch resolves
+   * every field back to an unresolved dead_letters row owned by workspaceId
+   * before using any value for route mutation or replay enqueue.
+   */
   failedDeliveries: Array<{
     event_id: string;
     source_id: string;
@@ -343,6 +368,24 @@ export interface ApprovalDeps {
   versionAppender?: typeof appendDataContractVersion;
   fixtureInserter?: typeof insertDataContractFixture;
   routeResyncer?: typeof resyncRouteToArtifacts;
+}
+
+interface ResolvedApprovalReplayTarget {
+  event_id: string;
+  source_id: string;
+  route_id: string;
+  r2_key: string;
+}
+
+const MAX_APPROVAL_REPLAY_TARGETS = 100;
+
+export class InvalidApprovalReplayTargetsError extends Error {
+  constructor() {
+    super(
+      "One or more failed deliveries are unavailable or do not belong to this Data Contract. Refresh and try again.",
+    );
+    this.name = "InvalidApprovalReplayTargetsError";
+  }
 }
 
 /**
@@ -399,6 +442,8 @@ export async function approvePatch(
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
       input.dataContractId,
     ]);
+
+    const failedDeliveries = await resolveApprovalReplayTargets(input, client);
 
     const nextTransform =
       input.patch.patched_transform ??
@@ -460,10 +505,11 @@ export async function approvePatch(
     // replays will run through. Without this the route still executes the OLD
     // transform baked into its pipeline_graph/legacy columns and the replay
     // re-fails identically. We resync each DISTINCT route_id from the failed
-    // deliveries (those are exactly the replay targets, scoped to workspace).
+    // deliveries. These identifiers came from the scoped dead-letter lookup
+    // above, never from the browser tuple itself.
     const routes_resynced: RouteResyncResult[] = [];
     const seenRouteIds = new Set<string>();
-    for (const dl of input.failedDeliveries) {
+    for (const dl of failedDeliveries) {
       if (seenRouteIds.has(dl.route_id)) continue;
       seenRouteIds.add(dl.route_id);
       routes_resynced.push(
@@ -492,10 +538,10 @@ export async function approvePatch(
                 FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[])
                      AS v(event_id, source_id, r2_key, route_id)`,
         params: [
-          input.failedDeliveries.map((dl) => dl.event_id),
-          input.failedDeliveries.map((dl) => dl.source_id),
-          input.failedDeliveries.map((dl) => dl.r2_key),
-          input.failedDeliveries.map((dl) => dl.route_id),
+          failedDeliveries.map((dl) => dl.event_id),
+          failedDeliveries.map((dl) => dl.source_id),
+          failedDeliveries.map((dl) => dl.r2_key),
+          failedDeliveries.map((dl) => dl.route_id),
         ],
       },
     });
@@ -508,6 +554,76 @@ export async function approvePatch(
       routes_resynced,
     };
   });
+}
+
+async function resolveApprovalReplayTargets(
+  input: ApprovalInput,
+  client: pg.PoolClient,
+): Promise<ResolvedApprovalReplayTarget[]> {
+  if (input.failedDeliveries.length === 0) return [];
+  if (input.failedDeliveries.length > MAX_APPROVAL_REPLAY_TARGETS) {
+    throw new InvalidApprovalReplayTargetsError();
+  }
+
+  const requested = input.failedDeliveries;
+  const result = await client.query<ResolvedApprovalReplayTarget>(
+    `WITH requested_replays AS (
+       SELECT v.ordinality::int AS ordinal,
+              v.event_id, v.source_id, v.route_id, v.r2_key
+         FROM UNNEST($3::text[], $4::text[], $5::text[], $6::text[])
+              WITH ORDINALITY AS v(event_id, source_id, route_id, r2_key, ordinality)
+     )
+     SELECT matched.event_id, matched.source_id, matched.route_id, matched.r2_key
+       FROM requested_replays requested
+       JOIN LATERAL (
+         SELECT dl.event_id, dl.source_id, dl.route_id, dl.r2_key
+           FROM dead_letters dl
+           JOIN sources s
+             ON s.id = dl.source_id
+            AND s.workspace_id = $1
+           JOIN routes r
+             ON r.id = dl.route_id
+            AND r.workspace_id = $1
+            AND r.source_id = s.id
+           JOIN data_contracts dc
+             ON dc.id = $2
+            AND dc.workspace_id = $1
+            AND dc.source_id = s.id
+            AND (dc.route_id IS NULL OR dc.route_id = r.id)
+          WHERE dl.workspace_id = $1
+            AND dl.resolved_at IS NULL
+            AND dl.event_id = requested.event_id
+            AND dl.source_id = requested.source_id
+            AND dl.route_id = requested.route_id
+            AND dl.r2_key = requested.r2_key
+          ORDER BY dl.errored_at DESC, dl.id DESC
+          LIMIT 1
+          FOR SHARE OF dl
+       ) matched ON TRUE
+      ORDER BY requested.ordinal`,
+    [
+      input.workspaceId,
+      input.dataContractId,
+      requested.map((delivery) => delivery.event_id),
+      requested.map((delivery) => delivery.source_id),
+      requested.map((delivery) => delivery.route_id),
+      requested.map((delivery) => delivery.r2_key),
+    ],
+  );
+
+  // The lateral lookup yields exactly one durable row per requested ordinal.
+  // A missing row means at least one selector was stale, altered, resolved, or
+  // owned by another workspace/source/route. Reject before any patch write.
+  if (result.rows.length !== requested.length) {
+    throw new InvalidApprovalReplayTargetsError();
+  }
+  // A forged request can repeat one valid tuple many times. Keep the normal
+  // one-row UI unchanged while preventing duplicate replay inserts from a
+  // hand-crafted server-action payload.
+  return [...new Map(result.rows.map((row) => [
+    `${row.event_id}\0${row.source_id}\0${row.route_id}\0${row.r2_key}`,
+    row,
+  ])).values()];
 }
 
 // Re-export helpers callers want.

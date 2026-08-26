@@ -3,6 +3,7 @@ import pg from "pg";
 import { pgSslOption } from "@axel/shared";
 import { db } from "../db";
 import { credentialAad, decryptCredentialBlob } from "../credentials";
+import { createSafePgStream, safeLookup } from "../safe-egress";
 import type {
   MongoIntrospection,
   PostgresIntrospection,
@@ -118,6 +119,7 @@ export async function introspectPostgresDestination(
 
   const pool = new Pool({
     connectionString: connStr,
+    stream: createSafePgStream,
     ssl: pgSslOption(connStr),
     connectionTimeoutMillis: CONNECTION_TIMEOUT_MS,
     idleTimeoutMillis: 1_000,
@@ -201,6 +203,7 @@ export async function introspectMongoDestination(
 
   const client = new MongoClient(connUri, {
     serverSelectionTimeoutMS: CONNECTION_TIMEOUT_MS,
+    lookup: safeLookup,
   });
   try {
     await client.connect();

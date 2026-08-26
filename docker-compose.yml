@@ -15,7 +15,7 @@ services:
       POSTGRES_PASSWORD: axel
       POSTGRES_DB: axel
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -31,8 +31,8 @@ services:
       CLICKHOUSE_PASSWORD: axel
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
     ports:
-      - "8123:8123"
-      - "9000:9000"
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9000:9000"
     volumes:
       - chdata:/var/lib/clickhouse
     ulimits:

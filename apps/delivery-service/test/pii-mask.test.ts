@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { controlPlaneDbSslVerify, maskPiiInText, scrubConnectorError } from "@axel/shared";
+import {
+  controlPlaneDbSslVerify,
+  controlPlanePgSslOption,
+  maskPiiInText,
+  scrubConnectorError,
+} from "@axel/shared";
 
 describe("maskPiiInText", () => {
   it("masks email addresses", () => {
@@ -47,5 +52,17 @@ describe("controlPlaneDbSslVerify", () => {
     expect(controlPlaneDbSslVerify("false")).toBe(false);
     expect(controlPlaneDbSslVerify("1")).toBe(false);
     expect(controlPlaneDbSslVerify(undefined)).toBe(false);
+  });
+});
+
+describe("controlPlanePgSslOption", () => {
+  it("honors an explicit local sslmode=disable", () => {
+    expect(controlPlanePgSslOption("postgres://axel@postgres:5432/axel?sslmode=disable", undefined)).toBe(false);
+  });
+
+  it("verifies remote control-plane certificates when enabled", () => {
+    expect(controlPlanePgSslOption("postgres://axel@db.example/axel", "true")).toEqual({
+      rejectUnauthorized: true,
+    });
   });
 });

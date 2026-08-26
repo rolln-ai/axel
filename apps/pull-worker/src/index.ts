@@ -8,9 +8,11 @@ import {
   createShopifyConnector,
   createStripeConnector,
   runPullSync,
+  sanitizePullRunSummaryForStorage,
   type BigQueryClientLike,
   type BigQueryConfig,
   type BigQueryCredentials,
+  type HttpFetch,
   type MongodbClientLike,
   type MongodbConfig,
   type PgClient,
@@ -27,12 +29,15 @@ import {
 } from "@axel/pull-connectors";
 import { BigQuery } from "@google-cloud/bigquery";
 import { MongoClient, ObjectId } from "mongodb";
+import { createSafePgStream, safeLookup } from "./safe-dns.js";
+import { safePullHttpFetch } from "./safe-http.js";
 import {
   decryptCredentialV2,
   extractEventTypeFromBody,
   parseHexMasterKey,
   pullPgSslOption,
   pullSourceCredentialAadString,
+  sanitizeConnectorDiagnosticForStorage,
   shardFor,
   toArrayBuffer,
   tryAcquirePullSourceLock,
@@ -103,11 +108,13 @@ export class PullBatchError extends Error {
   }
 }
 
-export function defaultPullConnectorRegistry(): Map<PullSourceType, PullConnector<Record<string, unknown>>> {
+export function defaultPullConnectorRegistry(
+  credentialedFetch: HttpFetch = safePullHttpFetch,
+): Map<PullSourceType, PullConnector<Record<string, unknown>>> {
   return new Map([
-    ["chargebee", createChargebeeConnector() as unknown as PullConnector<Record<string, unknown>>],
-    ["stripe", createStripeConnector() as unknown as PullConnector<Record<string, unknown>>],
-    ["shopify", createShopifyConnector() as unknown as PullConnector<Record<string, unknown>>],
+    ["chargebee", createChargebeeConnector(credentialedFetch) as unknown as PullConnector<Record<string, unknown>>],
+    ["stripe", createStripeConnector(credentialedFetch) as unknown as PullConnector<Record<string, unknown>>],
+    ["shopify", createShopifyConnector(credentialedFetch) as unknown as PullConnector<Record<string, unknown>>],
     [
       "postgres",
       createPostgresConnector({
@@ -143,6 +150,7 @@ function createMongoConnect(): (config: MongodbConfig) => Promise<MongodbClientL
       maxPoolSize: 4,
       serverSelectionTimeoutMS: 10_000,
       connectTimeoutMS: 10_000,
+      lookup: safeLookup,
     });
     await client.connect();
     return {
@@ -290,6 +298,7 @@ function createPgConnect(): (config: PostgresConfig) => Promise<PgClient> {
             ...(config.user ? { user: config.user } : {}),
             ...(config.password ? { password: config.password } : {}),
           }),
+      stream: createSafePgStream,
       max: 2,
       // Verify the server certificate by default. A self-signed / private-CA DB
       // opts out with ssl:"no-verify" (or "disable" for no TLS).
@@ -298,7 +307,7 @@ function createPgConnect(): (config: PostgresConfig) => Promise<PgClient> {
       connectionTimeoutMillis: 10_000,
     });
     pool.on("error", (err) => {
-      console.error("[pg-pull] async pool error:", err instanceof Error ? err.message : err);
+      console.error("[pg-pull] async pool error:", safePullDiagnostic(err));
     });
     return {
       async query<T = Record<string, unknown>>(sql: string, params?: unknown[]) {
@@ -352,13 +361,13 @@ export async function runActivePullSources(
       // whose workspace was deleted simply stops appearing on the next tick.
       console.error(
         `[pull-worker] skipping source ${row.id} (workspace ${row.workspace_id}): ` +
-          (err instanceof Error ? err.message : String(err)),
+          safePullDiagnostic(err),
       );
       failures.push({
         sourceId: row.id,
         workspaceId: row.workspace_id,
         kind: "pre_run",
-        error: err instanceof Error ? err.message : String(err),
+        error: safePullDiagnostic(err),
       });
     }
   }
@@ -384,7 +393,7 @@ export async function runPullSource(
       // Do not turn an otherwise completed extraction into a failed run solely
       // because the explicit unlock could not be acknowledged.
       console.error(
-        `[pull-worker] failed to release source lock ${row.id}: ${err instanceof Error ? err.message : String(err)}`,
+        `[pull-worker] failed to release source lock ${row.id}: ${safePullDiagnostic(err)}`,
       );
     }
   }
@@ -445,7 +454,7 @@ async function runLockedPullSource(
         now().toISOString(),
         summary.streams.reduce((sum, stream) => sum + stream.records, 0),
         failedStream?.error ?? partialStream?.error ?? null,
-        JSON.stringify(summary),
+        JSON.stringify(sanitizePullRunSummaryForStorage(summary)),
       ],
     );
     return summary;
@@ -456,7 +465,7 @@ async function runLockedPullSource(
               finished_at = $2,
               error_message = $3
         WHERE id = $1`,
-      [runId, now().toISOString(), err instanceof Error ? err.message : String(err)],
+      [runId, now().toISOString(), safePullDiagnostic(err)],
     );
     throw err;
   } finally {
@@ -467,7 +476,7 @@ async function runLockedPullSource(
       try {
         await connector.close?.();
       } catch (closeErr) {
-        console.error(`[pull] connector close failed for ${row.id}:`, closeErr);
+        console.error(`[pull] connector close failed for ${row.id}: ${safePullDiagnostic(closeErr)}`);
       }
     }
   }
@@ -624,10 +633,11 @@ export class HttpIngestPullRecordSink implements PullRecordSink {
         "x-axel-pull-stream": record.stream,
       },
       body: JSON.stringify(record),
+      redirect: "manual",
     });
     if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      throw new Error(`ingest accepted no pull record: HTTP ${response.status} ${body.slice(0, 300)}`);
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(`ingest accepted no pull record: HTTP ${response.status}`);
     }
   }
 }
@@ -662,7 +672,12 @@ async function listActivePullSources(pool: pg.Pool, limit: number): Promise<Pull
 }
 
 async function sourceFromRow(pool: Pick<PullSourceLockClient, "query">, row: PullSourceRow): Promise<PullSource<Record<string, unknown>>> {
-  const credentials = await fetchCredentials(pool, row.credentials_ref);
+  const credentials = await fetchCredentials(
+    pool,
+    row.credentials_ref,
+    row.workspace_id,
+    row.id,
+  );
   return {
     source_id: row.id,
     workspace_id: row.workspace_id,
@@ -673,29 +688,42 @@ async function sourceFromRow(pool: Pick<PullSourceLockClient, "query">, row: Pul
   };
 }
 
-async function fetchCredentials(pool: Pick<PullSourceLockClient, "query">, credentialsRef: string | null): Promise<Record<string, unknown>> {
+async function fetchCredentials(
+  pool: Pick<PullSourceLockClient, "query">,
+  credentialsRef: string | null,
+  workspaceId: string,
+  pullSourceId: string,
+): Promise<Record<string, unknown>> {
   if (!credentialsRef) return {};
   const key = loadMasterKey();
   const result = await pool.query<CredentialRow>(
     `SELECT ciphertext, nonce, auth_tag, encryption_version, workspace_id, pull_source_id
        FROM pull_source_credentials
       WHERE id = $1
+        AND workspace_id = $2
+        AND pull_source_id = $3
       LIMIT 1`,
-    [credentialsRef],
+    [credentialsRef, workspaceId, pullSourceId],
   );
   const row = result.rows[0];
-  if (!row) throw new Error(`pull credential row not found: ${credentialsRef}`);
-  const plaintext = await decryptCredentialBlob(key, row);
+  if (!row) throw new Error("pull credential row not found");
+  const plaintext = await decryptCredentialBlob(key, row, workspaceId, pullSourceId);
   return JSON.parse(plaintext) as Record<string, unknown>;
 }
 
 /**
  * Decrypt a pull_source_credentials row via the shared AES-256-GCM core
  * (@axel/shared credential-crypto — golden-vector pinned). The v2 AAD is
- * rebuilt from the row's own (workspace, pull source) identity.
+ * rebuilt from the parent pull source identity supplied by the scoped lookup;
+ * direct callers default to the row identity for backwards compatibility.
  */
-export function decryptCredentialBlob(key: Buffer, row: CredentialRow): Promise<string> {
-  return decryptCredentialV2(row, key, pullSourceCredentialAadString(row.workspace_id, row.pull_source_id));
+export function decryptCredentialBlob(
+  key: Buffer,
+  row: CredentialRow,
+  workspaceId = row.workspace_id,
+  pullSourceId = row.pull_source_id,
+): Promise<string> {
+  return decryptCredentialV2(row, key, pullSourceCredentialAadString(workspaceId, pullSourceId));
 }
 
 function loadMasterKey(): Buffer {
@@ -727,4 +755,11 @@ function requireIngestToken(source: PullSource<Record<string, unknown>>): string
     throw new Error("pull source credential is missing ingest_token");
   }
   return token;
+}
+
+function safePullDiagnostic(value: unknown): string {
+  return sanitizeConnectorDiagnosticForStorage(
+    value instanceof Error ? value.message : value,
+    500,
+  ) || "pull_sync_failed";
 }

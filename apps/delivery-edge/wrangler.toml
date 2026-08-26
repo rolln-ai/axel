@@ -1,7 +1,7 @@
 name = "axel-delivery-edge"
 main = "src/index.ts"
 compatibility_date = "2026-04-01"
-compatibility_flags = ["nodejs_compat"]
+compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
 workers_dev = false
 
 [version_metadata]
@@ -77,4 +77,5 @@ preview_bucket_name = "axel-events-raw-preview"
 
 [vars]
 DELIVERY_SERVICE_URL = "https://axel-delivery-native.onrender.com"
+IDEMPOTENCY_CLAIM_LEASE_MS = "360000"
 SENTRY_ENVIRONMENT = "production"

@@ -22,6 +22,7 @@ import { listApiKeys } from "../../../lib/api-keys";
 import { Badge } from "@/components/ui/badge";
 import { reconcileCompletedCheckout } from "../../../lib/billing/checkout";
 import { captureDashboardException } from "../../../lib/sentry-capture";
+import { appBaseUrl } from "../../../lib/app-url";
 
 export const dynamic = "force-dynamic";
 
@@ -366,7 +367,7 @@ async function AccessTokensSection() {
         <h2 className="text-sm font-semibold text-foreground">Personal access tokens</h2>
       </div>
       <div className="space-y-4 p-5">
-        <PersonalAccessTokensPanel initialTokens={personalAccessTokens} />
+        <PersonalAccessTokensPanel initialTokens={personalAccessTokens} apiBaseUrl={appBaseUrl()} />
       </div>
     </section>
   );

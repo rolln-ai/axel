@@ -68,9 +68,14 @@ describe("ingest worker", () => {
   });
 
   it("returns 202 and stores payload + queues message on valid request", async () => {
-    const req = new Request("https://axel.app/in/src_test?token=secret-abc", {
+    const req = new Request("https://axel.app/in/src_test?token=secret-abc&signature=do-not-store&client_secret=oauth-secret&refresh_token=oauth-refresh&webhook_secret=custom-secret&code=oauth-code&event=invoice.paid", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "x-auth-token": "do-not-store",
+        "cf-access-jwt-assertion": "do-not-store-either",
+        "x-partner-webhook-secret": "custom-secret-header",
+      },
       body: JSON.stringify({ hello: "world" }),
     });
     const res = await worker.fetch(req, env, ctx);
@@ -91,7 +96,10 @@ describe("ingest worker", () => {
     expect(allSent[0]!.event_id).toBe(body.event_id);
     expect(allSent[0]!.workspace_id).toBe("ws_1");
     expect(allSent[0]!.headers["content-type"]).toBe("application/json");
-    expect(allSent[0]!.query).toEqual({});
+    expect(allSent[0]!.headers["x-auth-token"]).toBeUndefined();
+    expect(allSent[0]!.headers["cf-access-jwt-assertion"]).toBeUndefined();
+    expect(allSent[0]!.headers["x-partner-webhook-secret"]).toBeUndefined();
+    expect(allSent[0]!.query).toEqual({ event: "invoice.paid" });
   });
 
   it("does not acknowledge when the durable queue write fails", async () => {
@@ -285,6 +293,63 @@ describe("ingest worker", () => {
     expect(res2.headers.get("retry-after")).toBe("60");
   });
 
+  it("fails closed when a provider source reaches ingest without a signing secret", async () => {
+    env = makeEnv({
+      src_test: {
+        workspace_id: "ws_1",
+        secret_token: tokenHash("secret-abc"),
+        status: "active",
+        provider: "stripe",
+      },
+    });
+    const req = new Request("https://axel.app/in/src_test?token=secret-abc", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ type: "invoice.paid" }),
+    });
+
+    const res = await worker.fetch(req, env, ctx);
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("retry-after")).toBe("2");
+    expect(await res.json()).toEqual({
+      error: "source_lookup_unavailable",
+      retry_after_seconds: 2,
+    });
+    expect((env.EVENTS_RAW as unknown as FakeR2).store.size).toBe(0);
+    const queued = Array.from({ length: 16 }, (_, i) => {
+      const key = `QUEUE_EVENTS_${i.toString().padStart(2, "0")}` as keyof Env;
+      return (env[key] as unknown as FakeQueue<QueueMessage>).sent;
+    }).flat();
+    expect(queued).toHaveLength(0);
+  });
+
+  it("keeps custom sources token-only when no signing secret is configured", async () => {
+    env = makeEnv({
+      src_test: {
+        workspace_id: "ws_1",
+        secret_token: tokenHash("secret-abc"),
+        status: "active",
+        provider: "custom",
+      },
+    });
+    const req = new Request("https://axel.app/in/src_test?token=secret-abc", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ hello: "world" }),
+    });
+
+    const res = await worker.fetch(req, env, ctx);
+
+    expect(res.status).toBe(202);
+    expect((env.EVENTS_RAW as unknown as FakeR2).store.size).toBe(1);
+    const queued = Array.from({ length: 16 }, (_, i) => {
+      const key = `QUEUE_EVENTS_${i.toString().padStart(2, "0")}` as keyof Env;
+      return (env[key] as unknown as FakeQueue<QueueMessage>).sent;
+    }).flat();
+    expect(queued).toHaveLength(1);
+  });
+
   it("rejects unsigned requests when source has a Stripe signing secret", async () => {
     env = makeEnv({
       src_test: {
@@ -340,6 +405,45 @@ describe("ingest worker", () => {
     expect(res.status).toBe(202);
     const r2 = env.EVENTS_RAW as unknown as FakeR2;
     expect(r2.store.size).toBe(1);
+    const queued = Array.from({ length: 16 }, (_, i) => {
+      const key = `QUEUE_EVENTS_${i.toString().padStart(2, "0")}` as keyof Env;
+      return (env[key] as unknown as FakeQueue<QueueMessage>).sent;
+    }).flat();
+    expect(queued[0]!.headers["stripe-signature"]).toBeUndefined();
+  });
+
+  it("verifies Chargebee Basic auth without persisting the credential", async () => {
+    const signingSecret = "chargebee-user:chargebee-password";
+    env = makeEnv({
+      src_test: {
+        workspace_id: "ws_1",
+        secret_token: tokenHash("secret-abc"),
+        status: "active",
+        provider: "chargebee",
+        signing_secret: signingSecret,
+      },
+    });
+    const authorization = `Basic ${Buffer.from(signingSecret).toString("base64")}`;
+    const req = new Request("https://axel.app/in/src_test?token=secret-abc", {
+      method: "POST",
+      headers: {
+        authorization,
+        "content-type": "application/json",
+        "x-api-key": "also-sensitive",
+      },
+      body: JSON.stringify({ event_type: "subscription_created" }),
+    });
+
+    const res = await worker.fetch(req, env, ctx);
+
+    expect(res.status).toBe(202);
+    const queued = Array.from({ length: 16 }, (_, i) => {
+      const key = `QUEUE_EVENTS_${i.toString().padStart(2, "0")}` as keyof Env;
+      return (env[key] as unknown as FakeQueue<QueueMessage>).sent;
+    }).flat();
+    expect(queued).toHaveLength(1);
+    expect(queued[0]!.headers.authorization).toBeUndefined();
+    expect(queued[0]!.headers["x-api-key"]).toBeUndefined();
   });
 });
 

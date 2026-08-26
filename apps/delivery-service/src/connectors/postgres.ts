@@ -7,6 +7,7 @@ import {
   planDottedColumnInsert,
   quotePgIdent,
   quotePgTable,
+  sanitizeConnectorDiagnosticForStorage,
   splitPgTable,
   type Destination,
   type DeliveryAttempt,
@@ -14,6 +15,7 @@ import {
   type PostgresBinding,
   type RouteDestinationBinding,
 } from "@axel/shared";
+import { createSafePgStream } from "../safe-dns.js";
 
 /**
  * Postgres destination connector.
@@ -66,6 +68,7 @@ function getPool(connectionString: string): pg.Pool {
   if (!pool) {
     pool = new pg.Pool({
       connectionString,
+      stream: createSafePgStream,
       max: 16,
       // Verify the server cert by default (was rejectUnauthorized:false, which
       // accepted ANY cert → MITM on shared infra). A customer DB with a private/
@@ -76,7 +79,11 @@ function getPool(connectionString: string): pg.Pool {
       connectionTimeoutMillis: 8_000,
     });
     pool.on("error", (err) => {
-      console.error("[postgres-connector] pool error:", err instanceof Error ? err.message : err);
+      console.error(
+        `[postgres-connector] pool error: ${sanitizeConnectorDiagnosticForStorage(
+          err instanceof Error ? err.message : err,
+        )}`,
+      );
     });
     pools.set(connectionString, pool);
   }
@@ -217,7 +224,9 @@ export function createPostgresConnector(): Connector<PostgresDestinationConfig> 
         } catch (firstErr) {
           const message = firstErr instanceof Error ? firstErr.message : String(firstErr);
           if (TRANSIENT_PG_PATTERNS.some((re) => re.test(message))) {
-            console.warn(`[postgres-connector] transient on insert — retrying once: ${message.slice(0, 200)}`);
+            console.warn(
+              `[postgres-connector] transient on insert: retrying once: ${sanitizeConnectorDiagnosticForStorage(message, 200)}`,
+            );
             await new Promise((resolve) => setTimeout(resolve, 100));
             await runQuery();
           } else {

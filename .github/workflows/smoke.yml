@@ -18,11 +18,13 @@ jobs:
     runs-on: ubuntu-latest
     environment: Production
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Run smoke checks
         run: bash scripts/smoke.sh
         env:
           AXEL_MARKETING_URL: ${{ vars.AXEL_MARKETING_URL || 'https://axelapp.ai' }}
           AXEL_APP_URL: ${{ vars.AXEL_APP_URL || 'https://app.axelapp.ai' }}
           AXEL_INGEST_URL: ${{ vars.AXEL_INGEST_URL || 'https://ingest.axelapp.ai' }}
+          AXEL_DELIVERY_URL: ${{ vars.AXEL_DELIVERY_URL || 'https://axel-delivery-native.onrender.com' }}
+          AXEL_REQUIRE_OPERATIONAL_STATUS: "1"
           AXEL_OPS_TEST_TOKEN: ${{ secrets.OPS_TEST_TOKEN }}

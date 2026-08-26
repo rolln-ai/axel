@@ -26,7 +26,12 @@ import {
   uniqueDestinationName,
   validateDestinationTarget,
 } from "./first-run-destinations";
-import { withMongoTlsNoVerify, withNoVerifySslMode } from "@axel/shared";
+import {
+  resolveIngestBaseUrl,
+  type SourceProvider,
+  withMongoTlsNoVerify,
+  withNoVerifySslMode,
+} from "@axel/shared";
 import {
   countBackfillOutcomes,
   createBackfillJob,
@@ -36,7 +41,6 @@ import {
 } from "./backfill-jobs";
 import { withWorkspaceMutation } from "./with-mutation";
 import { encryptSourceSigningSecret } from "./source-secret";
-import type { SourceProvider } from "@axel/shared";
 import { formValue } from "./form";
 import { validateDestinationValues } from "./destination-validation";
 import type { ActionState } from "./action-data";
@@ -72,6 +76,14 @@ export async function createSourceWithPipeline(
   formData: FormData,
 ): Promise<ActionState> {
   return withWorkspaceMutation({}, async ({ workspaceId, audit }) => {
+    let ingestBase: string;
+    try {
+      ingestBase = resolveIngestBaseUrl(process.env);
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : "The ingest endpoint is not configured.",
+      };
+    }
 
     // --- source params ---
     // Pull-source creation (chargebee/stripe/shopify/postgres/mongodb/bigquery)
@@ -462,7 +474,6 @@ export async function createSourceWithPipeline(
     const parts = [`Source "${sourceName}" created`];
     if (result.destinationId) parts.push("destination attached");
     if (result.routeId) parts.push("route active");
-    const ingestBase = process.env.NEXT_PUBLIC_AXEL_INGEST_URL ?? "https://ingest.axelapp.ai";
     const tailNotes: string[] = [];
     if (result.plaintextToken) tailNotes.push("Copy the ingest token now — it won't be shown again.");
     if (generatedWebhookSecret) tailNotes.push("Copy the destination signing secret now — it won't be shown again.");

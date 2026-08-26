@@ -40,14 +40,14 @@ export function SourceTokenPanel({
         <Label className="pt-2 text-sm font-medium">Webhook request</Label>
         <div className="space-y-2">
           <pre className="overflow-x-auto rounded-md border border-border bg-muted/40 px-3 py-2 font-mono text-xs leading-relaxed select-all">
-            {`POST ${ingestUrl}?token=YOUR_SOURCE_TOKEN`}
+            {`POST ${ingestUrl}\nx-axel-token: YOUR_SOURCE_TOKEN`}
           </pre>
           <p className="text-xs text-muted-foreground">
-            Point your provider at this URL. The source token can be sent as the{" "}
-            <code className="font-mono">?token=</code> query parameter (shown above) or as an{" "}
-            <code className="font-mono">x-axel-token</code> request header — use whichever your
-            provider supports. The plaintext token is shown once on creation; rotate below to issue a
-            new one.
+            Point your provider at this URL. Prefer the{" "}
+            <code className="font-mono">x-axel-token</code> request header so credentials do not
+            enter URL logs. If your provider cannot set headers, Axel also accepts a rotatable{" "}
+            <code className="font-mono">?token=</code> query parameter. The plaintext token is shown
+            once on creation; rotate below to issue a new one.
           </p>
         </div>
       </div>
@@ -63,11 +63,17 @@ export function SourceTokenPanel({
                 (fingerprint {signingSecretFingerprint})
               </span>
             </p>
-          ) : (
+          ) : provider === "custom" ? (
             <p className="text-xs text-muted-foreground">
               No provider signing secret configured — the ingest worker accepts any payload that
-              presents the source token. Configure a provider on source create to verify
-              signatures before R2 / queue writes.
+              presents the source token. Configure a custom HMAC secret to verify signatures before
+              R2 / queue writes.
+            </p>
+          ) : (
+            <p className="text-xs text-destructive">
+              {providerLabel(provider)} signature verification is misconfigured. The ingest worker
+              rejects requests before R2 / queue writes until an owner or admin repairs the signing
+              secret.
             </p>
           )}
         </div>
@@ -78,7 +84,8 @@ export function SourceTokenPanel({
         <div className="space-y-3">
           <p className="text-xs text-muted-foreground">
             Tokens are stored hashed and can&apos;t be recovered. Rotate to issue a new token;
-            the old token stops working immediately.
+            edge cache deletion is confirmed, but distributed cache propagation or a lookup already
+            in flight can retain the old token for up to five minutes.
           </p>
 
           {state.error ? (
@@ -99,7 +106,7 @@ export function SourceTokenPanel({
             <input type="hidden" name="source_id" value={sourceId} />
             <ConfirmAction
               title="Rotate source token"
-              body="Rotate this source token? The old token stops working immediately."
+              body="Rotate this source token? Edge cache deletion is confirmed, but distributed cache propagation or a lookup already in flight can retain the old token for up to five minutes."
               confirmLabel="Rotate"
               destructive
             >

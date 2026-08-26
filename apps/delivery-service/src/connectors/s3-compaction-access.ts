@@ -16,6 +16,7 @@ import {
 // endpoint must never point our compaction client at a metadata / internal
 // host. AWS (no custom endpoint) is unaffected.
 import { validateDestinationUrl } from "@axel/shared";
+import { createSafeNodeHttpHandler } from "../safe-node-http-handler.js";
 import { PARQUET_CONTENT_TYPE } from "./parquet-format.js";
 import type { CompactionS3Access, CompactionS3Object } from "../parquet-compaction-loop.js";
 
@@ -40,6 +41,7 @@ export function createS3CompactionAccess(config: S3CompactionClientConfig): Comp
 
   const client = new S3Client({
     region: config.region,
+    requestHandler: createSafeNodeHttpHandler(),
     credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
     ...(config.endpoint
       ? { endpoint: config.endpoint, forcePathStyle: config.addressingStyle !== "virtual_hosted" }

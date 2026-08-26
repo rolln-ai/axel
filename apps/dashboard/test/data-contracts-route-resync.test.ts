@@ -305,6 +305,21 @@ describe("approvePatch route resync", () => {
 
     const fakeTxClient = {
       async query(sql: string, params: unknown[] = []) {
+        if (/WITH requested_replays AS/.test(sql)) {
+          const eventIds = params[2] as string[];
+          const sourceIds = params[3] as string[];
+          const routeIds = params[4] as string[];
+          const r2Keys = params[5] as string[];
+          return {
+            rows: eventIds.map((event_id, index) => ({
+              event_id,
+              source_id: sourceIds[index],
+              route_id: routeIds[index],
+              r2_key: r2Keys[index],
+            })),
+            rowCount: eventIds.length,
+          };
+        }
         if (/WITH candidates AS/.test(sql)) {
           // enqueueReplays candidate evaluation: echo the UNNEST arrays back
           // as candidate rows (nothing muted, nothing in flight).

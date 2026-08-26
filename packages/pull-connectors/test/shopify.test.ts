@@ -82,6 +82,29 @@ describe("Shopify pull connector", () => {
     expect(summary.streams[0]?.error).toMatch(/does not match shop|not a valid URL/);
     expect(requestedUrls.some((url) => new URL(url).hostname === "attacker.example.com")).toBe(false);
   });
+
+  it("does not echo malformed success-body bytes into the stream diagnostic", async () => {
+    const summary = await runPullSync(
+      {
+        source: SOURCE,
+        connector: createShopifyConnector(async () => ({
+          status: 200,
+          headers: { get: () => null },
+          text: async () => "not-json victim@example.com shopify_source_secret",
+        })),
+        stateStore: new InMemoryPullStateStore(),
+        sink: new InMemoryPullRecordSink(),
+      },
+      { now: fixedNow },
+    );
+
+    expect(summary.streams[0]).toMatchObject({
+      status: "failed",
+      error: "invalid JSON response",
+    });
+    expect(JSON.stringify(summary)).not.toContain("victim@example.com");
+    expect(JSON.stringify(summary)).not.toContain("shopify_source_secret");
+  });
 });
 
 function jsonResponse(body: unknown, link: string | null = null) {

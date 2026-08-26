@@ -1,0 +1,167 @@
+name: axel-selfhost
+
+x-control-plane-env: &control-plane-env
+  AXEL_DEPLOYMENT_MODE: self-hosted
+  DATABASE_URL: postgres://axel:${POSTGRES_PASSWORD}@postgres:5432/axel?sslmode=disable
+  DATABASE_POOL_MAX: "10"
+  CREDENTIALS_MASTER_KEY: ${CREDENTIALS_MASTER_KEY}
+  DELIVERY_SHARED_SECRET: ${DELIVERY_SHARED_SECRET}
+  SOURCE_LOOKUP_SHARED_SECRET: ${SOURCE_LOOKUP_SHARED_SECRET}
+  INGEST_ADMIN_TOKEN: ${INGEST_ADMIN_TOKEN}
+  AXEL_INGEST_URL: ${NEXT_PUBLIC_AXEL_INGEST_URL}
+  NEXT_PUBLIC_AXEL_INGEST_URL: ${NEXT_PUBLIC_AXEL_INGEST_URL}
+  NEXT_PUBLIC_AXEL_APP_URL: ${AXEL_PUBLIC_URL}
+  NEXT_PUBLIC_AXEL_DELIVERY_URL: ${AXEL_DELIVERY_PUBLIC_URL}
+  CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID}
+  # Operators can keep the provisioning-capable token out of runtime
+  # containers by supplying a narrower Queue/R2 token. The single-token
+  # fallback preserves the easy-button install.
+  CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_RUNTIME_API_TOKEN:-${CLOUDFLARE_API_TOKEN}}
+  RAW_PAYLOAD_BUCKET: ${RAW_PAYLOAD_BUCKET}
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: axel
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: axel
+    volumes:
+      - selfhost_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U axel -d axel"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [backend]
+
+  migrate:
+    image: postgres:16
+    restart: "no"
+    user: postgres
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    working_dir: /workspace
+    command: ["/workspace/scripts/run-migrations.sh"]
+    environment:
+      DATABASE_URL: postgres://axel:${POSTGRES_PASSWORD}@postgres:5432/axel?sslmode=disable
+      PGSSLMODE: disable
+    volumes:
+      - ./scripts/run-migrations.sh:/workspace/scripts/run-migrations.sh:ro
+      - ./infra/postgres/schema.sql:/workspace/infra/postgres/schema.sql:ro
+      - ./infra/postgres/migrations:/workspace/infra/postgres/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend]
+
+  dashboard:
+    image: axel-selfhost-dashboard:local
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    build:
+      context: .
+      target: dashboard
+      args:
+        NEXT_PUBLIC_AXEL_APP_URL: ${AXEL_PUBLIC_URL}
+        NEXT_PUBLIC_AXEL_INGEST_URL: ${NEXT_PUBLIC_AXEL_INGEST_URL}
+        NEXT_PUBLIC_AXEL_DELIVERY_URL: ${AXEL_DELIVERY_PUBLIC_URL}
+    environment:
+      <<: *control-plane-env
+      CRON_SECRET: ${CRON_SECRET}
+      INGEST_ADMIN_URL: ${NEXT_PUBLIC_AXEL_INGEST_URL}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/login').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    networks: [backend]
+
+  delivery:
+    image: axel-selfhost-delivery:local
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    # Allow active connector calls and the Parquet drain to finish on upgrades.
+    stop_grace_period: 7m
+    build:
+      context: .
+      target: delivery
+    environment:
+      <<: *control-plane-env
+      PORT: "10000"
+      DELIVERY_ROLE: all
+      DELIVERY_QUEUE_ID: ${DELIVERY_QUEUE_ID}
+      EDGE_DELIVERY_QUEUE_ID: ${DELIVERY_QUEUE_ID}
+      INGEST_ADMIN_TOKEN: ${INGEST_ADMIN_TOKEN}
+      POLL_BATCH_SIZE: "25"
+      # Empty HTTP pulls are billable Queue reads. Back off while idle so the
+      # Cloudflare Free allowance is not exhausted by polling alone.
+      POLL_MAX_IDLE_INTERVAL_MS: "60000"
+      MAX_CONCURRENT_DELIVERIES: "8"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:10000/').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    networks: [backend]
+
+  cron:
+    image: axel-selfhost-delivery:local
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    command: ["node", "/app/scripts/self-host/cron.mjs"]
+    environment:
+      DASHBOARD_INTERNAL_URL: http://dashboard:3000
+      CRON_SECRET: ${CRON_SECRET}
+    depends_on:
+      dashboard:
+        condition: service_healthy
+    networks: [backend]
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    environment:
+      AXEL_SITE_ADDRESS: ${AXEL_SITE_ADDRESS}
+    # The core file exposes only the loopback development listener. The helper
+    # adds infra/self-host/docker-compose.public.yml for public-domain installs.
+    ports:
+      - "${AXEL_LOCAL_BIND_ADDRESS:-127.0.0.1}:${AXEL_LOCAL_PORT:-8080}:8080"
+    volumes:
+      - ./infra/self-host/Caddyfile:/etc/caddy/Caddyfile:ro
+      - selfhost_caddy_data:/data
+      - selfhost_caddy_config:/config
+    depends_on:
+      dashboard:
+        condition: service_healthy
+      delivery:
+        condition: service_healthy
+    networks: [backend]
+
+networks:
+  backend:
+
+volumes:
+  selfhost_pgdata:
+  selfhost_caddy_data:
+  selfhost_caddy_config:

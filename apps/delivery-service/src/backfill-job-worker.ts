@@ -38,6 +38,7 @@ import {
   startPeriodicRunner,
   type RunnerHandle,
 } from "@axel/router";
+import { sanitizeConnectorDiagnosticForStorage } from "@axel/shared";
 
 /** Max events pulled from ClickHouse per worker tick per job. */
 const BATCH_LIMIT = 500;
@@ -122,9 +123,15 @@ async function clickhouseQuery(
     "X-ClickHouse-User": env.user ?? "default",
   };
   if (env.password) headers["X-ClickHouse-Key"] = env.password;
-  const res = await fetchImpl(url, { method: "POST", body: sql, headers });
+  const res = await fetchImpl(url, {
+    method: "POST",
+    redirect: "manual",
+    body: sql,
+    headers,
+  });
   if (!res.ok) {
-    throw new Error(`clickhouse_${res.status}: ${(await res.text()).slice(0, 200)}`);
+    await res.body?.cancel().catch(() => undefined);
+    throw new Error(`clickhouse_${res.status}`);
   }
   const text = await res.text();
   if (!text.trim()) return [];
@@ -362,7 +369,10 @@ export async function advanceJob(
   try {
     rows = await fetchNextWindow(deps.clickhouse, job, deps.fetchImpl ?? fetch);
   } catch (err) {
-    const reason = err instanceof Error ? err.message : "unknown";
+    const reason = sanitizeConnectorDiagnosticForStorage(
+      err instanceof Error ? err.message : "unknown",
+      500,
+    );
     await markJobFailed(deps.pool, job.id, reason);
     return "failed";
   }
@@ -381,7 +391,10 @@ export async function advanceJob(
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK");
-    const reason = err instanceof Error ? err.message : "unknown";
+    const reason = sanitizeConnectorDiagnosticForStorage(
+      err instanceof Error ? err.message : "unknown",
+      500,
+    );
     await markJobFailed(deps.pool, job.id, reason);
     return "failed";
   } finally {

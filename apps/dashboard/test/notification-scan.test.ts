@@ -231,4 +231,19 @@ describe("buildNewErrorNotification", () => {
     const n = buildNewErrorNotification(group(), "ws/with spaces");
     expect(n.link_path).toBe("/workspaces/ws%2Fwith%20spaces/inbox");
   });
+
+  it("does not copy payload echoes or secrets into notification rows or email input", () => {
+    const n = buildNewErrorNotification(
+      group({
+        message_excerpt:
+          'receiver rejected payload={"email":"victim@example.test", "note":"private webhook text"}; password=hunter2',
+      }),
+      "ws_alerted",
+    );
+
+    expect(n.body_md).not.toContain("victim@example.test");
+    expect(n.body_md).not.toContain("private webhook text");
+    expect(n.body_md).not.toContain("hunter2");
+    expect(n.body_md).toContain("payload=[REDACTED]");
+  });
 });

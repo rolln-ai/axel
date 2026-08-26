@@ -98,13 +98,17 @@ export async function revokeApiKey(workspaceId: string, keyId: string): Promise<
  */
 const PAT_PREFIX = "axe_pat_";
 
+type WorkspaceMembershipRole = "owner" | "admin" | "member";
+
 /**
- * Scopes granted to an authenticated PAT. A PAT acts on behalf of a user in a
- * workspace, so it gets the operational scopes (read/write/replay) but NOT
- * `admin` — minting/revoking workspace keys is a dashboard-only action and a
- * leaked CLI token must not be able to escalate to key management.
+ * PAT permissions follow the user's current workspace role on every request.
+ * Members are read-only in the dashboard, so a PAT must not turn that role into
+ * write/replay access. Owners and admins get the operational scopes, but never
+ * the API-key-management `admin` scope.
  */
-const PAT_SCOPES: ApiScope[] = ["read", "write", "replay"];
+function patScopesForRole(role: WorkspaceMembershipRole): ApiScope[] {
+  return role === "member" ? ["read"] : ["read", "write", "replay"];
+}
 
 /**
  * Authenticate a Next.js Request via `Authorization: Bearer axl_…` (workspace
@@ -153,8 +157,9 @@ export async function authenticateApiKey(authHeader: string | null): Promise<Api
 /**
  * Validate a personal access token. PATs are SHA-256-hashed the same way as
  * workspace keys (see pat-actions.ts hashToken). Rejects revoked, expired, or
- * non-active-workspace tokens; grants the operational PAT scopes. `key_id` is
- * the PAT id so audit/last-used attribution still works.
+ * non-active-workspace tokens, and tokens whose user is no longer a workspace
+ * member. Permissions are derived from the current membership role. `key_id`
+ * is the PAT id so audit/last-used attribution still works.
  */
 async function authenticatePat(token: string): Promise<ApiKeyAuthContext | null> {
   const hash = sha256Hex(token);
@@ -164,10 +169,15 @@ async function authenticatePat(token: string): Promise<ApiKeyAuthContext | null>
     revoked_at: string | null;
     expires_at: string | null;
     workspace_status: "active" | "suspended" | "deleted";
+    membership_role: WorkspaceMembershipRole;
   }>(
-    `SELECT p.id, p.workspace_id, p.revoked_at::text, p.expires_at::text, w.status AS workspace_status
+    `SELECT p.id, p.workspace_id, p.revoked_at::text, p.expires_at::text,
+            w.status AS workspace_status, wm.role AS membership_role
        FROM personal_access_tokens p
        JOIN workspaces w ON w.id = p.workspace_id
+       JOIN workspace_members wm
+         ON wm.workspace_id = p.workspace_id
+        AND wm.user_id = p.user_id
       WHERE p.token_hash = $1
       LIMIT 1`,
     [hash],
@@ -180,7 +190,11 @@ async function authenticatePat(token: string): Promise<ApiKeyAuthContext | null>
     `UPDATE personal_access_tokens SET last_used_at = now() WHERE id = $1`,
     [row.id],
   ).catch(() => {});
-  return { workspace_id: row.workspace_id, scopes: PAT_SCOPES, key_id: row.id };
+  return {
+    workspace_id: row.workspace_id,
+    scopes: patScopesForRole(row.membership_role),
+    key_id: row.id,
+  };
 }
 
 export function scopeAllows(ctx: ApiKeyAuthContext, required: ApiScope): boolean {

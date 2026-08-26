@@ -38,6 +38,7 @@ import {
   createTtlCache,
   requiresNativeRuntimeDestination,
   isParquetObjectStoreBinding,
+  sanitizeConnectorDiagnosticForStorage,
 } from "@axel/shared";
 import { captureException, isCloudflareQueueOverloadError, isTransientR2Error, recordHeartbeatHttp, sentryClientFromEnv, type SentryEnv } from "@axel/observability";
 
@@ -377,12 +378,11 @@ async function deadLetterRouterFailure(
   });
 }
 
-function routerErrorMessage(err: unknown): string {
-  if (err instanceof Error) {
-    return err.message.length > 500 ? `${err.message.slice(0, 500)}...` : err.message;
-  }
-  const message = String(err);
-  return message.length > 500 ? `${message.slice(0, 500)}...` : message;
+export function routerErrorMessage(err: unknown): string {
+  return sanitizeConnectorDiagnosticForStorage(
+    err instanceof Error ? err.message : String(err),
+    500,
+  );
 }
 
 /** Exported for focused adapter regression tests. */
@@ -450,6 +450,7 @@ async function loadActiveRoutes(
   }
   const res = await fetch(`${env.DELIVERY_SERVICE_URL.replace(/\/$/, "")}/internal/routes`, {
     method: "POST",
+    redirect: "manual",
     headers: {
       "content-type": "application/json",
       "x-axel-shared-secret": env.DELIVERY_SHARED_SECRET,
@@ -489,8 +490,14 @@ async function reportRouteEngineError(
   breach: { reason: string; message: string },
   erroredAt: string,
 ): Promise<void> {
-  await markRouteErrored(env, message.workspace_id, routeId, breach).catch((err) => {
-    console.error(`[router] failed to mark route ${routeId} errored:`, err);
+  const storedBreach = {
+    reason: breach.reason,
+    message: sanitizeConnectorDiagnosticForStorage(breach.message, 400),
+  };
+  await markRouteErrored(env, message.workspace_id, routeId, storedBreach).catch((err) => {
+    console.error(
+      `[router] failed to mark route ${routeId} errored: ${sanitizeConnectorDiagnosticForStorage(err)}`,
+    );
   });
   routeCache.invalidate(`${message.workspace_id}|${message.source_id}`);
   await env.DEAD_LETTER_QUEUE.send({
@@ -499,8 +506,8 @@ async function reportRouteEngineError(
     source_id: message.source_id,
     route_id: routeId,
     r2_key: message.r2_key,
-    reason: breach.reason,
-    message: breach.message,
+    reason: storedBreach.reason,
+    message: storedBreach.message,
     errored_at: erroredAt,
   });
 }
@@ -517,6 +524,7 @@ export async function markRouteErrored(
   }
   const res = await fetch(`${env.DELIVERY_SERVICE_URL.replace(/\/$/, "")}/internal/routes/errored`, {
     method: "POST",
+    redirect: "manual",
     headers: {
       "content-type": "application/json",
       "x-axel-shared-secret": env.DELIVERY_SHARED_SECRET,

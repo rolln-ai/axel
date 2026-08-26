@@ -79,6 +79,24 @@ describe("enqueueReplays", () => {
     // The mute guard is active-mute only.
     expect(evaluate.sql).toMatch(/m\.fingerprint = c\.fingerprint/);
     expect(evaluate.sql).toMatch(/m\.until IS NULL OR m\.until > now\(\)/);
+    expect(evaluate.sql).toMatch(/split_part\(c\.r2_key, '\/', 2\) = \$2/);
+  });
+
+  it("rejects a candidate whose raw key is outside the authenticated workspace", async () => {
+    pgResponses.push({
+      rows: [
+        candidate({
+          r2_key: "events/ws_victim/2026-08-26/evt_secret",
+          payload_key_valid: false,
+        }),
+      ],
+    });
+
+    await expect(enqueueReplays(client, base)).rejects.toThrow(
+      "replay_payload_workspace_mismatch",
+    );
+    expect(pgCalls).toHaveLength(1);
+    expect(pgCalls.some((call) => /INSERT INTO replay_requests/.test(call.sql))).toBe(false);
   });
 
   it("inserts only non-muted, non-in-flight candidates with prefixedId('rpy') ids and buckets the skips", async () => {

@@ -1,8 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PullBatchError, runActivePullSources } from "../src/index";
+import {
+  HttpIngestPullRecordSink,
+  PullBatchError,
+  runActivePullSources,
+} from "../src/index";
 
 describe("pull worker scheduling", () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
 
   it("selects only active pull rows with an active ingest shadow source", async () => {
     const query = vi.fn(async () => ({ rows: [], rowCount: 0 }));
@@ -109,6 +116,122 @@ describe("pull worker scheduling", () => {
       sql: expect.stringContaining("SET status = 'failed'"),
       params: expect.arrayContaining([preRunInsert?.params[0]]),
     }));
+  });
+
+  it("binds a credential lookup to the parent workspace and pull source", async () => {
+    vi.stubEnv("CREDENTIALS_MASTER_KEY", "00".repeat(32));
+    const row = {
+      ...sourceRow("src_bound", "stripe"),
+      credentials_ref: "cred_other",
+    };
+    const query = vi.fn(async () => ({ rows: [row], rowCount: 1 }));
+    const clientQueries: Array<{ sql: string; params: unknown[] }> = [];
+    const lockClient = {
+      query: vi.fn(async (sql: string, params: unknown[] = []) => {
+        clientQueries.push({ sql, params });
+        if (sql.includes("pg_try_advisory_lock")) return { rows: [{ acquired: true }] };
+        return { rows: [], rowCount: 0 };
+      }),
+      release: vi.fn(),
+    };
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(runActivePullSources({
+      pool: { query, connect: async () => lockClient } as never,
+    })).rejects.toBeInstanceOf(PullBatchError);
+
+    const credentialCall = clientQueries.find((call) =>
+      call.sql.includes("FROM pull_source_credentials")
+    );
+    expect(credentialCall?.sql).toContain("AND workspace_id = $2");
+    expect(credentialCall?.sql).toContain("AND pull_source_id = $3");
+    expect(credentialCall?.params).toEqual(["cred_other", "ws_1", "src_bound"]);
+  });
+
+  it("sanitizes stream diagnostics and persisted run summaries", async () => {
+    const row = sourceRow("src_private", "stripe");
+    const query = vi.fn(async () => ({ rows: [row], rowCount: 1 }));
+    const clientQueries: Array<{ sql: string; params: unknown[] }> = [];
+    const lockClient = {
+      query: vi.fn(async (sql: string, params: unknown[] = []) => {
+        clientQueries.push({ sql, params });
+        if (sql.includes("pg_try_advisory_lock")) return { rows: [{ acquired: true }] };
+        return { rows: [], rowCount: 1 };
+      }),
+      release: vi.fn(),
+    };
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const attackerDetail =
+      'HTTP 500: payload={"email":"victim@example.com","api_key":"sk_live_response_secret"}';
+    const connectors = new Map([
+      ["stripe", connector("stripe", vi.fn(async () => {
+        throw new Error(attackerDetail);
+      }))],
+    ]);
+
+    let aggregate: PullBatchError | undefined;
+    try {
+      await runActivePullSources({
+        pool: { query, connect: async () => lockClient } as never,
+        connectors: connectors as never,
+        recordSink: { write: vi.fn(async () => undefined) },
+      });
+    } catch (error) {
+      aggregate = error as PullBatchError;
+    }
+
+    expect(aggregate?.failures[0]?.error).toContain("HTTP 500: [REDACTED]");
+    const terminalUpdate = clientQueries.find((call) =>
+      call.sql.includes("SET status = $2")
+    );
+    expect(terminalUpdate?.params[4]).toBe("HTTP 500: [REDACTED]");
+    expect(JSON.parse(String(terminalUpdate?.params[5]))).toMatchObject({
+      streams: [{ status: "failed", cursor_present: false, error: "HTTP 500: [REDACTED]" }],
+    });
+    const allDiagnostics = JSON.stringify({
+      params: clientQueries.map((call) => call.params),
+      failures: aggregate?.failures,
+      logs: consoleError.mock.calls,
+    });
+    expect(allDiagnostics).not.toContain("victim@example.com");
+    expect(allDiagnostics).not.toContain("sk_live_response_secret");
+  });
+
+  it("does not read or follow an ingest rejection body with the source token attached", async () => {
+    const cancel = vi.fn(async () => undefined);
+    const readBody = vi.fn(async () => "payload=must-not-be-read");
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      expect(init?.redirect).toBe("manual");
+      return {
+        ok: false,
+        status: 302,
+        body: { cancel },
+        text: readBody,
+      } as unknown as Response;
+    });
+    const sink = new HttpIngestPullRecordSink({
+      ingestBaseUrl: "https://ingest.example.test",
+      token: "source-secret-token",
+      fetchImpl,
+    });
+
+    await expect(sink.write({
+      source_id: "src_1",
+      workspace_id: "ws_1",
+      source_type: "stripe",
+      stream: "customers",
+      record_id: "cus_1",
+      cursor: { value: 1 },
+      extracted_at: "2026-08-26T00:00:00.000Z",
+      data: { id: "cus_1" },
+    })).rejects.toThrow("HTTP 302");
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(fetchImpl.mock.calls[0]?.[1]?.headers).toMatchObject({
+      "x-axel-token": "source-secret-token",
+    });
+    expect(readBody).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledOnce();
   });
 });
 

@@ -114,7 +114,7 @@ describe("webhook connector", () => {
     expect(headers["X-Axel-Webhook-Id"]).toBe("dest-1");
   });
 
-  it("sends the request unsigned when no secret is configured (warn-only mode)", async () => {
+  it("fails closed when no signing secret is configured", async () => {
     const calls: Array<{ headers: Record<string, string> }> = [];
     const fetchImpl: FetchLike = async (_url, init) => {
       calls.push({ headers: init.headers });
@@ -122,7 +122,7 @@ describe("webhook connector", () => {
     };
 
     const connector = createWebhookConnector(fetchImpl);
-    await connector.deliver(
+    const attempt = await connector.deliver(
       toArrayBuffer(new TextEncoder().encode("hi")),
       destination("webhook", {
         url: "https://customer.test/in",
@@ -132,8 +132,11 @@ describe("webhook connector", () => {
       { eventId: "evt-x" },
     );
 
-    expect(calls[0]!.headers["X-Axel-Signature"]).toBeUndefined();
-    expect(calls[0]!.headers["X-Axel-Timestamp"]).toBe("1");
+    expect(attempt.status).toBe("dead");
+    expect(attempt.response).toEqual({
+      error: "missing_signing_secret: signed webhook delivery refused",
+    });
+    expect(calls).toHaveLength(0);
   });
 
   it("classifies 4xx (excluding 408/429) as dead so we don't retry forever", async () => {

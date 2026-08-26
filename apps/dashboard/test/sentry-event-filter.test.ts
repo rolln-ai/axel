@@ -6,6 +6,65 @@ afterEach(() => {
 });
 
 describe("dashboard Sentry event filter", () => {
+  it("removes auth URL credentials from the entire outbound event", () => {
+    const secrets = {
+      reset: "reset-secret",
+      verify: "verify-secret",
+      invite: "invite-secret",
+      apiKey: "api-key-secret",
+      clientSecret: "client-secret-value",
+      encoded: "encoded-secret",
+    };
+    const event = {
+      event_id: "event-credential-scrub",
+      request: {
+        url: `https://app.axel.invalid/reset?token=${secrets.reset}`,
+        query_string: `token=${secrets.reset}&api_key=${secrets.apiKey}`,
+        headers: {
+          authorization: "Bearer browser-credential",
+          referer: `https://app.axel.invalid/verify?token=${secrets.verify}`,
+        },
+      },
+      breadcrumbs: [
+        {
+          category: "navigation",
+          data: {
+            from: `/verify?token=${secrets.verify}`,
+            to: `/signup?invite=${secrets.invite}`,
+          },
+        },
+        {
+          category: "console",
+          message: `GET https://app.axel.invalid/reset?token=${secrets.reset}`,
+        },
+        {
+          category: "fetch",
+          data: {
+            url: `https%3A%2F%2Fapp.axel.invalid%2Fverify%3Ftoken%3D${secrets.encoded}`,
+            client_secret: secrets.clientSecret,
+          },
+        },
+      ],
+      exception: {
+        values: [
+          {
+            type: "Error",
+            value: `Request failed at https://app.axel.invalid/signup?invite=${secrets.invite}`,
+            mechanism: { handled: true },
+          },
+        ],
+      },
+    };
+
+    expect(filterDashboardSentryEvent(event)).toBe(event);
+    const serialized = JSON.stringify(event);
+    for (const secret of [...Object.values(secrets), "browser-credential"]) {
+      expect(serialized).not.toContain(secret);
+    }
+    expect(event.request.url).toBe("https://app.axel.invalid/reset");
+    expect(event.request.headers.authorization).toBe("[REDACTED]");
+  });
+
   it("keeps ordinary SDK events", () => {
     const event = { event_id: "event-1" };
 
@@ -14,6 +73,27 @@ describe("dashboard Sentry event filter", () => {
         originalException: new Error("checkout failed"),
       }),
     ).toBe(event);
+  });
+
+  it("removes receiver-controlled HTTP details and plaintext URL credentials", () => {
+    const event = {
+      exception: {
+        values: [
+          {
+            type: "Error",
+            value:
+              "HTTP 400: hunter2 from postgres://alice:db-password@db.example.test/main?sslkey=private-key",
+          },
+        ],
+      },
+    };
+
+    expect(filterDashboardSentryEvent(event)).toBe(event);
+    const serialized = JSON.stringify(event);
+    expect(serialized).toContain("HTTP 400: [REDACTED]");
+    expect(serialized).not.toContain("hunter2");
+    expect(serialized).not.toContain("db-password");
+    expect(serialized).not.toContain("private-key");
   });
 
   it("drops TikTok WebView performance injection errors", () => {

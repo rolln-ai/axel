@@ -5,11 +5,11 @@
 # table (see infra/postgres/migrations/0033_schema_migrations.sql).
 # This script:
 #   1. Ensures schema_migrations exists (idempotent).
-#   2. Lists every infra/postgres/migrations/*.sql file in filename order.
-#   3. For each, checks schema_migrations.filename. If unapplied, runs
-#      the file inside a transaction together with the tracker INSERT,
-#      so either both succeed or both roll back — no half-applied state.
-#   4. Records sha256 of the file at apply time.
+#   2. Bootstraps an empty database from the current schema snapshot and
+#      records that baseline. Historical migrations predate a true 0000 base
+#      migration and cannot be replayed against an empty database.
+#   3. Lists every infra/postgres/migrations/*.sql file in filename order.
+#   4. Applies and records each migration newer than the ledger watermark.
 #
 # Usage:
 #   DATABASE_URL=postgres://... ./scripts/run-migrations.sh
@@ -23,13 +23,22 @@ if [ -z "${DATABASE_URL:-}" ]; then
   exit 1
 fi
 
-# Render's external Postgres endpoint is TLS-only. Force encrypted transport
-# (no CA verification) unless the operator overrides it. Mirrors the dashboard
-# pg Pool's ssl:{rejectUnauthorized:false} and the delivery/ingest ssl:"require".
-# No-op for localhost / already-correct setups.
-export PGSSLMODE="${PGSSLMODE:-require}"
+# Managed Postgres endpoints are normally TLS-only, while the stock local
+# postgres container has TLS disabled. Pick the safe usable default from the
+# connection target; an explicit PGSSLMODE or sslmode query parameter wins.
+if [ -z "${PGSSLMODE:-}" ]; then
+  case "$DATABASE_URL" in
+    *[?\&]sslmode=disable*|*://*@localhost:*|*://*@127.0.0.1:*|*://*@\[::1\]:*)
+      export PGSSLMODE=disable
+      ;;
+    *)
+      export PGSSLMODE=require
+      ;;
+  esac
+fi
 
 MIGRATIONS_DIR="$(cd "$(dirname "$0")/../infra/postgres/migrations" && pwd)"
+SCHEMA_PATH="$(cd "$(dirname "$0")/../infra/postgres" && pwd)/schema.sql"
 
 # Step 1 — ensure the tracker table exists AND legacy-backfill is in
 # place before the loop attempts any apply. We can't rely on the
@@ -39,12 +48,11 @@ MIGRATIONS_DIR="$(cd "$(dirname "$0")/../infra/postgres/migrations" && pwd)"
 # (where they're already applied), and any non-idempotent migration
 # like 0024 (`ALTER TABLE … RENAME TO data_contracts`) breaks.
 #
-# Backfill = INSERT ON CONFLICT DO NOTHING for every file we ship,
-# marking them all as `'legacy'`. Existing prod skips everything past
-# this point (all already recorded). Fresh DBs run the migrations
-# anyway because the legacy rows are inserted but the actual schema
-# work is also done from scratch via the loop — and idempotent. Both
-# cases converge cleanly.
+# Existing installations that predate the ledger are registered as `legacy`,
+# but only through a schema version we can prove from a migration-owned marker.
+# Empty databases are created from schema.sql and registered as
+# `schema-bootstrap`. On either path, a later filename is left unregistered so
+# the incremental loop applies it normally.
 echo "[run-migrations] ensuring schema_migrations exists + legacy backfill"
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "
   CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -54,54 +62,73 @@ psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "
   );
 " > /dev/null
 
-# Detect: existing prod (has the dashboard's `destinations` table from
-# 0001) vs fresh DB. For existing prod, backfill every file in the
-# migrations directory as `'legacy'` BEFORE the loop runs — otherwise
-# the loop attempts to re-apply each historical migration, and any
-# non-idempotent one (e.g. 0024 `ALTER TABLE event_maps RENAME TO
-# data_contracts`) fails. For a fresh DB, no backfill — the loop
-# applies every migration in order, against an empty schema.
-needs_legacy_backfill="$(psql "$DATABASE_URL" -At -c "
+# Detect an existing base schema before touching historical migrations.
+# 0001 is a constraint change, not a base-schema migration, so replaying the
+# directory against an empty database fails immediately. Bootstrap the current
+# snapshot instead; future upgrades still flow through the migration ledger.
+has_base_schema="$(psql "$DATABASE_URL" -At -c "
   SELECT 1 FROM information_schema.tables
    WHERE table_schema = 'public' AND table_name = 'destinations' LIMIT 1
 ")"
-if [ "$needs_legacy_backfill" = "1" ]; then
-  # Only backfill HISTORICAL files — those at or below the highest already-
-  # tracked migration (the watermark). A populated tracker means adoption
-  # already happened, so any NEW file (> watermark) is a real pending migration
-  # that MUST flow through the apply loop below, NOT be silently marked
-  # 'legacy' and skipped. (That skip-new-migrations bug marked 0038–0047 as
-  # applied-without-running on 2026-06-03.) When the tracker is empty — first
-  # adoption on an existing prod — watermark is "" and we backfill everything,
-  # which is the correct one-time bootstrap so the loop won't re-run historical
-  # non-idempotent migrations (e.g. 0024's RENAME).
-  watermark="$(psql "$DATABASE_URL" -At -c "SELECT coalesce(max(filename), '') FROM schema_migrations")"
-  if [ -n "$watermark" ]; then
-    echo "[run-migrations] existing prod — backfilling files <= $watermark as 'legacy'; newer migrations will be applied"
-  else
-    echo "[run-migrations] existing 'destinations' table, empty tracker — first adoption: backfilling all files as 'legacy'"
-  fi
-  for fpath in $(find "$MIGRATIONS_DIR" -maxdepth 1 -type f -name '*.sql' | sort); do
-    fname="$(basename "$fpath")"
-    case "$fname" in
-      *[!A-Za-z0-9._-]*)
-        echo "[run-migrations] refusing to register $fname — unsafe filename" >&2
-        exit 1
-        ;;
-    esac
-    # Skip files newer than the watermark — they are real pending migrations.
-    if [ -n "$watermark" ] && [[ "$fname" > "$watermark" ]]; then
-      continue
-    fi
-    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "
-      INSERT INTO schema_migrations (filename, sha256)
-      VALUES ('$fname', 'legacy')
-      ON CONFLICT (filename) DO NOTHING;
-    " > /dev/null
-  done
-else
-  echo "[run-migrations] no 'destinations' table — fresh DB, will apply every migration"
+baseline_marker="legacy"
+if [ "$has_base_schema" != "1" ]; then
+  echo "[run-migrations] empty database — applying current schema snapshot"
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$SCHEMA_PATH"
+  baseline_marker="schema-bootstrap"
 fi
+
+# Only register files at or below a proven watermark. A populated tracker is
+# authoritative. A fresh snapshot contains every migration in this checkout.
+# An existing schema with an empty tracker is different: marking the whole
+# checkout as legacy would silently skip a migration added after that database
+# was last upgraded. Detect a migration-owned schema marker instead. Migration
+# 0064 created this table and both indexes, so their presence proves the schema
+# reached 0064 under the append-only migration contract. Any later migration
+# (0065+) must still flow through the apply loop.
+watermark="$(psql "$DATABASE_URL" -At -c "SELECT coalesce(max(filename), '') FROM schema_migrations")"
+registration_watermark="$watermark"
+if [ -n "$registration_watermark" ]; then
+  echo "[run-migrations] ledger watermark $watermark — registering historical files only"
+elif [ "$baseline_marker" = "schema-bootstrap" ]; then
+  registration_watermark="$(find "$MIGRATIONS_DIR" -maxdepth 1 -type f -name '*.sql' -exec basename {} \; | sort | tail -1)"
+  echo "[run-migrations] recording current migrations as the fresh schema baseline"
+else
+  registration_watermark="$(psql "$DATABASE_URL" -At -v ON_ERROR_STOP=1 -c "
+    SELECT CASE
+      WHEN to_regclass('public.email_verifications') IS NOT NULL
+       AND to_regclass('public.email_verifications_user_idx') IS NOT NULL
+       AND to_regclass('public.email_verifications_expiry_idx') IS NOT NULL
+      THEN '0064_email_verifications.sql'
+      ELSE ''
+    END
+  ")"
+  if [ -z "$registration_watermark" ]; then
+    echo "[run-migrations] cannot safely adopt existing schema with an empty ledger: no known baseline marker found" >&2
+    echo "[run-migrations] restore schema_migrations or bring the database to the 0064 email-verifications baseline first" >&2
+    exit 1
+  fi
+  echo "[run-migrations] existing schema with empty ledger — adopting through proven baseline $registration_watermark"
+fi
+for fpath in $(find "$MIGRATIONS_DIR" -maxdepth 1 -type f -name '*.sql' | sort); do
+  fname="$(basename "$fpath")"
+  case "$fname" in
+    *[!A-Za-z0-9._-]*)
+      echo "[run-migrations] refusing to register $fname — unsafe filename" >&2
+      exit 1
+      ;;
+  esac
+  # Files newer than the proven registration watermark are real pending
+  # migrations. Never label them as legacy merely because they are present in
+  # the current checkout.
+  if [[ "$fname" > "$registration_watermark" ]]; then
+    continue
+  fi
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "
+      INSERT INTO schema_migrations (filename, sha256)
+      VALUES ('$fname', '$baseline_marker')
+      ON CONFLICT (filename) DO NOTHING;
+  " > /dev/null
+done
 
 # Step 2 — iterate migrations.
 applied_count=0

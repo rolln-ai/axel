@@ -2,16 +2,46 @@ import { lookup as dnsLookup } from "node:dns/promises";
 import type { Connector, DeliveryContext } from "@axel/connectors";
 import {
   assertResolvedHostSafe,
+  sanitizeConnectorDiagnosticForStorage,
   validateDestinationUrl,
   type Destination,
   type DeliveryAttempt,
   type DatabricksSqlBinding,
   type DatabricksVolumeBinding,
 } from "@axel/shared";
+import { safeNodeFetch } from "../safe-outbound-fetch.js";
 
 // DNS-rebinding guard: resolve the host and reject if it lands on a private/
 // metadata IP, even when the literal string passed validateDestinationUrl.
 const resolveAllIps = (hostname: string) => dnsLookup(hostname, { all: true });
+
+interface DatabricksFetchInit {
+  method: "POST" | "PUT";
+  headers: Record<string, string>;
+  body: string | ArrayBuffer;
+  signal: AbortSignal;
+  redirect: "manual";
+}
+
+export type DatabricksFetch = (
+  url: string,
+  init: DatabricksFetchInit,
+) => Promise<DatabricksFetchResponse>;
+
+interface DatabricksFetchResponse {
+  status: number;
+  text(): Promise<string>;
+  headers?: { get(name: string): string | null };
+  body?: {
+    cancel(reason?: unknown): Promise<void>;
+    getReader(): {
+      read(): Promise<{ done: boolean; value?: Uint8Array }>;
+      cancel(reason?: unknown): Promise<void>;
+    };
+  } | null;
+}
+
+const defaultDatabricksFetch: DatabricksFetch = (url, init) => safeNodeFetch(url, init);
 
 /**
  * Databricks destination connectors.
@@ -114,8 +144,60 @@ function resolveDatabricksVolumeBinding(
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+const MAX_DATABRICKS_RESPONSE_BYTES = 1024 * 1024;
 
 const TRANSIENT_ERROR_PATTERNS = [/econnreset/i, /etimedout/i, /socket hang up/i, /fetch failed/i];
+
+async function cancelResponseBody(response: DatabricksFetchResponse): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // The response is being discarded. A failed cancellation must not replace
+    // the status-only diagnostic with transport details from a customer host.
+  }
+}
+
+async function readBoundedResponseText(
+  response: DatabricksFetchResponse,
+  maxBytes = MAX_DATABRICKS_RESPONSE_BYTES,
+): Promise<string> {
+  const declaredLength = Number(response.headers?.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+    await cancelResponseBody(response);
+    throw new Error("databricks_response_too_large");
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    const text = await response.text();
+    if (new TextEncoder().encode(text).byteLength > maxBytes) {
+      throw new Error("databricks_response_too_large");
+    }
+    return text;
+  }
+
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    totalBytes += value.byteLength;
+    if (totalBytes > maxBytes) {
+      await reader.cancel();
+      throw new Error("databricks_response_too_large");
+    }
+    chunks.push(value);
+  }
+
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
 
 function attemptOf(
   context: DeliveryContext | undefined,
@@ -298,7 +380,6 @@ const COLUMN_MISSING_PATTERN =
 interface StmtOutcome {
   transportError?: { message: string; transient: boolean };
   httpStatus?: number;
-  httpBody?: string;
   nonJson?: boolean;
   state?: string;
   statementId?: string;
@@ -307,6 +388,7 @@ interface StmtOutcome {
 }
 
 async function executeStatement(
+  fetchImpl: DatabricksFetch,
   host: string,
   token: string,
   warehouseId: string,
@@ -325,21 +407,23 @@ async function executeStatement(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, {
+    const res = await fetchImpl(url, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
       body: JSON.stringify(body),
       signal: controller.signal,
+      redirect: "manual",
     });
-    const text = await res.text();
     if (res.status < 200 || res.status >= 300) {
-      return { httpStatus: res.status, httpBody: text };
+      await cancelResponseBody(res);
+      return { httpStatus: res.status };
     }
+    const text = await readBoundedResponseText(res);
     let parsed: StatementExecutionResponse;
     try {
       parsed = JSON.parse(text) as StatementExecutionResponse;
     } catch {
-      return { httpStatus: res.status, httpBody: text, nonJson: true };
+      return { httpStatus: res.status, nonJson: true };
     }
     return {
       httpStatus: res.status,
@@ -372,14 +456,14 @@ function classifyStatement(
       context,
       destination,
       out.transportError.transient ? "retry" : "dead",
-      { error: out.transportError.message.slice(0, 500) },
+      { error: sanitizeConnectorDiagnosticForStorage(out.transportError.message, 500) },
       startedAt,
     );
   }
   if (out.httpStatus !== undefined && (out.httpStatus < 200 || out.httpStatus >= 300)) {
     const s = out.httpStatus;
     const status = s === 429 || s >= 500 ? "retry" : "dead";
-    return attemptOf(context, destination, status, { status: s, body: (out.httpBody ?? "").slice(0, 2048) }, startedAt);
+    return attemptOf(context, destination, status, { status: s }, startedAt);
   }
   if (out.nonJson) {
     return attemptOf(context, destination, "retry", { status: out.httpStatus, error: "non_json_response" }, startedAt);
@@ -392,7 +476,11 @@ function classifyStatement(
       context,
       destination,
       "dead",
-      { status: out.httpStatus, statement_id: out.statementId, error: (out.errorMessage ?? "statement_failed").slice(0, 1024) },
+      {
+        status: out.httpStatus,
+        statement_id: out.statementId,
+        error: sanitizeConnectorDiagnosticForStorage(out.errorMessage ?? "statement_failed", 1024),
+      },
       startedAt,
     );
   }
@@ -400,7 +488,9 @@ function classifyStatement(
   return attemptOf(context, destination, "retry", { status: out.httpStatus, statement_id: out.statementId, state: out.state ?? "unknown" }, startedAt);
 }
 
-export function createDatabricksSqlConnector(): Connector<DatabricksSqlConfig> {
+export function createDatabricksSqlConnector(
+  fetchImpl: DatabricksFetch = defaultDatabricksFetch,
+): Connector<DatabricksSqlConfig> {
   return {
     type: "databricks_sql",
     async deliver(event, destination, context) {
@@ -476,7 +566,15 @@ export function createDatabricksSqlConnector(): Connector<DatabricksSqlConfig> {
       const warehouse = config.warehouse_id;
       const successResponse = { table: `${config.catalog}.${config.schema_name}.${binding.table}` };
       const exec = (statement: string, parameters: Array<{ name: string; value: string; type: string }>) =>
-        executeStatement(host, token, warehouse, statement, parameters, context?.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+        executeStatement(
+          fetchImpl,
+          host,
+          token,
+          warehouse,
+          statement,
+          parameters,
+          context?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        );
 
       let out = await exec(insert.statement, insert.parameters);
 
@@ -527,7 +625,9 @@ function buildVolumeKey(input: {
   return key.replace(/^\/+/, "");
 }
 
-export function createDatabricksVolumeConnector(): Connector<DatabricksVolumeConfig> {
+export function createDatabricksVolumeConnector(
+  fetchImpl: DatabricksFetch = defaultDatabricksFetch,
+): Connector<DatabricksVolumeConfig> {
   return {
     type: "databricks_volume",
     async deliver(event, destination, context) {
@@ -596,7 +696,7 @@ export function createDatabricksVolumeConnector(): Connector<DatabricksVolumeCon
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
       try {
-        const res = await fetch(url, {
+        const res = await fetchImpl(url, {
           method: "PUT",
           headers: {
             "content-type": "application/octet-stream",
@@ -604,9 +704,11 @@ export function createDatabricksVolumeConnector(): Connector<DatabricksVolumeCon
           },
           body: event,
           signal: controller.signal,
+          redirect: "manual",
         });
         // 204 (success, no content) or 200 are the documented success codes.
         if (res.status === 200 || res.status === 204) {
+          await cancelResponseBody(res);
           return attemptOf(
             context,
             destination,
@@ -618,13 +720,13 @@ export function createDatabricksVolumeConnector(): Connector<DatabricksVolumeCon
             startedAt,
           );
         }
-        const text = await res.text();
+        await cancelResponseBody(res);
         if (res.status === 401 || res.status === 403 || res.status === 404) {
           return attemptOf(
             context,
             destination,
             "dead",
-            { status: res.status, body: text.slice(0, 2048) },
+            { status: res.status },
             startedAt,
           );
         }
@@ -633,7 +735,7 @@ export function createDatabricksVolumeConnector(): Connector<DatabricksVolumeCon
             context,
             destination,
             "retry",
-            { status: res.status, body: text.slice(0, 2048) },
+            { status: res.status },
             startedAt,
           );
         }
@@ -641,7 +743,7 @@ export function createDatabricksVolumeConnector(): Connector<DatabricksVolumeCon
           context,
           destination,
           "dead",
-          { status: res.status, body: text.slice(0, 2048) },
+          { status: res.status },
           startedAt,
         );
       } catch (err) {

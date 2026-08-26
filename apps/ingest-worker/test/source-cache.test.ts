@@ -82,7 +82,11 @@ describe("kvSourceCache", () => {
     await cache.put("src_1", { kind: "hit", source: SAMPLE }, 300);
     expect(calls).toHaveLength(1);
     expect(calls[0]?.key).toBe("src:src_1");
-    expect(JSON.parse(calls[0]!.value)).toEqual({ kind: "hit", source: SAMPLE });
+    expect(JSON.parse(calls[0]!.value)).toEqual({
+      kind: "hit",
+      source: SAMPLE,
+      cache_schema_version: 3,
+    });
     expect(calls[0]?.ttl).toBe(300);
   });
 
@@ -138,7 +142,7 @@ describe("kvSourceCache", () => {
     expect(deleted).toEqual(["src:src_42"]);
   });
 
-  it("invalidate swallows KV delete failures (best-effort)", async () => {
+  it("invalidate propagates KV delete failures so revocations fail closed", async () => {
     const kv: KVNamespaceLike = {
       async get() {
         return null;
@@ -148,13 +152,35 @@ describe("kvSourceCache", () => {
         throw new Error("KV outage");
       },
     };
-    await expect(kvSourceCache(kv).invalidate("src_x")).resolves.toBeUndefined();
+    await expect(kvSourceCache(kv).invalidate("src_x")).rejects.toThrow("KV outage");
   });
 
   it("ignores entries from KV without a recognised kind", async () => {
     const kv: KVNamespaceLike = {
       async get() {
         return JSON.stringify({ kind: "weird", source: SAMPLE });
+      },
+      async put() {},
+      async delete() {},
+    };
+    expect(await kvSourceCache(kv).get("src_1")).toBeUndefined();
+  });
+
+  it("ignores positive entries from an older authentication schema", async () => {
+    const kv: KVNamespaceLike = {
+      async get() {
+        return JSON.stringify({ kind: "hit", source: SAMPLE });
+      },
+      async put() {},
+      async delete() {},
+    };
+    expect(await kvSourceCache(kv).get("src_1")).toBeUndefined();
+  });
+
+  it("ignores deployed v2 positives that may still have a one-year TTL", async () => {
+    const kv: KVNamespaceLike = {
+      async get() {
+        return JSON.stringify({ kind: "hit", source: SAMPLE, cache_schema_version: 2 });
       },
       async put() {},
       async delete() {},

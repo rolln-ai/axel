@@ -3,11 +3,10 @@
 // Danger-zone server actions: destructive workspace/destination data resets.
 
 import { redirect } from "next/navigation";
-import { updateTag } from "next/cache";
-import { db, withTransaction } from "./db";
-import { bustWorkspaceTags, cacheTags } from "./repositories";
+import { withTransaction } from "./db";
+import { bustWorkspaceTags } from "./repositories";
 import { setActiveWorkspaceId } from "./session";
-import { pushSourceToEdge, rowToEdgePayload, type SourceDbRow } from "./edge-invalidation";
+import { requireEdgeSourceCacheInvalidations } from "./edge-invalidation";
 import { withWorkspaceMutation } from "./with-mutation";
 import { flushAllDestinationData, flushDestinationData, wipeWorkspaceData } from "./data-reset";
 import { formValue } from "./form";
@@ -188,7 +187,7 @@ export async function deleteCurrentWorkspace(_state: ActionState, formData: Form
     // Running that inline hung the UI for minutes and could exceed the 300s
     // function limit, leaving a half-wiped shell. See lib/workspace-teardown.ts.
     try {
-      await withTransaction(async (client) => {
+      const sourceIds = await withTransaction(async (client) => {
         // Lock + re-verify under the lock so concurrent deletes / double-clicks /
         // server-action retries serialize instead of double-scheduling.
         const wsRow = await client.query<{ name: string; status: string }>(
@@ -196,9 +195,22 @@ export async function deleteCurrentWorkspace(_state: ActionState, formData: Form
           [workspaceId],
         );
         const row = wsRow.rows[0];
-        if (!row) return; // already gone (a concurrent delete won) — fall through to redirect
-        if (row.status === "deleting") return; // teardown already scheduled — idempotent
+        if (!row) return []; // already gone (a concurrent delete won) — fall through to redirect
+        if (row.status === "deleting") {
+          const sources = await client.query<{ id: string }>(
+            "SELECT id FROM sources WHERE workspace_id = $1",
+            [workspaceId],
+          );
+          return sources.rows.map((source) => source.id);
+        }
         if (row.name !== typedName) throw new Error("name_mismatch");
+
+        const sources = await client.query<{ id: string }>(
+          "SELECT id FROM sources WHERE workspace_id = $1",
+          [workspaceId],
+        );
+        const ids = sources.rows.map((source) => source.id);
+        await requireEdgeSourceCacheInvalidations(ids);
 
         // Audit row written while workspace_id is still a live FK target; the
         // eventual hard DELETE in teardown SET NULLs it but the row survives.
@@ -217,12 +229,17 @@ export async function deleteCurrentWorkspace(_state: ActionState, formData: Form
           "UPDATE workspaces SET status = 'deleting', deleted_at = now() WHERE id = $1",
           [workspaceId],
         );
+        await client.query(
+          `UPDATE sources SET status = 'disabled', updated_at = now()
+            WHERE workspace_id = $1 AND status <> 'disabled'`,
+          [workspaceId],
+        );
+        return ids;
       });
 
-      // Stop the edge from accepting NEW webhooks for this workspace right away —
-      // before the async teardown starts wiping — so no fresh event data lands
-      // mid-teardown and re-orphans the stores we're about to clear.
-      await pauseWorkspaceSources(workspaceId);
+      // Close the narrow race where an ingest miss repopulated an old active
+      // row between the pre-delete and the transaction commit.
+      await requireEdgeSourceCacheInvalidations(sourceIds);
       bustWorkspaceTags(workspaceId);
     } catch (err) {
       if (err instanceof Error && err.message === "name_mismatch") {
@@ -247,22 +264,31 @@ export async function deleteCurrentWorkspace(_state: ActionState, formData: Form
 }
 
 async function pauseWorkspaceSources(workspaceId: string): Promise<number> {
-  const result = await db().query<SourceDbRow>(
-    `UPDATE sources
-        SET status = 'disabled',
-            updated_at = now()
-      WHERE workspace_id = $1
-        AND status <> 'disabled'
-      RETURNING id, workspace_id, name, secret_token_hash, status,
-                max_body_bytes, max_body_depth, max_events_per_minute, field_selection,
-                provider, signing_secret_ciphertext, signing_secret_previous_ciphertext,
-                redact_paths, ordering_enabled, ordering_key_header, ordering_key_path,
-                subject_key_paths, inbound_ip_allowlist`,
-    [workspaceId],
-  );
-  await Promise.all(result.rows.map(async (row) => {
-    await pushSourceToEdge(await rowToEdgePayload(row));
-  }));
-  if (result.rowCount) updateTag(cacheTags.sources(workspaceId));
-  return result.rowCount ?? 0;
+  const result = await withTransaction(async (client) => {
+    // Take the same row lock used by source creation/re-enable. This prevents a
+    // concurrent active source from landing between enumeration and disable.
+    const workspace = await client.query<{ status: string }>(
+      "SELECT COALESCE(status, 'active') AS status FROM workspaces WHERE id = $1 FOR UPDATE",
+      [workspaceId],
+    );
+    if (workspace.rows[0]?.status !== "active") {
+      throw new Error("workspace_not_active");
+    }
+    const sources = await client.query<{ id: string }>(
+      "SELECT id FROM sources WHERE workspace_id = $1",
+      [workspaceId],
+    );
+    const ids = sources.rows.map((source) => source.id);
+    await requireEdgeSourceCacheInvalidations(ids);
+    const updated = await client.query(
+      `UPDATE sources
+          SET status = 'disabled', updated_at = now()
+        WHERE workspace_id = $1 AND status <> 'disabled'
+        RETURNING id`,
+      [workspaceId],
+    );
+    return { sourceIds: ids, pausedCount: updated.rowCount ?? 0 };
+  });
+  await requireEdgeSourceCacheInvalidations(result.sourceIds);
+  return result.pausedCount;
 }

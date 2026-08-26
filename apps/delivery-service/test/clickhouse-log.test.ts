@@ -67,6 +67,33 @@ describe("delivery-service ClickHouse attempt logging", () => {
     expect(JSON.parse(String(init?.body))).toMatchObject({ is_test: true });
   });
 
+  it("drops downstream body echoes and redacts diagnostics before persistence", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("", { status: 200 }));
+
+    await logDeliveryAttempt(
+      { CLICKHOUSE_URL: "https://clickhouse.example" },
+      {
+        ...attempt(),
+        response: {
+          status: 400,
+          body: '{"password":"raw-webhook-secret"}',
+          error: 'invalid value "alice@example.test"',
+        },
+      },
+    );
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    const row = JSON.parse(String(init?.body)) as { response_json: string };
+    expect(row.response_json).not.toContain("raw-webhook-secret");
+    expect(row.response_json).not.toContain("alice@example.test");
+    expect(JSON.parse(row.response_json)).toEqual({
+      status: 400,
+      error: 'invalid value "[REDACTED]"',
+    });
+  });
+
   it("uses deterministic attempt ids", () => {
     expect(buildAttemptId({ event_id: "evt-1", destination_id: "dest-1", attempt_no: 3 })).toBe(
       "evt-1-dest-1-3",

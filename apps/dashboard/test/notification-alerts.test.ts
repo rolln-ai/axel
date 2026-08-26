@@ -82,4 +82,18 @@ describe("renderImmediateAlert", () => {
     expect(html).not.toContain("<script>x</script>");
     expect(html).toContain("&lt;script&gt;");
   });
+
+  it("sanitizes payload echoes and secrets at the email boundary", () => {
+    const result = renderImmediateAlert("Acme", {
+      ...notification,
+      body_md:
+        'receiver rejected payload={"email":"victim@example.test", "note":"private webhook text"}; authorization: Bearer opaque-token',
+    });
+    const rendered = `${result.subject}\n${result.html}\n${result.text}`;
+
+    expect(rendered).not.toContain("victim@example.test");
+    expect(rendered).not.toContain("private webhook text");
+    expect(rendered).not.toContain("opaque-token");
+    expect(rendered).toContain("[REDACTED]");
+  });
 });

@@ -207,6 +207,7 @@ export async function pushPlanStates(
     try {
       const res = await fetchImpl(planUrl, {
         method: "POST",
+        redirect: "manual",
         headers: {
           "content-type": "application/json",
           "x-axel-admin-token": ingestAdminToken,

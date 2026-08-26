@@ -103,6 +103,7 @@ interface CandidateRow {
   failure_reason: string | null;
   is_muted: boolean;
   is_in_flight: boolean;
+  payload_key_valid?: boolean;
 }
 
 export async function enqueueReplays(
@@ -114,6 +115,13 @@ export async function enqueueReplays(
     `WITH candidates AS (${opts.candidates.sql})
      SELECT c.event_id, c.source_id, c.r2_key, c.scope, c.route_id, c.destination_id,
             c.failure_reason,
+            (
+              split_part(c.r2_key, '/', 1) IN ('events', 'pull')
+              AND split_part(c.r2_key, '/', 2) = ${ws}
+              AND split_part(c.r2_key, '/', 3) <> ''
+              AND c.r2_key NOT LIKE '%//%'
+              AND c.r2_key !~ '(^|/)([.]{1,2})(/|$)'
+            ) AS payload_key_valid,
             EXISTS (
               -- Respect an active mute on the candidate's fingerprint — an
               -- operator silenced it on purpose; replaying re-floods the queue.
@@ -137,6 +145,13 @@ export async function enqueueReplays(
        FROM candidates c`,
     [...opts.candidates.params, opts.workspaceId],
   );
+
+  // Candidate-selection queries are maintained by several features. Keep a
+  // single fail-closed workspace check in their shared write tail so a future
+  // confused-deputy bug cannot turn replay into an account-wide R2 read.
+  if (evaluated.rows.some((row) => row.payload_key_valid === false)) {
+    throw new Error("replay_payload_workspace_mismatch");
+  }
 
   const mutedSkipped = evaluated.rows.filter((r) => r.is_muted).length;
   const insertable = evaluated.rows.filter((r) => !r.is_muted && !r.is_in_flight);

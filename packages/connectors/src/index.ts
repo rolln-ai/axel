@@ -1,5 +1,6 @@
 import {
   assertResolvedHostSafe,
+  filterSafeHeaders,
   validateDestinationUrl,
   type DnsLookupAll,
   type DeliveryAttempt,
@@ -8,6 +9,7 @@ import {
   type RouteDestinationBinding,
 } from "@axel/shared";
 import { classifyDeliveryStatus } from "./classify.js";
+import { fetchWithValidatedRedirects, UnsafeDestinationError } from "./safe-fetch.js";
 
 export {
   createWebhookConnector,
@@ -22,6 +24,7 @@ export type {
 } from "./webhook.js";
 export { classifyDeliveryStatus } from "./classify.js";
 export type { DeliveryOutcomeStatus } from "./classify.js";
+export { UnsafeDestinationError } from "./safe-fetch.js";
 
 export interface Connector<TConfig = unknown> {
   type: Destination["type"];
@@ -72,6 +75,9 @@ export interface FetchResponseLike {
    *  When present, the HTTP connector parses `Retry-After` so the
    *  delivery-service breaker can write `retry_after_until`. */
   headers?: { get(name: string): string | null };
+  /** Native Response stream, when available. Successful delivery diagnostics
+   *  discard it instead of retaining an attacker-controlled body excerpt. */
+  body?: { cancel(reason?: unknown): Promise<void> } | null;
 }
 
 export type FetchLike = (
@@ -83,6 +89,9 @@ export type FetchLike = (
     /** AXE-28 — request-timeout AbortController signal. Optional so
      *  the existing in-memory fakes don't have to wire AbortSignal. */
     signal?: AbortSignal;
+    /** Redirects are always handled by the connector so every Location target
+     *  passes the same SSRF validation before a second request is made. */
+    redirect?: "manual";
   },
 ) => Promise<FetchResponseLike>;
 
@@ -135,12 +144,17 @@ export function buildHttpRequest(input: {
   config: HttpDestinationConfig;
   body: ArrayBuffer;
 }): { url: string; method: string; headers: Record<string, string>; body: ArrayBuffer } {
+  // Enforce the header boundary at the connector, not only in the dashboard
+  // wizard. Config can also arrive through the API, an import, or a direct DB
+  // edit. In particular, Host and other routing/hop-by-hop headers must never
+  // turn an otherwise public URL into a directed-SSRF or smuggling primitive.
+  const headers = filterSafeHeaders(input.config.headers ?? {});
   return {
     url: input.config.url,
     method: input.config.method ?? "POST",
     headers: {
       "content-type": "application/json",
-      ...input.config.headers,
+      ...headers,
     },
     body: input.body,
   };
@@ -193,13 +207,18 @@ export function createHttpConnector(
       const timer = ac ? setTimeout(() => ac.abort(), timeoutMs) : null;
       try {
         const req = buildHttpRequest({ config, body: event });
-        const response = await fetchImpl(req.url, {
-          method: req.method,
-          headers: req.headers,
-          body: req.body,
-          ...(ac ? { signal: ac.signal } : {}),
+        const response = await fetchWithValidatedRedirects({
+          fetchImpl,
+          url: req.url,
+          ...(lookup ? { lookup } : {}),
+          init: {
+            method: req.method,
+            headers: req.headers,
+            body: req.body,
+            ...(ac ? { signal: ac.signal } : {}),
+          },
         });
-        const responseText = await response.text();
+        await discardResponseBody(response);
         // AXE-28 — parse Retry-After so the breaker can pause future
         // attempts. Surfaced inside `response` so we don't need a new
         // top-level DeliveryAttempt field.
@@ -212,7 +231,6 @@ export function createHttpConnector(
           status: classifyDeliveryStatus(response.status),
           response: {
             status: response.status,
-            body: responseText.slice(0, 2048),
             ...(retryAfter !== null ? { retry_after_seconds: retryAfter } : {}),
           },
           started,
@@ -221,7 +239,7 @@ export function createHttpConnector(
         return attempt({
           eventId: context?.eventId ?? "unknown",
           destinationId: destination.destination_id,
-          status: "retry",
+          status: err instanceof UnsafeDestinationError ? "dead" : "retry",
           response: {
             error: err instanceof Error ? err.message : String(err),
           },
@@ -232,6 +250,15 @@ export function createHttpConnector(
       }
     },
   };
+}
+
+async function discardResponseBody(response: FetchResponseLike): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // Diagnostics never depend on a receiver-controlled response body. A
+    // cancellation failure must not change the delivery outcome.
+  }
 }
 
 /**

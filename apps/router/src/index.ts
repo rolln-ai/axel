@@ -29,6 +29,7 @@ export {
   // Exported so the two can be round-trip tested together — they silently
   // drifted apart once (backfill `rpl_` ids vs a `rpy_`-only parser).
   replayEventId,
+  replayPayloadKeyBelongsToWorkspace,
   type ReplayProcessorDeps,
   type ReplayProcessSummary,
   type ReplayRow,
