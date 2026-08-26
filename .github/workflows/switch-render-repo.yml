@@ -1,0 +1,36 @@
+# One-off: point Render services at this repo instead of rolln-ai/hookrail.
+# Delete after the migration completes.
+name: Switch Render services to this repo
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  switch:
+    runs-on: ubuntu-latest
+    env:
+      RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+    steps:
+      - name: Repoint services
+        run: |
+          set -euo pipefail
+          services=$(curl -fsS -H "Authorization: Bearer $RENDER_API_KEY" "https://api.render.com/v1/services?limit=100")
+          echo "$services" | jq -r '.[] | .service | "\(.id)\t\(.name)\t\(.repo // "none")"' | \
+          while IFS=$'\t' read -r id name repo; do
+            case "$repo" in
+              *rolln-ai/hookrail*)
+                echo "switching: $name ($id)"
+                curl -fsS -X PATCH \
+                  -H "Authorization: Bearer $RENDER_API_KEY" \
+                  -H "content-type: application/json" \
+                  -d '{"repo":"https://github.com/rolln-ai/axel"}' \
+                  "https://api.render.com/v1/services/$id" | jq -r '"now: \(.name) -> \(.repo)"'
+                ;;
+              *)
+                echo "skip: $name ($repo)"
+                ;;
+            esac
+          done
