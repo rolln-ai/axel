@@ -6,23 +6,53 @@ on:
 
 permissions:
   contents: read
+  actions: read
+  deployments: read
 
 concurrency:
   group: post-merge-smoke-main
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   smoke:
+    if: ${{ github.repository == 'rolln-ai/axel' }}
     name: Production smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: .node-version
 
-      - name: Wait for production deploys
-        run: sleep 120
+      - name: Wait for this SHA in production
+        run: node scripts/wait-for-production-deploys.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          DEPLOY_WAIT_TIMEOUT_MS: "3600000"
+          DEPLOY_POLL_INTERVAL_MS: "15000"
+
+      - name: Wait for operational convergence
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 300))
+          while (( SECONDS < deadline )); do
+            body="$(curl -fsS --connect-timeout 5 --max-time 15 "${AXEL_APP_URL%/}/status" || true)"
+            if grep -Fq "All systems operational" <<<"$body"; then
+              echo "Production status is fully operational"
+              exit 0
+            fi
+            echo "Production status has not converged; retrying in 15 seconds"
+            sleep 15
+          done
+          echo "Production did not converge to fully operational within 5 minutes" >&2
+          exit 1
+        env:
+          AXEL_APP_URL: ${{ vars.AXEL_APP_URL || 'https://app.axelapp.ai' }}
 
       - name: Run production smoke
         id: smoke

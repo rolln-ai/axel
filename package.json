@@ -7,7 +7,7 @@
   "scripts": {
     "build": "turbo run build",
     "test": "turbo run test && pnpm test:deploy-scripts",
-    "test:deploy-scripts": "bash scripts/test/sentry-release-deploy.test.sh && bash scripts/test/deploy-render-service.test.sh && bash scripts/test/self-host-provisioner.test.sh && bash scripts/test/self-host-compose.test.sh && bash scripts/test/docker-build-context.test.sh && node scripts/test/migrate-bigquery-nested-bindings.test.mjs",
+    "test:deploy-scripts": "bash scripts/test/sentry-release-deploy.test.sh && bash scripts/test/deploy-render-service.test.sh && bash scripts/test/self-host-provisioner.test.sh && bash scripts/test/self-host-compose.test.sh && bash scripts/test/docker-build-context.test.sh && node scripts/test/migrate-bigquery-nested-bindings.test.mjs && node scripts/test/wait-for-production-deploys.test.mjs",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "lint:sql": "node scripts/check-clickhouse-aliases.mjs",
