@@ -248,13 +248,29 @@ function buildTypedInsert(
   };
 }
 
+/**
+ * Same integer-first drift hazard BigQuery had (#367): a JSON number that is
+ * integral in the first event cannot prove the field stays integral, and this
+ * connector only ever ADDs columns — there is no widening ALTER path. Create
+ * Axel-managed columns as DOUBLE so a later fractional value inserts instead
+ * of failing permanently. Row parameters keep the exact per-value type
+ * (Spark upcasts a BIGINT parameter into a DOUBLE column).
+ */
+function managedColumnType(type: DbxColType): DbxColType {
+  return type === "BIGINT" ? "DOUBLE" : type;
+}
+
 function buildCreateTable(tableRef: string, columns: DbxColumn[]): string {
-  const defs = columns.map((c) => `${quoteIdent(c.name, "column")} ${c.type}`).join(", ");
+  const defs = columns
+    .map((c) => `${quoteIdent(c.name, "column")} ${managedColumnType(c.type)}`)
+    .join(", ");
   return `CREATE TABLE IF NOT EXISTS ${tableRef} (${defs}) USING DELTA`;
 }
 
 function buildAlterAddColumns(tableRef: string, columns: DbxColumn[]): string {
-  const defs = columns.map((c) => `${quoteIdent(c.name, "column")} ${c.type}`).join(", ");
+  const defs = columns
+    .map((c) => `${quoteIdent(c.name, "column")} ${managedColumnType(c.type)}`)
+    .join(", ");
   return `ALTER TABLE ${tableRef} ADD COLUMNS (${defs})`;
 }
 

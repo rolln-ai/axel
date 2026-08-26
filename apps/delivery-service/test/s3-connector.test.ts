@@ -47,9 +47,11 @@ describe("delivery-service S3 connector", () => {
       Bucket: "archive",
       Key: "axel/2026-05-02/evt-1.json",
       ContentType: "application/json",
+      // Hyphenated to match delivery-edge's x-amz-meta-* keys (cross-runtime
+      // metadata parity for the same destination).
       Metadata: {
-        event_id: "evt-1",
-        workspace_id: "ws-1",
+        "event-id": "evt-1",
+        "workspace-id": "ws-1",
       },
     });
   });

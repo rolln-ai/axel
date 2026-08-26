@@ -22,10 +22,17 @@ if (!pr) {
   process.exit(2);
 }
 
+if (!config) {
+  console.log("linear.config.json / LINEAR_CONFIG_JSON not present — skipping Linear sync.");
+  process.exit(0);
+}
+
+// Open-source repo: outside contributors and dependabot don't carry Linear
+// issue keys. Sync when a key is present; pass cleanly when it isn't.
 const issueKey = extractIssueKey(pr.title, pr.head?.ref, pr.body);
 if (!issueKey) {
-  console.error(`PR must include a ${config.teamKey} issue key in the title, branch, or body.`);
-  process.exit(1);
+  console.log(`No ${config.teamKey} issue key in title/branch/body — skipping Linear sync.`);
+  process.exit(0);
 }
 
 const issue = await getIssue(issueKey);

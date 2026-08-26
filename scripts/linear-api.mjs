@@ -3,8 +3,22 @@ import { loadLocalEnv } from "./load-env.mjs";
 
 loadLocalEnv();
 
-export const config = JSON.parse(readFileSync("linear.config.json", "utf8"));
-export const issueKeyPattern = new RegExp(`\\b${config.issueKeyPattern}\\b`, "i");
+// linear.config.json is gitignored in the public repo (it holds the private
+// workspace's IDs). Maintainers keep a local copy; CI injects it via the
+// LINEAR_CONFIG_JSON repo variable. Without either, config is null and the
+// Linear scripts no-op instead of crashing on a fresh clone.
+function loadLinearConfig() {
+  if (existsSync("linear.config.json")) {
+    return JSON.parse(readFileSync("linear.config.json", "utf8"));
+  }
+  if (process.env.LINEAR_CONFIG_JSON) {
+    return JSON.parse(process.env.LINEAR_CONFIG_JSON);
+  }
+  return null;
+}
+
+export const config = loadLinearConfig();
+export const issueKeyPattern = config ? new RegExp(`\\b${config.issueKeyPattern}\\b`, "i") : null;
 
 export function requireLinearApiKey() {
   if (!process.env.LINEAR_API_KEY) {
@@ -77,6 +91,7 @@ export async function linear(query, variables = {}) {
 }
 
 export function extractIssueKey(...values) {
+  if (!issueKeyPattern) return null;
   for (const value of values) {
     const match = String(value ?? "").match(issueKeyPattern);
     if (match) return match[0].toUpperCase();

@@ -17,6 +17,7 @@ export function SiteHeader() {
     { href: "/pricing", label: "Pricing" },
     { href: "/docs", label: "Docs" },
     { href: "/security", label: "Security" },
+    { href: "https://github.com/rolln-ai/axel", label: "GitHub" },
   ] as const;
 
   useEffect(() => {
@@ -110,6 +111,7 @@ export function SiteFooter() {
           <Link href="/docs">Docs</Link>
           <Link href="/pricing">Pricing</Link>
           <Link href="/security">Security</Link>
+          <a href="https://github.com/rolln-ai/axel">GitHub</a>
           <Link href="/terms">Terms</Link>
           <Link href="/privacy">Privacy</Link>
           <Link href="/dpa">DPA</Link>

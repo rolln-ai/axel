@@ -115,10 +115,37 @@ describe("databricks_sql connector", () => {
     expect(out.status).toBe("success");
     const create = calls.find((c) => c.statement.startsWith("CREATE TABLE"));
     expect(create).toBeDefined();
-    expect(create!.statement).toContain("`id` BIGINT");
+    // Managed DDL widens integral numbers to DOUBLE (integer-first drift, same
+    // hazard #367 fixed for BigQuery) — the row parameter stays exact BIGINT.
+    expect(create!.statement).toContain("`id` DOUBLE");
     expect(create!.statement).toContain("`active` BOOLEAN");
     expect(create!.statement).toContain("USING DELTA");
     expect(inserts()).toHaveLength(2); // failed, then retried after create
+    const insertParams = inserts()[1].parameters ?? [];
+    expect(insertParams).toContainEqual(expect.objectContaining({ value: "42", type: "BIGINT" }));
+  });
+
+  it("typed_columns creates integral-number columns as DOUBLE so later fractional values insert", async () => {
+    responder = (stmt) => {
+      if (stmt.startsWith("INSERT")) {
+        return inserts().length === 1
+          ? stmtRes("FAILED", { message: "[TABLE_OR_VIEW_NOT_FOUND] Table or view not found: main.webhooks.metrics" })
+          : stmtRes("SUCCEEDED");
+      }
+      if (stmt.startsWith("DESCRIBE")) {
+        return stmtRes("FAILED", { message: "[TABLE_OR_VIEW_NOT_FOUND] Table or view not found" });
+      }
+      return stmtRes("SUCCEEDED"); // CREATE
+    };
+    // First event carries an integral amount; the column must not be BIGINT.
+    const out = await deliver(encode({ amount: 100 }), {
+      eventId: "e3b",
+      binding: { table: "metrics", mode: "typed_columns" },
+    });
+    expect(out.status).toBe("success");
+    const create = calls.find((c) => c.statement.startsWith("CREATE TABLE"));
+    expect(create!.statement).toContain("`amount` DOUBLE");
+    expect(create!.statement).not.toContain("BIGINT");
   });
 
   it("typed_columns adds only the missing columns via ALTER (column drift)", async () => {
@@ -138,7 +165,7 @@ describe("databricks_sql connector", () => {
       }
       return stmtRes("SUCCEEDED"); // ALTER
     };
-    const out = await deliver(encode({ id: 42, active: true, newcol: "hi" }), {
+    const out = await deliver(encode({ id: 42, active: true, newcol: "hi", count: 7 }), {
       eventId: "e4",
       binding: { table: "subs", mode: "typed_columns" },
     });
@@ -147,6 +174,7 @@ describe("databricks_sql connector", () => {
     expect(alter).toBeDefined();
     expect(alter!.statement).toContain("ADD COLUMNS");
     expect(alter!.statement).toContain("`newcol` STRING");
+    expect(alter!.statement).toContain("`count` DOUBLE"); // added integral column widened
     expect(alter!.statement).not.toContain("`id`"); // existing column not re-added
   });
 

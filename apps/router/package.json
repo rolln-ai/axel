@@ -14,7 +14,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:adversarial": "vitest run test/sandbox.adversarial.test.ts",
-    "dev": "echo 'router stub — Phase 2'"
+    "dev": "echo 'library package — no dev server (consumed by @axel/delivery-service)'"
   },
   "dependencies": {
     "@axel/shared": "workspace:*"

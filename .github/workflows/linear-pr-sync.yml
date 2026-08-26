@@ -33,3 +33,6 @@ jobs:
         run: node scripts/linear-pr-sync.mjs
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          # linear.config.json is gitignored (private workspace IDs); CI gets
+          # it from this repo variable. Absent → the script skips cleanly.
+          LINEAR_CONFIG_JSON: ${{ vars.LINEAR_CONFIG_JSON }}

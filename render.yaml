@@ -1,6 +1,5 @@
 services:
   # Self-hosted ClickHouse for event / delivery analytics.
-  # Replaces ClickHouse Cloud (~$125/mo) per docs/cost-model.md trigger.
   # Public HTTPS so Cloudflare Workers (ingest-worker, delivery-edge) can reach
   # it; auth is HTTP Basic via X-ClickHouse-User / X-ClickHouse-Key headers,
   # which the existing client code already sends.

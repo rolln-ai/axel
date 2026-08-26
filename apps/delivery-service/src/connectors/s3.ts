@@ -258,9 +258,12 @@ export function createS3Connector(): Connector<S3DestinationConfig> {
             Key: key,
             Body: new Uint8Array(event),
             ContentType: "application/json",
+            // Hyphenated keys to match delivery-edge's x-amz-meta-event-id /
+            // x-amz-meta-workspace-id — same destination must yield the same
+            // metadata schema regardless of which runtime delivered.
             Metadata: {
-              event_id: eventId,
-              workspace_id: destination.workspace_id,
+              "event-id": eventId,
+              "workspace-id": destination.workspace_id,
             },
           }),
         );

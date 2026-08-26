@@ -49,7 +49,8 @@ and [`docs/production-scale.md`](docs/production-scale.md).
 
 ## Development
 
-Requires Node 22 (see `.node-version`) and pnpm 9.
+Requires Node 20+ (CI uses the version in `.node-version`) and pnpm 9. `jq` is
+needed for the deploy-script tests in `pnpm test`.
 
 ```sh
 pnpm install

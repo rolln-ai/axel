@@ -16,6 +16,5 @@
 
 # Shared contracts, credentials, and infra deserve explicit review.
 /packages/shared/ @hstrauss
-/packages/credentials/ @hstrauss
 /infra/ @hstrauss
 /.github/ @hstrauss

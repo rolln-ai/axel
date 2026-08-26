@@ -1,4 +1,4 @@
-title = "Hookrail gitleaks config"
+title = "Axel gitleaks config"
 
 [extend]
 useDefault = true

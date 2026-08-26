@@ -25,5 +25,21 @@
     "@types/node": "^25.9.3",
     "typescript": "^6.0.3",
     "vitest": "^4.1.9"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rolln-ai/axel.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/rolln-ai/axel/tree/main/packages/cli",
+  "bugs": {
+    "url": "https://github.com/rolln-ai/axel/issues"
+  },
+  "keywords": [
+    "webhooks",
+    "events",
+    "cli",
+    "axel",
+    "event-delivery"
+  ]
 }

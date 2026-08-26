@@ -2,6 +2,11 @@
 
 set -euo pipefail
 
+if ! command -v jq >/dev/null 2>&1; then
+  echo "skipping $(basename "$0"): jq is not installed" >&2
+  exit 0
+fi
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 mock_dir="$(mktemp -d)"
 trap 'rm -rf "$mock_dir"' EXIT

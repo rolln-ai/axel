@@ -1,0 +1,25 @@
+name: Bug report
+description: Something is broken
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what actually happened.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Smallest set of steps or a failing payload. For delivery issues, include the destination type and the delivery/event ID if you have one.
+    validations:
+      required: true
+  - type: input
+    id: deployment
+    attributes:
+      label: Deployment
+      description: Axel Cloud, or self-hosted (note which components and versions).
+    validations:
+      required: true
