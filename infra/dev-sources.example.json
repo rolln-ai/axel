@@ -1,0 +1,8 @@
+{
+  "src_test": {
+    "workspace_id": "ws_local",
+    "secret_token": "replace-with-local-token",
+    "status": "active",
+    "max_events_per_minute": 6000
+  }
+}

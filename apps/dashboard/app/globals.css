@@ -1,0 +1,141 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+    --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --font-mono: ui-monospace, "SFMono-Regular", "Menlo", "Consolas", monospace;
+    --font-heading: var(--font-sans);
+
+    --color-sidebar-ring: var(--sidebar-ring);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-sidebar-accent: var(--sidebar-accent);
+    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+    --color-sidebar-primary: var(--sidebar-primary);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar: var(--sidebar);
+    --color-chart-5: var(--chart-5);
+    --color-chart-4: var(--chart-4);
+    --color-chart-3: var(--chart-3);
+    --color-chart-2: var(--chart-2);
+    --color-chart-1: var(--chart-1);
+    --color-ring: var(--ring);
+    --color-input: var(--input);
+    --color-border: var(--border);
+    --color-destructive: var(--destructive);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-accent: var(--accent);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-muted: var(--muted);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-secondary: var(--secondary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-primary: var(--primary);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-popover: var(--popover);
+    --color-card-foreground: var(--card-foreground);
+    --color-card: var(--card);
+    --color-foreground: var(--foreground);
+    --color-background: var(--background);
+    --radius-sm: calc(var(--radius) * 0.6);
+    --radius-md: calc(var(--radius) * 0.8);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) * 1.4);
+    --radius-2xl: calc(var(--radius) * 1.8);
+    --radius-3xl: calc(var(--radius) * 2.2);
+    --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+    /* Cursor warm-ivory palette mapped to shadcn semantic tokens. */
+    --background: #f7f7f4;
+    --foreground: #262510;
+    --card: #fdfdfb;
+    --card-foreground: #262510;
+    --popover: #fdfdfb;
+    --popover-foreground: #262510;
+    --primary: #f54e00;
+    --primary-foreground: #fefdf9;
+    --secondary: #efeeea;
+    --secondary-foreground: #262510;
+    --muted: #efeeea;
+    /* Bumped from #7a7974 to clear WCAG 2 AA contrast on the warm-ivory
+       --background (#f7f7f4). The old value measured at 4.06:1; the new
+       one is ~5.15:1 — comfortable margin above the 4.5:1 threshold for
+       sub-18pt text, which is where muted-foreground is overwhelmingly
+       used (timestamps, secondary labels, helper text). */
+    --muted-foreground: #6a6964;
+    --accent: #efeeea;
+    --accent-foreground: #262510;
+    --destructive: #a13a20;
+    --border: #e6e5e0;
+    --input: #e6e5e0;
+    --ring: #f54e00;
+    --chart-1: #f54e00;
+    --chart-2: #34785c;
+    --chart-3: #c08532;
+    --chart-4: #a13a20;
+    --chart-5: #7a7974;
+    --radius: 0.5rem;
+    --sidebar: #fdfdfb;
+    --sidebar-foreground: #262510;
+    --sidebar-primary: #f54e00;
+    --sidebar-primary-foreground: #fefdf9;
+    --sidebar-accent: #efeeea;
+    --sidebar-accent-foreground: #262510;
+    --sidebar-border: #e6e5e0;
+    --sidebar-ring: #f54e00;
+}
+
+.dark {
+    /* Warm-dark variant — espresso base, lifted orange accent.
+       Designed to read as "dim study at dusk" rather than pure black. */
+    --background: #1a1814;
+    --foreground: #f0eee5;
+    --card: #232017;
+    --card-foreground: #f0eee5;
+    --popover: #232017;
+    --popover-foreground: #f0eee5;
+    --primary: #ff7a3a;
+    --primary-foreground: #1a1814;
+    --secondary: #2a2820;
+    --secondary-foreground: #f0eee5;
+    --muted: #2a2820;
+    --muted-foreground: #a09e96;
+    --accent: #2a2820;
+    --accent-foreground: #f0eee5;
+    --destructive: #d97758;
+    --border: oklch(1 0 0 / 10%);
+    --input: oklch(1 0 0 / 15%);
+    --ring: #ff7a3a;
+    --chart-1: #ff7a3a;
+    --chart-2: #5fa885;
+    --chart-3: #d6a05a;
+    --chart-4: #d97758;
+    --chart-5: #a09e96;
+    --sidebar: #232017;
+    --sidebar-foreground: #f0eee5;
+    --sidebar-primary: #ff7a3a;
+    --sidebar-primary-foreground: #1a1814;
+    --sidebar-accent: #2a2820;
+    --sidebar-accent-foreground: #f0eee5;
+    --sidebar-border: oklch(1 0 0 / 10%);
+    --sidebar-ring: #ff7a3a;
+
+    color-scheme: dark;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+}

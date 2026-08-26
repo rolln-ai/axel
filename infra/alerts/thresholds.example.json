@@ -1,0 +1,13 @@
+{
+  "$comment": "Copy to thresholds.json and pass to router via ALERT_THRESHOLDS_PATH if you want to override DEFAULT_THRESHOLDS in apps/router/src/alerts.ts.",
+  "retry_rate_warn": 0.10,
+  "retry_rate_critical": 0.25,
+  "dead_letter_count_warn": 50,
+  "dead_letter_count_critical": 200,
+  "queue_lag_seconds_warn": 60,
+  "queue_lag_seconds_critical": 300,
+  "engine_error_rate_warn": 0.05,
+  "engine_error_rate_critical": 0.20,
+  "destination_p95_latency_ms_warn": 2000,
+  "destination_p95_latency_ms_critical": 5000
+}

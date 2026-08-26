@@ -1,0 +1,37 @@
+{
+  "framework": "nextjs",
+  "installCommand": "corepack enable && pnpm install --frozen-lockfile",
+  "buildCommand": "pnpm --filter @axel/shared build && pnpm build",
+  "outputDirectory": ".next",
+  "regions": ["pdx1"],
+  "crons": [
+    {
+      "path": "/api/cron/data-contracts-drift",
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/data-contracts-auto-draft",
+      "schedule": "*/30 * * * *"
+    },
+    {
+      "path": "/api/cron/notifications-digest",
+      "schedule": "0 14 * * *"
+    },
+    {
+      "path": "/api/cron/billing-rollup",
+      "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/cron/notification-scan",
+      "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/cron/nudges",
+      "schedule": "0 15 * * 1"
+    },
+    {
+      "path": "/api/cron/workspace-teardown",
+      "schedule": "*/5 * * * *"
+    }
+  ]
+}

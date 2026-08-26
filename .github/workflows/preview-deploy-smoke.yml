@@ -1,0 +1,87 @@
+name: Preview Deploy Smoke
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: preview-deploy-smoke-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    name: Preview deploy smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+
+      - name: Skip draft PRs
+        if: ${{ github.event.pull_request.draft }}
+        run: echo "Draft PR; preview deploy smoke skipped until ready for review."
+
+      - name: Deploy dashboard preview
+        if: ${{ github.event.pull_request.draft == false }}
+        id: dashboard
+        run: |
+          set -euo pipefail
+          output="$(bash scripts/vercel-preview-deploy.sh dashboard)"
+          printf '%s\n' "$output"
+          url="$(printf '%s\n' "$output" | tail -n 1)"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID_DASHBOARD: ${{ secrets.VERCEL_PROJECT_ID_DASHBOARD }}
+
+      - name: Deploy marketing preview
+        if: ${{ github.event.pull_request.draft == false }}
+        id: marketing
+        run: |
+          set -euo pipefail
+          output="$(bash scripts/vercel-preview-deploy.sh marketing)"
+          printf '%s\n' "$output"
+          url="$(printf '%s\n' "$output" | tail -n 1)"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID_MARKETING: ${{ secrets.VERCEL_PROJECT_ID_MARKETING }}
+
+      - name: Smoke preview deploys
+        if: ${{ github.event.pull_request.draft == false }}
+        run: bash scripts/smoke.sh
+        env:
+          AXEL_MARKETING_URL: ${{ steps.marketing.outputs.url }}
+          AXEL_APP_URL: ${{ steps.dashboard.outputs.url }}
+          AXEL_INGEST_URL: ${{ vars.AXEL_INGEST_URL || 'https://ingest.axelapp.ai' }}
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+          VERCEL_AUTOMATION_BYPASS_SECRET_DASHBOARD: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET_DASHBOARD }}
+          VERCEL_AUTOMATION_BYPASS_SECRET_MARKETING: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET_MARKETING }}
+
+      - name: Comment preview URLs
+        if: ${{ github.event.pull_request.draft == false }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          DASHBOARD_URL: ${{ steps.dashboard.outputs.url }}
+          MARKETING_URL: ${{ steps.marketing.outputs.url }}
+        run: |
+          cat > /tmp/preview-smoke-comment.md <<EOF
+          Preview smoke passed.
+
+          Dashboard: ${DASHBOARD_URL}
+          Marketing: ${MARKETING_URL}
+          EOF
+
+          gh pr comment "$PR_URL" --body-file /tmp/preview-smoke-comment.md

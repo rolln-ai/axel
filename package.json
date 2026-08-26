@@ -1,0 +1,56 @@
+{
+  "name": "axel",
+  "private": true,
+  "version": "0.0.0",
+  "license": "MIT",
+  "packageManager": "pnpm@9.12.0",
+  "scripts": {
+    "build": "turbo run build",
+    "test": "turbo run test && pnpm test:deploy-scripts",
+    "test:deploy-scripts": "bash scripts/test/sentry-release-deploy.test.sh && bash scripts/test/deploy-render-service.test.sh && node scripts/test/migrate-bigquery-nested-bindings.test.mjs",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "lint:sql": "node scripts/check-clickhouse-aliases.mjs",
+    "typecheck": "turbo run typecheck",
+    "visual:smoke": "pnpm build && playwright test -c playwright.visual.config.ts",
+    "linear:next": "node scripts/linear-next.mjs",
+    "linear:start": "node scripts/linear-start.mjs",
+    "linear:comment": "node scripts/linear-comment.mjs",
+    "dashboard:load-budget": "node scripts/dashboard-load-budget.mjs",
+    "dev": "turbo run dev"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.0",
+    "@playwright/test": "^1.51.1",
+    "turbo": "^2.9.18",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16"
+  },
+  "pnpm": {
+    "overrides": {
+      "hono": "^4.12.34",
+      "@hono/node-server": "2.0.11",
+      "body-parser": "2.3.0",
+      "esbuild": ">=0.28.1",
+      "ws": ">=8.21.0",
+      "undici": "7.29.0",
+      "js-yaml": "4.3.1",
+      "dompurify": "3.4.13",
+      "@babel/core": "7.29.6",
+      "qs": "6.15.2",
+      "brace-expansion": "5.0.9",
+      "ip-address": "10.3.1",
+      "postcss": "8.5.23",
+      "fast-uri": ">=4.1.2",
+      "nanoid@<3.3.18": "3.3.18",
+      "nanoid@>=4.0.0 <5.1.16": "5.1.16",
+      "sharp": ">=0.35.0",
+      "wrangler": "^4.101.0",
+      "@cloudflare/workers-types": "^4.20260616.1"
+    }
+  },
+  "engines": {
+    "node": ">=20 <23",
+    "pnpm": ">=9"
+  }
+}

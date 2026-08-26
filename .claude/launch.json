@@ -1,0 +1,19 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@axel/dashboard", "dev"],
+      "port": 3000,
+      "autoPort": true
+    },
+    {
+      "name": "marketing",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@axel/marketing", "dev"],
+      "port": 3001,
+      "autoPort": true
+    }
+  ]
+}

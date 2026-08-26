@@ -1,0 +1,16 @@
+title = "Hookrail gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Allow public docs placeholder for Axel ingest token"
+paths = ['''apps/marketing/app/docs/page\.tsx''']
+regexes = ['''axel_tok_\.\.\.''']
+
+[[allowlists]]
+description = """Generated AES-GCM golden vectors. Every value is deterministic \
+test data derived from a public label (e.g. keyHex == sha256("axel-golden-master-key-a \
+(test only)")), pinned so a change to any decrypt path that would orphan existing \
+credential blobs fails loudly. No production key material."""
+paths = ['''packages/shared/src/credential-test-vectors\.ts''']

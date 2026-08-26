@@ -1,0 +1,39 @@
+name: Migrate Postgres (fresh-DB bootstrap)
+
+# Re-applies infra/postgres/schema.sql wholesale. Only for bootstrapping a
+# FRESH database — on an existing database it leaves pre-existing tables (and
+# their old CHECK constraints) untouched, so it is NOT a migration runner.
+# For incremental changes use migrate-postgres-run.yml, which applies pending
+# infra/postgres/migrations/*.sql files via the schema_migrations ledger.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Migration target
+        required: true
+        default: production
+        type: choice
+        options:
+          - production
+      confirm:
+        description: Type apply-schema to run against DATABASE_URL
+        required: true
+
+concurrency:
+  group: migrate-postgres-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    name: Apply schema
+    if: ${{ inputs.confirm == 'apply-schema' }}
+    runs-on: ubuntu-latest
+    environment: Production
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Apply schema
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f infra/postgres/schema.sql
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

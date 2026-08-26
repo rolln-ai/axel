@@ -1,0 +1,27 @@
+{
+  "name": "@axel/delivery-edge",
+  "version": "0.0.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "build": "echo 'delivery-edge is typecheck-only — no build artifacts' && exit 0",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@axel/connectors": "workspace:*",
+    "@axel/observability": "workspace:*",
+    "@axel/shared": "workspace:*",
+    "aws4fetch": "^1.0.20",
+    "postgres": "^3.4.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260616.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9",
+    "wrangler": "^4.100.0"
+  }
+}

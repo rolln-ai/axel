@@ -1,0 +1,604 @@
+import { deriveSubjectIdWeb, extractEventTypeFromBody, extractEventTypeFromHeaders, extractSubjectPairs, ipMatchesAllowlist, redactJsonPayload, resolveOrderingKey, shardFor, verifyProviderSignatureWithSecrets, type QueueMessage, type Source } from "@axel/shared";
+import { captureException, isCloudflareQueueInternalError, isCloudflareQueueOverloadError, isTransientR2Error, recordHeartbeatHttp, sentryClientFromEnv, type SentryEnv } from "@axel/observability";
+import { exceedsJsonDepth, looksLikeJson } from "./depth.js";
+import { kvPlanCache, type PlanCache } from "./plan-cache.js";
+import { checkTokenBucket } from "./rate-limit.js";
+import { kvSourceCache, resolveSource, type KVNamespaceLike, type SourceCache } from "./source-cache.js";
+import { handleSourceCacheInvalidate, handleSourceCachePut, handleTriggerEvent, handleWorkspacePayloadDeleteBatch, handleWorkspacePlanPut } from "./admin.js";
+import { indexErasureSubjects, lookupSourceInPostgres } from "./source-lookup-pg.js";
+import { lookupSourceFromDeliveryService } from "./source-lookup-http.js";
+import { SourceLookupUnavailableError } from "./source-lookup-error.js";
+import { logEventToClickhouse } from "./clickhouse-log.js";
+
+export interface Env extends SentryEnv {
+  EVENTS_RAW: R2Bucket;
+  QUEUE_EVENTS_00: Queue<QueueMessage>;
+  QUEUE_EVENTS_01: Queue<QueueMessage>;
+  QUEUE_EVENTS_02: Queue<QueueMessage>;
+  QUEUE_EVENTS_03: Queue<QueueMessage>;
+  QUEUE_EVENTS_04: Queue<QueueMessage>;
+  QUEUE_EVENTS_05: Queue<QueueMessage>;
+  QUEUE_EVENTS_06: Queue<QueueMessage>;
+  QUEUE_EVENTS_07: Queue<QueueMessage>;
+  QUEUE_EVENTS_08: Queue<QueueMessage>;
+  QUEUE_EVENTS_09: Queue<QueueMessage>;
+  QUEUE_EVENTS_10: Queue<QueueMessage>;
+  QUEUE_EVENTS_11: Queue<QueueMessage>;
+  QUEUE_EVENTS_12: Queue<QueueMessage>;
+  QUEUE_EVENTS_13: Queue<QueueMessage>;
+  QUEUE_EVENTS_14: Queue<QueueMessage>;
+  QUEUE_EVENTS_15: Queue<QueueMessage>;
+  /** Optional KV binding for source-lookup caching at the edge. */
+  SOURCE_CACHE?: KVNamespaceLike;
+  /** Optional override SourceCache (test injection point). */
+  __SOURCE_CACHE_OVERRIDE?: SourceCache;
+  /**
+   * Optional override PlanCache (test injection point). In production
+   * the plan cache reuses the SOURCE_CACHE KV binding with a
+   * `ws-plan:` key prefix — no separate binding required.
+   */
+  __PLAN_CACHE_OVERRIDE?: PlanCache;
+  /**
+   * Shared secret for the admin endpoint surface (`/admin/*`). When unset,
+   * admin routes return 404 — they're effectively disabled. Production
+   * deployments must set this and front the worker with Cloudflare Access.
+   */
+  ADMIN_TOKEN?: string;
+  /**
+   * Optional ClickHouse Cloud HTTPS endpoint for analytics-row logging.
+   * When set, every accepted webhook also produces an `events` row that
+   * powers the dashboard's /usage and /sources/[id] pages. Writes go via
+   * `ctx.waitUntil` so they never block the 202 response.
+   */
+  CLICKHOUSE_URL?: string;
+  CLICKHOUSE_USER?: string;
+  CLICKHOUSE_PASSWORD?: string;
+  // Local dev only — set via .dev.vars, never in production [vars]. Optional so
+  // production (where it's absent) typechecks and the DEV_SOURCES branch is off.
+  DEV_MODE?: string;
+  DEV_SOURCES?: string;
+  /**
+   * Control-plane Postgres is retained for erasure indexing and an explicit
+   * local-dev source lookup fallback. Production source lookups go through
+   * DELIVERY_SERVICE_URL because direct Cloudflare→Postgres is unreliable.
+   */
+  DATABASE_URL?: string;
+  /**
+   * Local-dev only: AES-256-GCM key for the direct Postgres source fallback.
+   * Production decryption happens inside delivery-service.
+   */
+  CREDENTIALS_MASTER_KEY?: string;
+  MAX_BODY_BYTES?: string;
+  MAX_BODY_DEPTH?: string;
+  /** Heartbeat ingress on delivery-service. Auto-derived from
+   *  `DELIVERY_SERVICE_URL` when `DELIVERY_HEARTBEAT_URL` is unset.
+   *  Both fall back to a no-op silently — heartbeat failure must
+   *  never crash ingest, and a not-yet-wired worker should look
+   *  "unknown" on the health page rather than 500ing on the hot
+   *  path. */
+  DELIVERY_SERVICE_URL?: string;
+  DELIVERY_HEARTBEAT_URL?: string;
+  /** Dedicated credential for POST /internal/source. During the rollout only,
+   *  source lookup falls back to DELIVERY_SHARED_SECRET when this is absent. */
+  SOURCE_LOOKUP_SHARED_SECRET?: string;
+  /** Authenticates heartbeat calls; deliberately separate from source lookup
+   *  once SOURCE_LOOKUP_SHARED_SECRET is provisioned. */
+  DELIVERY_SHARED_SECRET?: string;
+}
+
+const MAX_BODY_BYTES = 1_048_576;
+const MAX_BODY_DEPTH = 100;
+const QUEUE_SEND_RETRY_ATTEMPTS = 3;
+const QUEUE_SEND_RETRY_BASE_MS = 100;
+
+// Heartbeat throttle — once per minute is plenty; ingest is a hot
+// path and we don't want to write a DB row per request. State is
+// module-scoped so it survives across requests handled by the same
+// isolate (Cloudflare Workers reuse isolates for warm hits).
+let lastHeartbeatAt = 0;
+let heartbeatTickCount = 0;
+const HEARTBEAT_THROTTLE_MS = 60 * 1000;
+
+function maybeBeatIngest(env: Env, ctx: ExecutionContext, error?: string): void {
+  const url = env.DELIVERY_HEARTBEAT_URL
+    ?? (env.DELIVERY_SERVICE_URL ? `${env.DELIVERY_SERVICE_URL.replace(/\/$/, "")}/internal/heartbeat` : null);
+  if (!url || !env.DELIVERY_SHARED_SECRET) return;
+  const now = Date.now();
+  if (now - lastHeartbeatAt < HEARTBEAT_THROTTLE_MS && !error) return;
+  lastHeartbeatAt = now;
+  heartbeatTickCount += 1;
+  ctx.waitUntil(
+    recordHeartbeatHttp(url, env.DELIVERY_SHARED_SECRET, {
+      component: "ingest-worker",
+      tickCount: heartbeatTickCount,
+      ...(error ? { error } : {}),
+      // Generous tolerance: we only beat every 60s by design.
+      expectedIntervalSeconds: 180,
+      environment: env.SENTRY_ENVIRONMENT ?? env.VERCEL_ENV ?? "production",
+    }),
+  );
+}
+
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const sentry = sentryClientFromEnv(env, "ingest-worker");
+    try {
+      const response = await handleFetch(request, env, ctx);
+      maybeBeatIngest(env, ctx);
+      return response;
+    } catch (err) {
+      // AXE-65 — queue producer rate-limit (10250) is transient
+      // backpressure. Signal the client to back off via 503 +
+      // Retry-After rather than reporting as a code bug and 5xx-ing
+      // with a generic exception.
+      if (isCloudflareQueueOverloadError(err)) {
+        return json(
+          { error: "queue_overloaded", retry_after_seconds: 5 },
+          503,
+          { "retry-after": "5" },
+        );
+      }
+      // Queue code 15000 is a transient Cloudflare platform failure. The shard
+      // writer already retried the same message/event id in-process; return a
+      // structured 503 so an exhausted attempt is retried by the producer
+      // without creating a Sentry code-bug issue.
+      if (isCloudflareQueueInternalError(err)) {
+        return json(
+          { error: "queue_unavailable", retry_after_seconds: 2 },
+          503,
+          { "retry-after": "2" },
+        );
+      }
+      // AXE-149 — R2 transient internal errors ("Please try again. (10001)").
+      // Same shape as queue overload: 503 + retry-after, no Sentry capture.
+      if (isTransientR2Error(err)) {
+        return json(
+          { error: "storage_unavailable", retry_after_seconds: 2 },
+          503,
+          { "retry-after": "2" },
+        );
+      }
+      // Source control plane unreachable or returned an invalid response.
+      // Transient → 503 + retry-after so the producer retries instead of us
+      // caching a wrong negative. DB-down on the hot path is serious, so DO
+      // capture it (unlike the expected queue/R2 backpressure above).
+      if (err instanceof SourceLookupUnavailableError) {
+        ctx.waitUntil(captureException(sentry, err, {
+          tags: { component: "source_lookup", path: new URL(request.url).pathname },
+        }));
+        return json(
+          { error: "source_lookup_unavailable", retry_after_seconds: 2 },
+          503,
+          { "retry-after": "2" },
+        );
+      }
+      ctx.waitUntil(captureException(sentry, err, {
+        tags: {
+          component: "fetch",
+          method: request.method,
+          path: new URL(request.url).pathname,
+        },
+      }));
+      maybeBeatIngest(env, ctx, err instanceof Error ? err.message : String(err));
+      throw err;
+    }
+  },
+};
+
+async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
+
+    // Public liveness probe — used by the public /status page so the
+    // synthetic HTTP check has something to hit. No DB or KV lookups;
+    // 200 here only proves the worker isolate is up, which is exactly
+    // what /health endpoints are for. The component_heartbeats row
+    // (written via ctx.waitUntil on real requests) is what proves
+    // the work loop is actually accepting messages.
+    if (
+      (request.method === "GET" || request.method === "HEAD") &&
+      (url.pathname === "/health" || url.pathname === "/")
+    ) {
+      return json({ ok: true, service: "ingest-worker", at: new Date().toISOString() }, 200);
+    }
+
+    if (request.method !== "POST") {
+      return json({ error: "method_not_allowed" }, 405);
+    }
+
+    if (url.pathname === "/admin/source-cache/invalidate") {
+      return handleSourceCacheInvalidate(request, {
+        cache: env.__SOURCE_CACHE_OVERRIDE
+          ?? (env.SOURCE_CACHE ? kvSourceCache(env.SOURCE_CACHE) : null),
+        adminToken: env.ADMIN_TOKEN,
+      });
+    }
+    if (url.pathname === "/admin/source-cache/put") {
+      return handleSourceCachePut(request, {
+        cache: env.__SOURCE_CACHE_OVERRIDE
+          ?? (env.SOURCE_CACHE ? kvSourceCache(env.SOURCE_CACHE) : null),
+        adminToken: env.ADMIN_TOKEN,
+      });
+    }
+    if (url.pathname === "/admin/workspace-plan/put") {
+      return handleWorkspacePlanPut(request, {
+        planCache: planCacheFor(env),
+        adminToken: env.ADMIN_TOKEN,
+      });
+    }
+    if (url.pathname === "/admin/workspace-payloads/delete-batch") {
+      return handleWorkspacePayloadDeleteBatch(request, {
+        adminToken: env.ADMIN_TOKEN,
+        rawPayloads: env.EVENTS_RAW,
+      });
+    }
+    if (url.pathname === "/admin/trigger-event") {
+      const cache =
+        env.__SOURCE_CACHE_OVERRIDE
+        ?? (env.SOURCE_CACHE ? kvSourceCache(env.SOURCE_CACHE) : null);
+      return handleTriggerEvent(request, {
+        cache,
+        adminToken: env.ADMIN_TOKEN,
+        rawPayloads: env.EVENTS_RAW,
+        queueForShard: (shard) => queueForShard(env, shard),
+        uuid: () => uuidv7(),
+        shardFor,
+        ctx,
+        indexSubjects: ({ source, rawBody, headers, query, eventId, r2Key, receivedAt }) =>
+          indexSubjectsForErasure(env, source, rawBody, headers, query, eventId, r2Key, receivedAt),
+        logEvent: (message) => logEventToClickhouse(env, message),
+      });
+    }
+
+    const match = /^\/in\/([^/]+)$/.exec(url.pathname);
+    if (!match) return json({ error: "not_found" }, 404);
+
+    const sourceId = match[1]!;
+    const token = url.searchParams.get("token") ?? request.headers.get("x-axel-token");
+    if (!token) return json({ error: "missing_token" }, 401);
+
+    const source = await lookupSource(env, sourceId);
+    if (!source) return json({ error: "unknown_source" }, 404);
+    if (source.status !== "active") return json({ error: "source_disabled" }, 403);
+    // AXE-34 — inbound IP allowlist. When set, reject any IP outside
+    // the union (cheaper than running token verify on forged traffic;
+    // 403 is non-billable). `cf-connecting-ip` is the canonical
+    // client-IP header at the Cloudflare edge.
+    if (source.inbound_ip_allowlist && source.inbound_ip_allowlist.length > 0) {
+      const connectingIp = request.headers.get("cf-connecting-ip") ?? "";
+      if (!ipMatchesAllowlist(connectingIp, source.inbound_ip_allowlist)) {
+        return json({ error: "ip_not_allowlisted" }, 403);
+      }
+    }
+    // The stored `secret_token` is the SHA-256 hex hash of the plaintext token
+    // the customer supplies (matches `sources.secret_token_hash` in Postgres).
+    // Constant-time-compare hashes, never plaintext.
+    const presentedHash = await sha256Hex(token);
+    if (!safeEqual(source.secret_token, presentedHash)) return json({ error: "invalid_token" }, 401);
+
+    // Billing gate. Authenticated traffic only — placed after the
+    // token check so unauthenticated probes can't enumerate which
+    // workspaces are suspended or over-cap. The cache is permissive
+    // on miss (no entry → accept) so a KV outage doesn't take ingest
+    // down. See axelapp.ai/pricing for the gate semantics.
+    const planCache = planCacheFor(env);
+    if (planCache) {
+      const planState = await planCache.get(source.workspace_id);
+      if (planState?.gate === "reject_suspended") {
+        return json({ error: "billing_suspended" }, 402);
+      }
+      if (planState?.gate === "reject_quota") {
+        return json({ error: "plan_quota_exceeded" }, 429);
+      }
+    }
+
+    if (source.max_events_per_minute) {
+      const rate = checkTokenBucket({
+        key: `${source.workspace_id}:${source.source_id}`,
+        limitPerMinute: source.max_events_per_minute,
+      });
+      if (!rate.allowed) {
+        return json(
+          { error: "rate_limited" },
+          429,
+          { "retry-after": String(rate.retryAfterSeconds ?? 1) },
+        );
+      }
+    }
+
+    const maxBodyBytes = source.max_body_bytes ?? parsePositiveInt(env.MAX_BODY_BYTES, MAX_BODY_BYTES);
+    const maxBodyDepth = source.max_body_depth ?? parsePositiveInt(env.MAX_BODY_DEPTH, MAX_BODY_DEPTH);
+
+    const contentLength = Number(request.headers.get("content-length") ?? "0");
+    if (contentLength > maxBodyBytes) return json({ error: "payload_too_large" }, 413);
+
+    const body = await request.arrayBuffer();
+    if (body.byteLength > maxBodyBytes) return json({ error: "payload_too_large" }, 413);
+
+    const contentType = request.headers.get("content-type") ?? "application/octet-stream";
+    if (looksLikeJson(contentType) && exceedsJsonDepth(new Uint8Array(body), maxBodyDepth)) {
+      return json({ error: "payload_too_deep" }, 413);
+    }
+
+    // AXE-23: per-provider signature verification. Must run BEFORE R2
+    // write + queue enqueue — a spoofed payload that gets through here
+    // is durable, billable, and will fan out to destinations. The
+    // dispatch is no-op when the source has no signing_secret
+    // configured (legacy token-only sources keep working).
+    const provider = source.provider ?? "custom";
+    if ((source.signing_secret?.length ?? 0) > 0 || (source.signing_secret_previous?.length ?? 0) > 0) {
+      const headerMap = collectHeaders(request);
+      // Verify against the current secret first, then the previous one during a
+      // rotation overlap window — a webhook signed with the old secret while the
+      // customer rotates still passes until the previous secret is retired.
+      const result = await verifyProviderSignatureWithSecrets(
+        { provider, body: new Uint8Array(body), headers: headerMap },
+        [source.signing_secret, source.signing_secret_previous],
+      );
+      if (!result.ok) {
+        // 401 with a stable reason slug, not the secret. The reason
+        // matches the SignatureVerifyResult enum so support can
+        // diagnose without per-request logs.
+        return json({ error: "invalid_signature", reason: result.reason }, 401);
+      }
+    }
+
+    const eventId = uuidv7();
+    const receivedAt = new Date().toISOString();
+    const r2Key = `events/${source.workspace_id}/${receivedAt.slice(0, 10)}/${eventId}`;
+
+    const headers = collectHeaders(request);
+    const query = collectQuery(url);
+
+    // FIFO Phase 1 — resolve the per-source ordering key from the PRE-redaction
+    // body (or a header) so same-key events co-locate on one shard. Default-off:
+    // null unless the source opted in AND a key resolved, in which case we fall
+    // back to event_id sharding exactly as before. A missing/unresolvable key
+    // NEVER drops the event. Later phases serialize delivery per key.
+    const orderingKey = resolveOrderingKey(source, new Uint8Array(body), headers);
+
+    // Event-type discriminator for the ClickHouse index. Prefer the ORIGINAL
+    // (pre-redaction) body so a redact path that overlaps the type field can't
+    // blank it; fall back to common event-type headers. For non-JSON bodies we
+    // skip the body parse but still check headers (GitHub/Shopify/etc. put the
+    // type only in a header). '' when nothing matches.
+    const eventType = looksLikeJson(contentType)
+      ? extractEventTypeFromBody(new Uint8Array(body), headers)
+      : extractEventTypeFromHeaders(headers) ?? "";
+
+    // PII redaction — mask configured paths BEFORE the durable R2 write, so
+    // masked fields never persist and are never delivered. Runs after signature
+    // verification (which needs the original body). No-op unless the source
+    // configured redact_paths; non-JSON bodies pass through unchanged.
+    const storedBody =
+      source.redact_paths && source.redact_paths.length > 0
+        ? redactJsonPayload(new Uint8Array(body), source.redact_paths)
+        : body;
+
+    await env.EVENTS_RAW.put(r2Key, storedBody, {
+      httpMetadata: {
+        contentType,
+      },
+      customMetadata: {
+        event_id: eventId,
+        workspace_id: source.workspace_id,
+        source_id: source.source_id,
+        received_at: receivedAt,
+      },
+    });
+
+    // Co-locate same-key events on one shard for ordered sources; unordered
+    // events still scatter by random event_id exactly as before.
+    const shard = shardFor(orderingKey ?? eventId);
+    const message: QueueMessage = {
+      event_id: eventId,
+      workspace_id: source.workspace_id,
+      source_id: source.source_id,
+      r2_key: r2Key,
+      received_at: receivedAt,
+      content_type: contentType,
+      size_bytes: storedBody.byteLength,
+      shard,
+      headers,
+      query,
+      // Test-flag detection isn't wired here yet — AXE-25 added the
+      // field to the type but the producer side defaults to false.
+      // When the dashboard test-sender starts setting a marker header
+      // we'll read it from `headers` here.
+      is_test: headers["x-axel-test"] === "1",
+      // Stamp the event type only when one was found, so the message stays
+      // byte-identical to baseline for non-JSON / untyped sources.
+      ...(eventType ? { event_type: eventType } : {}),
+      // Stamp the ordering key only when one resolved — so the message is
+      // byte-identical to baseline for the unordered default.
+      ...(orderingKey ? { ordering_key: orderingKey } : {}),
+    };
+
+    await sendToShard(env, shard, message);
+    // Fire the ClickHouse analytics row after the durable R2 + queue path.
+    // ClickHouse failure just leaves a hole in the dashboard view.
+    ctx.waitUntil(logEventToClickhouse(env, message));
+
+    // GDPR erasure index: for sources that opted into subject_key_paths, derive
+    // the (pseudonymous) subject_ids on THIS event and index them so an erasure
+    // request can later locate the event by subject. Extracted from the ORIGINAL
+    // body (not the redacted storedBody) — subject_id is a hash, so it stays
+    // pseudonymous even when the path overlaps a redact path. Non-blocking; no-op
+    // for sources without subject indexing.
+    ctx.waitUntil(indexSubjectsForErasure(env, source, new Uint8Array(body), headers, query, eventId, r2Key, receivedAt));
+
+    return json({ event_id: eventId, received_at: receivedAt }, 202);
+}
+
+/**
+ * Best-effort: must never throw out of ctx.waitUntil. Extracts subject (kind,
+ * value) pairs per the source's subject_key_paths, derives subject_ids with the
+ * shared Web-Crypto deriver (byte-identical to the dashboard read-path), and
+ * writes erasure_subjects over the control-plane PG client.
+ */
+async function indexSubjectsForErasure(
+  env: Env,
+  source: Source,
+  rawBody: Uint8Array,
+  headers: Record<string, string>,
+  query: Record<string, string>,
+  eventId: string,
+  r2Key: string,
+  receivedAt: string,
+): Promise<void> {
+  try {
+    const pairs = extractSubjectPairs(source, rawBody, headers, query);
+    if (pairs.length === 0) return;
+    const ids = await Promise.all(pairs.map((p) => deriveSubjectIdWeb(source.workspace_id, p.kind, p.value)));
+    await indexErasureSubjects(env, source.workspace_id, [...new Set(ids)], eventId, r2Key, receivedAt);
+  } catch (err) {
+    console.error(`[ingest] erasure subject index failed for ${eventId}:`, err);
+  }
+}
+
+async function sendToShard(
+  env: Env,
+  shard: number,
+  message: QueueMessage,
+): Promise<void> {
+  const queue = queueForShard(env, shard);
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= QUEUE_SEND_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      await queue.send(message);
+      return;
+    } catch (err) {
+      lastError = err;
+      const transient = isCloudflareQueueInternalError(err) || isCloudflareQueueOverloadError(err);
+      if (!transient || attempt === QUEUE_SEND_RETRY_ATTEMPTS) throw err;
+      await new Promise((resolve) => setTimeout(resolve, QUEUE_SEND_RETRY_BASE_MS * attempt));
+    }
+  }
+  throw lastError;
+}
+
+function queueForShard(env: Env, shard: number): Queue<QueueMessage> {
+  const map: Queue<QueueMessage>[] = [
+    env.QUEUE_EVENTS_00, env.QUEUE_EVENTS_01, env.QUEUE_EVENTS_02, env.QUEUE_EVENTS_03,
+    env.QUEUE_EVENTS_04, env.QUEUE_EVENTS_05, env.QUEUE_EVENTS_06, env.QUEUE_EVENTS_07,
+    env.QUEUE_EVENTS_08, env.QUEUE_EVENTS_09, env.QUEUE_EVENTS_10, env.QUEUE_EVENTS_11,
+    env.QUEUE_EVENTS_12, env.QUEUE_EVENTS_13, env.QUEUE_EVENTS_14, env.QUEUE_EVENTS_15,
+  ];
+  const q = map[shard];
+  if (!q) throw new Error(`no queue binding for shard ${shard}`);
+  return q;
+}
+
+async function lookupSource(env: Env, sourceId: string): Promise<Source | null> {
+  const cache = env.__SOURCE_CACHE_OVERRIDE
+    ?? (env.SOURCE_CACHE ? kvSourceCache(env.SOURCE_CACHE) : null);
+  return resolveSource(cache, (id) => lookupSourceUncached(env, id), sourceId);
+}
+
+/**
+ * Resolve the plan cache binding. Returns null when no KV is
+ * configured (dev mode without an emulated KV); the gate check
+ * treats null as "accept" so local dev still ingests.
+ */
+function planCacheFor(env: Env): PlanCache | null {
+  return env.__PLAN_CACHE_OVERRIDE
+    ?? (env.SOURCE_CACHE ? kvPlanCache(env.SOURCE_CACHE) : null);
+}
+
+export async function lookupSourceUncached(env: Env, sourceId: string): Promise<Source | null> {
+  if (env.DEV_MODE === "true" && env.DEV_SOURCES) {
+    try {
+      const parsed = JSON.parse(env.DEV_SOURCES) as Record<string, Omit<Source, "source_id">>;
+      const entry = parsed[sourceId];
+      if (!entry) return null;
+      return { source_id: sourceId, ...entry };
+    } catch {
+      return null;
+    }
+  }
+  // Production: delivery-service owns the reliable Postgres connection and
+  // decrypts source signing secrets before returning the edge Source shape.
+  // Only its explicit `{ source: null }` response is cacheable as a miss;
+  // network/auth/5xx/bad-payload failures throw and become transient 503s.
+  if (
+    env.DELIVERY_SERVICE_URL
+    && (env.SOURCE_LOOKUP_SHARED_SECRET || env.DELIVERY_SHARED_SECRET)
+  ) {
+    return lookupSourceFromDeliveryService(env, sourceId);
+  }
+
+  // Direct Postgres lookup is intentionally local-dev only. Keeping it here is
+  // useful for an engineer running the worker against a local control plane,
+  // but production must never silently fall back to the unreliable CF→PG path.
+  if (env.DEV_MODE === "true") {
+    return env.DATABASE_URL ? lookupSourceInPostgres(env, sourceId) : null;
+  }
+  throw new SourceLookupUnavailableError(
+    "delivery-service source lookup is not configured",
+  );
+}
+
+// Secret-bearing headers that must never be persisted (ClickHouse headers_json)
+// or propagated (queue message → delivery). x-axel-token is the source ingest
+// secret, already validated before this runs; the rest are generic auth carriers.
+// Keys arrive lowercased from the Headers iterator.
+const REDACTED_INBOUND_HEADERS = new Set(["x-axel-token", "authorization", "cookie", "x-api-key"]);
+
+function collectHeaders(request: Request): Record<string, string> {
+  const out: Record<string, string> = {};
+  request.headers.forEach((value, key) => {
+    if (REDACTED_INBOUND_HEADERS.has(key.toLowerCase())) return;
+    out[key] = value;
+  });
+  return out;
+}
+
+function collectQuery(url: URL): Record<string, string> {
+  const out: Record<string, string> = {};
+  url.searchParams.forEach((value, key) => {
+    if (key !== "token") out[key] = value;
+  });
+  return out;
+}
+
+function safeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+async function sha256Hex(input: string): Promise<string> {
+  const data = new TextEncoder().encode(input);
+  const buf = await crypto.subtle.digest("SHA-256", data);
+  const bytes = new Uint8Array(buf);
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) out += bytes[i]!.toString(16).padStart(2, "0");
+  return out;
+}
+
+function parsePositiveInt(raw: string | undefined, fallback: number): number {
+  if (!raw) return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function json(payload: unknown, status: number, headers?: Record<string, string>): Response {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "content-type": "application/json", ...headers },
+  });
+}
+
+function uuidv7(): string {
+  const ms = BigInt(Date.now());
+  const rand = crypto.getRandomValues(new Uint8Array(10));
+  const tsHi = Number((ms >> 16n) & 0xffffffffn);
+  const tsLo = Number(ms & 0xffffn);
+  const hex = (n: number, w: number) => n.toString(16).padStart(w, "0");
+  const b0 = hex(tsHi, 8);
+  const b1 = hex(tsLo, 4);
+  const b2 = ((0x7000 | (rand[0]! << 4) | (rand[1]! >> 4)) & 0xffff).toString(16).padStart(4, "0");
+  const b3 = ((0x8000 | (((rand[1]! & 0x0f) << 8) | rand[2]!)) & 0xffff).toString(16).padStart(4, "0");
+  const tail = Array.from(rand.slice(3, 9)).map((b) => hex(b, 2)).join("");
+  return `${b0}-${b1}-${b2}-${b3}-${tail}`;
+}

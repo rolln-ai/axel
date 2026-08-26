@@ -1,0 +1,29 @@
+{
+  "name": "@axel/cli",
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "Axel CLI — talk to your webhook pipeline from the terminal.",
+  "private": false,
+  "type": "module",
+  "bin": {
+    "axel": "./dist/bin.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "dev": "node --watch dist/bin.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.3",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  }
+}

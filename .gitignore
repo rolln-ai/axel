@@ -1,0 +1,46 @@
+node_modules/
+dist/
+.turbo/
+.next/
+coverage/
+artifacts/
+*.log
+.env
+.env.local
+.env.*.local
+# wrangler local-dev vars (DEV_MODE / DEV_SOURCES etc.) — never commit.
+.dev.vars
+.dev.vars.*
+.wrangler/
+.DS_Store
+*.tsbuildinfo
+
+# Stray tsc output emitted next to app sources (dist/ is the only sanctioned
+# build output). Hand-written declaration files in nested dirs like
+# apps/*/src/types/*.d.ts are unaffected — these patterns don't cross "/".
+apps/*/src/*.js
+apps/*/src/*.d.ts
+apps/*/src/*.map
+
+# Local diagnostic / scratch scripts (underscore-prefixed convention).
+_*.mjs
+_*.ts
+_scratch/
+.vercel
+.playwright-mcp/
+
+# Grok local config and session data (MCP servers, credentials, implementation plans, etc.).
+# Never commit tool state. Project-scoped config may live in .grok/config.toml but we ignore the dir by default.
+.grok/
+# If a project ever needs to track a .grok/ file, explicitly add it with !.grok/allowed-file
+
+# Linear integration scratch (scripts/linear-*.mjs write .linear/current-issue.md) — local-only tool state.
+.linear/
+
+.env*.local
+.env*
+
+# Open-source repo: these stay local / in the private ops repo.
+releases/*.json
+linear.config.json
+CLAUDE.local.md

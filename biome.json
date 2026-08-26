@@ -1,0 +1,59 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.0/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "includes": [
+      "**",
+      "!**/.next",
+      "!**/.turbo",
+      "!**/.vercel",
+      "!**/.wrangler",
+      "!**/artifacts",
+      "!**/coverage",
+      "!**/dist",
+      "!**/node_modules",
+      "!pnpm-lock.yaml",
+      "!docs/postman/*.json",
+      "!scripts/load",
+      "!.claude",
+      "!releases"
+    ]
+  },
+  "formatter": {
+    "enabled": false
+  },
+  "assist": {
+    "enabled": false
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "none",
+      "correctness": {
+        "preset": "recommended",
+        "noUndeclaredVariables": "error",
+        "noUnreachable": "error"
+      },
+      "suspicious": {
+        "preset": "recommended",
+        "noDebugger": "error",
+        "noDuplicateObjectKeys": "error",
+        "noGlobalIsNan": "error"
+      }
+    }
+  },
+  "javascript": {
+    "parser": {
+      "unsafeParameterDecoratorsEnabled": true
+    }
+  },
+  "css": {
+    "parser": {
+      "tailwindDirectives": true
+    }
+  }
+}

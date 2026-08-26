@@ -1,0 +1,32 @@
+import { existsSync, readFileSync } from "node:fs";
+
+export function loadDotEnv(filePath = ".env.local") {
+  if (!existsSync(filePath)) return;
+
+  for (const line of readFileSync(filePath, "utf8").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    const equalsIndex = trimmed.indexOf("=");
+    if (equalsIndex <= 0) continue;
+
+    const key = trimmed.slice(0, equalsIndex).trim();
+    let value = trimmed.slice(equalsIndex + 1).trim();
+
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+
+    if (process.env[key] === undefined) {
+      process.env[key] = value;
+    }
+  }
+}
+
+export function loadLocalEnv() {
+  loadDotEnv(".env.local");
+  loadDotEnv(".env");
+}

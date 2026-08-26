@@ -1,0 +1,21 @@
+# Default owner. Replace or extend this as the team grows.
+* @hstrauss
+
+# Runtime services
+/apps/ingest-worker/ @hstrauss
+/apps/router/ @hstrauss
+/apps/router-edge/ @hstrauss
+/apps/delivery-worker/ @hstrauss
+/apps/delivery-edge/ @hstrauss
+/apps/delivery-service/ @hstrauss
+/apps/pull-worker/ @hstrauss
+
+# Control plane and public surfaces
+/apps/dashboard/ @hstrauss
+/apps/marketing/ @hstrauss
+
+# Shared contracts, credentials, and infra deserve explicit review.
+/packages/shared/ @hstrauss
+/packages/credentials/ @hstrauss
+/infra/ @hstrauss
+/.github/ @hstrauss

@@ -1,0 +1,667 @@
+openapi: 3.1.0
+info:
+  title: Axel API
+  version: "1.0.0"
+  summary: Webhook ingest plus workspace control plane.
+  description: |
+    The Axel API has two surfaces:
+
+    - **Workspace API** (`https://app.axelapp.ai/api/v1`) — manage sources,
+      destinations, routes, replays, and export workspace config.
+      Authenticated with a workspace API key:
+      `Authorization: Bearer axl_…`. Create keys at
+      [Settings → API keys](https://app.axelapp.ai/settings?tab=api-keys).
+
+    - **Ingest** (`https://ingest.axelapp.ai`) — deliver webhook payloads
+      from upstream providers (Stripe, GitHub, Twilio, Slack, anything).
+      Authenticated per-source with `x-axel-token` (the secret shown
+      once when the source is created).
+
+    ### Scopes
+    Workspace API keys carry one or more scopes:
+
+    | scope    | grants                                   |
+    |----------|------------------------------------------|
+    | `read`   | list sources, destinations, routes, usage |
+    | `write`  | create sources (implies `read`)           |
+    | `replay` | enqueue replays for dead-letter events    |
+    | `admin`  | export workspace config (implies all)     |
+
+    Pick the narrowest scope that works for the integration.
+
+    ### Errors
+    Workspace API errors return `{ "error": string, "code": string }`
+    with an HTTP status that matches the failure class. Ingest errors
+    return `{ "error": string }` (sometimes with a `reason` slug for
+    `invalid_signature`, or a `retry_after_seconds` hint for 429/503).
+
+    ### Pagination
+    List endpoints accept `limit` (default 50, max 1000) and `cursor`
+    (the last id returned in the previous page). When `meta.next_cursor`
+    is `null`, you've reached the end.
+  contact:
+    name: Axel support
+    url: https://app.axelapp.ai
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://app.axelapp.ai
+    description: Workspace API (production)
+
+tags:
+  - name: Sources
+    description: Webhook ingest endpoints owned by your workspace.
+  - name: Destinations
+    description: Where Axel delivers events after routing.
+  - name: Routes
+    description: Filter + transform rules that connect sources to destinations.
+  - name: Replays
+    description: Re-deliver events that landed in the dead-letter queue.
+  - name: Usage
+    description: Workspace usage counters.
+  - name: Config
+    description: Export the full workspace configuration as JSON.
+  - name: Ingest
+    description: The hot path. Send webhook payloads here.
+
+security:
+  - WorkspaceBearer: []
+
+paths:
+  /api/v1/sources:
+    get:
+      operationId: listSources
+      summary: List sources
+      description: |
+        Returns the sources in the authenticated workspace, newest first.
+        Keyset-paginated on `id`.
+      tags: [Sources]
+      security:
+        - WorkspaceBearer: []
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of sources.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Source" }
+                  meta: { $ref: "#/components/schemas/PageMeta" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/ForbiddenScope" }
+    post:
+      operationId: createSource
+      summary: Create a source
+      description: |
+        Creates a new source and returns a one-shot `secret_token`. Store
+        the token immediately — it cannot be retrieved later. Use the
+        returned `ingest_url` and token as the `x-axel-token` header when
+        posting webhooks.
+      tags: [Sources]
+      security:
+        - WorkspaceBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  minLength: 2
+                  maxLength: 64
+                  description: Human-readable label (unique within the workspace).
+                  example: stripe-webhooks-prod
+      responses:
+        "201":
+          description: Source created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SourceCreated" }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/ForbiddenScope" }
+        "409":
+          description: A source with that name already exists.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: "Source name already in use.", code: "source_name_taken" }
+
+  /api/v1/destinations:
+    get:
+      operationId: listDestinations
+      summary: List destinations
+      tags: [Destinations]
+      security:
+        - WorkspaceBearer: []
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of destinations.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Destination" }
+                  meta: { $ref: "#/components/schemas/PageMeta" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/ForbiddenScope" }
+
+  /api/v1/routes:
+    get:
+      operationId: listRoutes
+      summary: List routes
+      tags: [Routes]
+      security:
+        - WorkspaceBearer: []
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of routes.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Route" }
+                  meta: { $ref: "#/components/schemas/PageMeta" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/ForbiddenScope" }
+
+  /api/v1/usage:
+    get:
+      operationId: getUsage
+      summary: Workspace usage summary
+      description: |
+        Returns active resource counts and a 30-day dead-letter total.
+        Suitable for status dashboards and alerting.
+      tags: [Usage]
+      security:
+        - WorkspaceBearer: []
+      responses:
+        "200":
+          description: Usage snapshot.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [active_sources, active_destinations, dead_letters_30d]
+                    properties:
+                      active_sources: { type: integer, minimum: 0 }
+                      active_destinations: { type: integer, minimum: 0 }
+                      dead_letters_30d: { type: integer, minimum: 0 }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/ForbiddenScope" }
+
+  /api/v1/config:
+    get:
+      operationId: exportConfig
+      summary: Export workspace config
+      description: |
+        Returns a versioned, redacted JSON snapshot of every routable
+        resource in the workspace: sources, destinations, routes, and
+        attachments. Suitable for `axel config pull > workspace.json`,
+        code review, or environment promotion.
+
+        Secrets are redacted: `secret_token_hash`, signing-secret
+        ciphertext, and any destination `credentials_ref` are
+        replaced with `[REDACTED]`. Re-applying the config requires
+        re-setting credentials per destination.
+      tags: [Config]
+      security:
+        - WorkspaceBearer: []
+      responses:
+        "200":
+          description: Workspace config snapshot.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExportedConfig" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/ForbiddenScope" }
+
+  /api/v1/replays:
+    post:
+      operationId: enqueueReplay
+      summary: Enqueue a replay
+      description: |
+        Queues a replay for the given `event_id`. The replay is picked
+        up by the router on its next poll. `scope` controls which
+        deliveries get retried:
+
+        - `all` (default) — every destination attached to the route
+        - `route` — only deliveries on the named `route_id`
+        - `destination` — only the named `destination_id`
+
+        Returns `202 Accepted` with the new replay row in `pending`
+        state. The event must have a matching unresolved dead-letter row.
+      tags: [Replays]
+      security:
+        - WorkspaceBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [event_id]
+              properties:
+                event_id:
+                  type: string
+                  description: UUIDv7 from the original ingest 202 response.
+                  example: 01935b3e-2c08-7c00-8000-c8a1b1e9d2f7
+                scope:
+                  type: string
+                  enum: [all, route, destination]
+                  default: all
+                route_id:
+                  type: string
+                  description: Required when `scope = route`.
+                  example: rte_2c01dd
+                destination_id:
+                  type: string
+                  description: Required when `scope = destination`.
+                  example: dst_a91f02
+      responses:
+        "202":
+          description: Replay enqueued.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, event_id, scope, state]
+                properties:
+                  id: { type: string, example: rpy_4a8e9c }
+                  event_id: { type: string }
+                  scope:
+                    type: string
+                    enum: [all, route, destination]
+                  state:
+                    type: string
+                    enum: [pending]
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/ForbiddenScope" }
+        "404":
+          description: |
+            No replayable dead-letter row for that `event_id`, or the
+            supplied `route_id` / `destination_id` doesn't belong to
+            this workspace.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              examples:
+                eventNotFound:
+                  value: { error: "No unresolved replayable dead-letter row for event_id \"…\".", code: "not_found" }
+                routeNotFound:
+                  value: { error: "route_id \"…\" not found in this workspace.", code: "route_not_found" }
+                destinationNotFound:
+                  value: { error: "destination_id \"…\" not found in this workspace.", code: "destination_not_found" }
+
+  /in/{sourceId}:
+    post:
+      operationId: ingestEvent
+      summary: Ingest a webhook
+      description: |
+        The hot path. POST the upstream provider's raw body here with
+        the source's `x-axel-token`. Axel stores the payload to durable
+        object storage, enqueues it for routing, and returns
+        `202 Accepted` with an `event_id` you can use to look up the
+        delivery on the dashboard or replay it later.
+
+        **Hosted at a different origin** from the workspace API:
+        `https://ingest.axelapp.ai`.
+
+        Any content type is accepted. Per-source limits (body size,
+        body depth, rate) are enforced; over-limit requests get a 413
+        or 429 with a `retry-after` header where applicable.
+
+        If the source is configured with a signing secret (Stripe,
+        GitHub, custom HMAC, …), the corresponding provider signature
+        header must verify or the request is rejected with `401
+        invalid_signature`.
+      tags: [Ingest]
+      servers:
+        - url: https://ingest.axelapp.ai
+          description: Ingest (production)
+      security:
+        - SourceToken: []
+      parameters:
+        - in: path
+          name: sourceId
+          required: true
+          schema: { type: string, example: src_8c12af }
+          description: Source id returned from `POST /api/v1/sources`.
+      requestBody:
+        required: true
+        description: Raw upstream webhook payload. Any content type.
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+            example:
+              type: payment_intent.succeeded
+              data: { object: { id: pi_3O…, amount: 1999, currency: usd } }
+          application/x-www-form-urlencoded:
+            schema: { type: string }
+          "*/*":
+            schema: { type: string, format: binary }
+      responses:
+        "202":
+          description: Accepted. Durable copy stored, queued for routing.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [event_id, received_at]
+                properties:
+                  event_id:
+                    type: string
+                    format: uuid
+                    example: 01935b3e-2c08-7c00-8000-c8a1b1e9d2f7
+                  received_at:
+                    type: string
+                    format: date-time
+        "401":
+          description: Missing token, invalid token, or invalid provider signature.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IngestError" }
+              examples:
+                missing: { value: { error: missing_token } }
+                invalid: { value: { error: invalid_token } }
+                signature: { value: { error: invalid_signature, reason: bad_hmac } }
+        "402":
+          description: Workspace is billing-suspended.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IngestError" }
+              example: { error: billing_suspended }
+        "403":
+          description: Source is disabled, or the request IP isn't allowlisted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IngestError" }
+              examples:
+                disabled: { value: { error: source_disabled } }
+                ipBlocked: { value: { error: ip_not_allowlisted } }
+        "404":
+          description: Unknown source id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IngestError" }
+              example: { error: unknown_source }
+        "413":
+          description: Payload too large or too deeply nested.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IngestError" }
+              examples:
+                bytes: { value: { error: payload_too_large } }
+                depth: { value: { error: payload_too_deep } }
+        "429":
+          description: Per-source rate limit or workspace plan-quota exceeded.
+          headers:
+            retry-after:
+              schema: { type: integer }
+              description: Seconds to wait before retrying.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IngestError" }
+              examples:
+                rate: { value: { error: rate_limited } }
+                quota: { value: { error: plan_quota_exceeded } }
+        "503":
+          description: Backpressure from upstream queue or storage. Retry.
+          headers:
+            retry-after:
+              schema: { type: integer }
+              description: Seconds to wait before retrying.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IngestError" }
+              examples:
+                queue: { value: { error: queue_overloaded, retry_after_seconds: 5 } }
+                storage: { value: { error: storage_unavailable, retry_after_seconds: 2 } }
+
+components:
+  securitySchemes:
+    WorkspaceBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: axl_…
+      description: |
+        Workspace API key. Format: `axl_` followed by 32+ url-safe
+        characters. Create at
+        [Settings → API keys](https://app.axelapp.ai/settings?tab=api-keys).
+        The key carries one or more scopes (`read`, `write`, `replay`,
+        `admin`); the endpoint will 403 if your key doesn't include the
+        required scope.
+    SourceToken:
+      type: apiKey
+      in: header
+      name: x-axel-token
+      description: |
+        The plaintext source token returned at source-create time.
+        Treat it as a secret: leaked tokens can post arbitrary payloads
+        into your workspace. Rotate by recreating the source.
+
+  parameters:
+    Limit:
+      in: query
+      name: limit
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 1000, default: 50 }
+      description: Page size. Max 1000.
+    Cursor:
+      in: query
+      name: cursor
+      required: false
+      schema: { type: string, nullable: true }
+      description: |
+        The id from the previous page's last row. Omit on the first
+        page. When `meta.next_cursor` is `null`, you've reached the end.
+
+  responses:
+    Unauthenticated:
+      description: Missing or invalid `Authorization` header.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error: "Missing or invalid Authorization header. Expected `Bearer axl_…`."
+            code: unauthenticated
+    ForbiddenScope:
+      description: Key is valid but doesn't carry the required scope.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error: 'This endpoint requires the "write" scope.'
+            code: forbidden_scope
+    BadRequest:
+      description: Body failed validation.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          examples:
+            invalidJson:
+              value: { error: "Body isn't valid JSON: …", code: invalid_body }
+            invalidName:
+              value: { error: "name must be 2–64 characters.", code: invalid_name }
+            missingEventId:
+              value: { error: "event_id is required.", code: invalid_body }
+
+  schemas:
+    Error:
+      type: object
+      required: [error, code]
+      properties:
+        error:
+          type: string
+          description: Human-readable message. Don't pattern-match on this — use `code`.
+        code:
+          type: string
+          description: Stable machine-readable failure slug.
+          example: forbidden_scope
+
+    IngestError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Stable failure slug (e.g. `invalid_token`, `payload_too_large`).
+        reason:
+          type: string
+          description: Optional sub-reason. Currently only set for `invalid_signature`.
+        retry_after_seconds:
+          type: integer
+          description: Optional hint for 503 responses (mirrors the `retry-after` header).
+
+    PageMeta:
+      type: object
+      required: [limit, next_cursor]
+      properties:
+        limit:
+          type: integer
+          description: The effective page size.
+        next_cursor:
+          type: string
+          nullable: true
+          description: |
+            Pass back as `?cursor=` to fetch the next page. `null` means
+            no more pages.
+
+    Source:
+      type: object
+      required: [id, status, created_at]
+      properties:
+        id: { type: string, example: src_8c12af }
+        name: { type: string, nullable: true, example: stripe-webhooks-prod }
+        status:
+          type: string
+          enum: [active, disabled]
+        created_at: { type: string, format: date-time }
+
+    SourceCreated:
+      type: object
+      required: [id, name, secret_token, ingest_url, warning]
+      properties:
+        id: { type: string, example: src_8c12af }
+        name: { type: string, example: stripe-webhooks-prod }
+        secret_token:
+          type: string
+          description: The plaintext source token. Shown ONCE.
+          example: stk_3f9c…
+        ingest_url:
+          type: string
+          format: uri
+          description: |
+            Pre-built ingest URL. POST upstream payloads here with
+            `x-axel-token: {secret_token}`.
+          example: https://ingest.axelapp.ai/in/src_8c12af
+        warning:
+          type: string
+          example: secret_token is shown ONCE. Store it now — it cannot be retrieved later.
+
+    Destination:
+      type: object
+      required: [id, type, status, circuit_state, delivery_paused, created_at]
+      properties:
+        id: { type: string, example: dst_a91f02 }
+        name: { type: string, nullable: true, example: prod-warehouse }
+        type:
+          type: string
+          description: Connector slug (e.g. `webhook`, `postgres`, `bigquery`, `s3`).
+          example: webhook
+        status:
+          type: string
+          enum: [active, disabled]
+        circuit_state:
+          type: string
+          enum: [closed, half_open, open]
+          description: Per-destination circuit-breaker state.
+        delivery_paused:
+          type: boolean
+          description: Operator-set pause flag. When true, no new deliveries are attempted.
+        created_at: { type: string, format: date-time }
+
+    Route:
+      type: object
+      required: [id, source_id, status, created_at]
+      properties:
+        id: { type: string, example: rte_2c01dd }
+        source_id: { type: string, example: src_8c12af }
+        status:
+          type: string
+          enum: [active, disabled]
+        created_at: { type: string, format: date-time }
+
+    ExportedConfig:
+      type: object
+      required: [version, exported_at, workspace_id, sources, destinations, routes]
+      properties:
+        version:
+          type: integer
+          enum: [1]
+        exported_at: { type: string, format: date-time }
+        workspace_id: { type: string }
+        sources:
+          type: array
+          items: { type: object, additionalProperties: true }
+        destinations:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            properties:
+              credentials_ref:
+                type: string
+                nullable: true
+                description: |
+                  Replaced with `"[REDACTED — re-set via POST /destinations]"`
+                  when present.
+        routes:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            properties:
+              destination_ids:
+                type: array
+                items: { type: string }
+              destination_bindings:
+                type: object
+                description: Per-destination route bindings keyed by destination id.
+                additionalProperties:
+                  anyOf:
+                    - type: object
+                      additionalProperties: true
+                    - type: "null"

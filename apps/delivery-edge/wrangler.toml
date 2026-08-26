@@ -1,0 +1,80 @@
+name = "axel-delivery-edge"
+main = "src/index.ts"
+compatibility_date = "2026-04-01"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = false
+
+[version_metadata]
+binding = "CF_VERSION_METADATA"
+
+[triggers]
+# Queue traffic can legitimately be idle for hours. Beat independently so the
+# public status page does not report an idle delivery-edge as an outage.
+crons = ["*/2 * * * *"]
+
+# Push consumer of the destination queue. Cloudflare delivers each message;
+# our queue() handler ack()s on success/dead and retry()s on transient.
+#
+# max_concurrency bounds how many consumer invocations Cloudflare runs at once.
+# Each invocation direct-dials the shared control-plane Postgres, so without a
+# cap a backlog spins unbounded isolates that storm the DB's connection limit
+# (the 2026-06 cascade). 10 keeps edge's PG-connection demand bounded and well
+# clear of the ~103 max_connections shared with the Render pools; a burst backs
+# up gracefully in the queue instead of taking the control plane down. Raise
+# this once a connection pooler (PgBouncer/Supavisor) decouples app concurrency
+# from raw server connections. See the 10M/day scaling analysis.
+[[queues.consumers]]
+queue = "axel-delivery"
+max_batch_size = 25
+max_batch_timeout = 5
+# 12 total attempts (1 + 11 retries) to match the documented RetryPolicy
+# max_attempts for edge-delivered types (http/webhook/r2/s3). Cloudflare's
+# consumer retry counter governs the edge path (message.attempt_no does not
+# increment across CF redeliveries), so the attempt budget lives here, not in
+# the message. Previously 4 → only ~5 tries, dead-lettering a customer endpoint
+# mid transient-5xx window well before the documented budget was exhausted.
+max_retries = 11
+max_concurrency = 10
+dead_letter_queue = "axel-dead-letter"
+
+# Second push consumer — drain the dead-letter queue into the Postgres
+# `dead_letters` table so failed events surface in the dashboard's
+# `/deliveries` view and become eligible for replay through the existing
+# replay_requests pipeline. Without this, terminal failures pile up in
+# Cloudflare storage with no operator visibility.
+#
+# We deliberately do NOT configure a `dead_letter_queue` for this consumer:
+# if recording fails (e.g., Postgres unreachable) we want the message to
+# stay on axel-dead-letter and re-deliver, not chain into yet another DLQ.
+# `max_retries = 5` gives us several attempts before Cloudflare expires.
+[[queues.consumers]]
+queue = "axel-dead-letter"
+max_batch_size = 25
+max_batch_timeout = 10
+max_retries = 5
+# Cap concurrency: this consumer also direct-dials the shared control-plane
+# Postgres (drainDeadLetterQueue → createSql) to write `dead_letters`. Uncapped,
+# a DLQ backlog would spin unbounded isolates and add to the connection storm.
+max_concurrency = 3
+
+[[queues.producers]]
+binding = "DEAD_LETTER_QUEUE"
+queue = "axel-dead-letter"
+
+# R2 bucket — used both for r2-type destinations (mvp shared) and for any
+# eventual fetch-back of original payload.
+[[r2_buckets]]
+binding = "EVENTS_RAW"
+bucket_name = "axel-events-raw"
+preview_bucket_name = "axel-events-raw-preview"
+
+# DATABASE_URL is set as a wrangler secret.
+#
+# DELIVERY_SHARED_SECRET is also a wrangler secret. It is only used as a
+# recovery path when a native-runtime destination reaches delivery-edge and
+# must be forwarded to the Render delivery-service instead of terminally
+# failing with `unsupported_type`.
+
+[vars]
+DELIVERY_SERVICE_URL = "https://axel-delivery-native.onrender.com"
+SENTRY_ENVIRONMENT = "production"

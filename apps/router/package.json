@@ -1,0 +1,27 @@
+{
+  "name": "@axel/router",
+  "version": "0.0.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "echo 'router is typecheck-only — no build artifacts' && exit 0",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:adversarial": "vitest run test/sandbox.adversarial.test.ts",
+    "dev": "echo 'router stub — Phase 2'"
+  },
+  "dependencies": {
+    "@axel/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.3",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  }
+}

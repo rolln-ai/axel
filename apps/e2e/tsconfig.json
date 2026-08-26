@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "..",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "types": ["node", "@cloudflare/workers-types"],
+    "lib": ["ES2022", "DOM"]
+  },
+  "include": [
+    "test/**/*",
+    "../ingest-worker/src/**/*",
+    "../router/src/**/*",
+    "../delivery-worker/src/**/*",
+    "../delivery-edge/src/clickhouse-log.ts"
+  ]
+}

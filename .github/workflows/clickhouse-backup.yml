@@ -1,0 +1,50 @@
+name: Backup ClickHouse to R2
+
+on:
+  schedule:
+    # 03:00 UTC daily — off-peak for both ingest traffic and Render compute.
+    - cron: "0 3 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: clickhouse-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    name: Backup ClickHouse
+    runs-on: ubuntu-latest
+    environment: Production
+    timeout-minutes: 30
+    env:
+      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+      SENTRY_ENVIRONMENT: production
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Sentry check-in (in_progress)
+        id: checkin
+        if: env.SENTRY_DSN != ''
+        # GitHub scheduled jobs can start hours late. Keep Sentry green for a
+        # bounded six-hour queue delay, then alert if the daily run still has
+        # not started by 09:00 UTC.
+        run: bash scripts/sentry-cron-checkin.sh in_progress clickhouse-backup '' '0 3 * * *' 30 360
+
+      - name: Run BACKUP
+        run: bash scripts/clickhouse-backup.sh
+        env:
+          CLICKHOUSE_URL: ${{ secrets.CLICKHOUSE_URL }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
+          CLICKHOUSE_BACKUP_S3_ENDPOINT: ${{ secrets.CLICKHOUSE_BACKUP_S3_ENDPOINT }}
+          CLICKHOUSE_BACKUP_S3_BUCKET: ${{ secrets.CLICKHOUSE_BACKUP_S3_BUCKET }}
+          CLICKHOUSE_BACKUP_S3_ACCESS_KEY: ${{ secrets.CLICKHOUSE_BACKUP_S3_ACCESS_KEY }}
+          CLICKHOUSE_BACKUP_S3_SECRET_KEY: ${{ secrets.CLICKHOUSE_BACKUP_S3_SECRET_KEY }}
+
+      - name: Sentry check-in (ok)
+        if: success() && env.SENTRY_DSN != '' && steps.checkin.outputs.check_in_id != ''
+        run: bash scripts/sentry-cron-checkin.sh ok clickhouse-backup "${{ steps.checkin.outputs.check_in_id }}"
+
+      - name: Sentry check-in (error)
+        if: failure() && env.SENTRY_DSN != '' && steps.checkin.outputs.check_in_id != ''
+        run: bash scripts/sentry-cron-checkin.sh error clickhouse-backup "${{ steps.checkin.outputs.check_in_id }}"

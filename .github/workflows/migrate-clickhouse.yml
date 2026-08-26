@@ -1,0 +1,34 @@
+name: Migrate ClickHouse
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Migration target
+        required: true
+        default: production
+        type: choice
+        options:
+          - production
+      confirm:
+        description: Type apply-schema to run against CLICKHOUSE_URL
+        required: true
+
+concurrency:
+  group: migrate-clickhouse-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    name: Apply schema
+    if: ${{ inputs.confirm == 'apply-schema' }}
+    runs-on: ubuntu-latest
+    environment: Production
+    steps:
+      - uses: actions/checkout@v7
+      - name: Apply schema
+        run: bash scripts/apply-clickhouse-schema.sh
+        env:
+          CLICKHOUSE_URL: ${{ secrets.CLICKHOUSE_URL }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}

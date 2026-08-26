@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // Web Crypto + TextEncoder are available in every JS runtime we ship
+    // into (Node 20+, Cloudflare Workers, browsers), but their types only
+    // ship with the DOM lib. Adding it here unblocks the webhook
+    // connector's HMAC signing without forcing a runtime-specific
+    // dependency on @cloudflare/workers-types or @types/node.
+    "lib": ["ES2022", "DOM"],
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": ["src/**/*"]
+}

@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+: "${MOCK_RENDER_DIR:?MOCK_RENDER_DIR is required}"
+: "${MOCK_RENDER_SCENARIO:?MOCK_RENDER_SCENARIO is required}"
+: "${MOCK_RENDER_COMMIT:?MOCK_RENDER_COMMIT is required}"
+
+method=GET
+payload=""
+url=""
+
+while (( $# > 0 )); do
+  case "$1" in
+    -X)
+      method="$2"
+      shift 2
+      ;;
+    --data-binary)
+      payload="$2"
+      shift 2
+      ;;
+    -H|--retry|--retry-delay|--write-out)
+      shift 2
+      ;;
+    --fail-with-body|--silent|--show-error|--retry-all-errors)
+      shift
+      ;;
+    http://*|https://*)
+      url="$1"
+      shift
+      ;;
+    *)
+      echo "unexpected mock curl argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+printf '%s\t%s\n' "$method" "$url" >>"${MOCK_RENDER_DIR}/calls.tsv"
+
+case "${method} ${url}" in
+  "GET https://api.render.com/v1/services?limit=100")
+    printf '[{"service":{"id":"srv-test","name":"axel-delivery-native"}}]\n'
+    ;;
+  "GET "*/services/srv-test/deploys\?limit=100)
+    if [[ "$MOCK_RENDER_SCENARIO" == "existing-live" ]]; then
+      jq -n \
+        --arg commit "$MOCK_RENDER_COMMIT" \
+        '[{
+          deploy: {
+            id: "dep-existing",
+            commit: { id: $commit },
+            status: "live",
+            createdAt: "2026-07-09T00:00:00Z"
+          }
+        }]'
+    elif [[ "$MOCK_RENDER_SCENARIO" == "success" && -f "${MOCK_RENDER_DIR}/deploy-posted" ]]; then
+      jq -n \
+        --arg commit "$MOCK_RENDER_COMMIT" \
+        '[{
+          deploy: {
+            id: "dep-new",
+            commit: { id: $commit },
+            status: "queued",
+            createdAt: "2026-07-09T00:00:01Z"
+          }
+        }]'
+    else
+      printf '[]\n'
+    fi
+    ;;
+  "POST "*/services/srv-test/deploys)
+    if [[ "$MOCK_RENDER_SCENARIO" == "existing-live" ]]; then
+      echo "existing-live scenario must not trigger a deploy" >&2
+      exit 2
+    fi
+    printf '%s\n' "$payload" >"${MOCK_RENDER_DIR}/deploy-request.json"
+    if [[ "$MOCK_RENDER_SCENARIO" == "success" ]]; then
+      touch "${MOCK_RENDER_DIR}/deploy-posted"
+      # Render may queue an accepted deploy with a 202 and no response body.
+      printf '\n202'
+    else
+      jq -cn --arg commit "$MOCK_RENDER_COMMIT" \
+        '{ id: "dep-failed", commit: { id: $commit }, status: "created" }'
+      printf '\n201'
+    fi
+    ;;
+  "GET "*/services/srv-test/deploys/dep-new)
+    poll_count=0
+    if [[ -f "${MOCK_RENDER_DIR}/poll-count" ]]; then
+      poll_count="$(<"${MOCK_RENDER_DIR}/poll-count")"
+    fi
+    poll_count=$((poll_count + 1))
+    printf '%s\n' "$poll_count" >"${MOCK_RENDER_DIR}/poll-count"
+    if (( poll_count == 1 )); then
+      printf '{"id":"dep-new","status":"build_in_progress"}\n'
+    else
+      printf '{"id":"dep-new","status":"live"}\n'
+    fi
+    ;;
+  "GET "*/services/srv-test/deploys/dep-failed)
+    printf '{"id":"dep-failed","status":"build_failed"}\n'
+    ;;
+  *)
+    echo "unexpected mock curl request: ${method} ${url}" >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,40 @@
+name: Migrate Postgres (run pending)
+
+# Applies every infra/postgres/migrations/*.sql file that isn't yet recorded
+# in the schema_migrations table on $DATABASE_URL. Idempotent — running it
+# back-to-back is a no-op the second time. This is the canonical way to apply
+# migrations to an existing database; migrate-postgres.yml (re-run schema.sql)
+# is only for bootstrapping a fresh DB.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Migration target
+        required: true
+        default: production
+        type: choice
+        options:
+          - production
+      confirm:
+        description: Type "apply" to confirm
+        required: true
+
+concurrency:
+  group: migrate-postgres-run-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    name: Apply pending migrations
+    if: ${{ inputs.confirm == 'apply' }}
+    runs-on: ubuntu-latest
+    environment: Production
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install psql
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Run pending migrations
+        run: ./scripts/run-migrations.sh
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

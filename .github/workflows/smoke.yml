@@ -1,0 +1,28 @@
+name: Smoke Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Environment to smoke test
+        required: true
+        default: production
+        type: choice
+        options:
+          - production
+  workflow_call:
+
+jobs:
+  smoke:
+    name: Smoke
+    runs-on: ubuntu-latest
+    environment: Production
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run smoke checks
+        run: bash scripts/smoke.sh
+        env:
+          AXEL_MARKETING_URL: ${{ vars.AXEL_MARKETING_URL || 'https://axelapp.ai' }}
+          AXEL_APP_URL: ${{ vars.AXEL_APP_URL || 'https://app.axelapp.ai' }}
+          AXEL_INGEST_URL: ${{ vars.AXEL_INGEST_URL || 'https://ingest.axelapp.ai' }}
+          AXEL_OPS_TEST_TOKEN: ${{ secrets.OPS_TEST_TOKEN }}

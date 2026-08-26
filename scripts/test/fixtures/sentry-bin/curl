@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+: "${MOCK_CURL_DIR:?MOCK_CURL_DIR is required}"
+
+method=GET
+payload=""
+url=""
+
+while (( $# > 0 )); do
+  case "$1" in
+    -X)
+      method="$2"
+      shift 2
+      ;;
+    --data-binary)
+      payload="$2"
+      shift 2
+      ;;
+    -H|--retry|--retry-delay)
+      shift 2
+      ;;
+    --fail-with-body|--silent|--show-error|--retry-all-errors)
+      shift
+      ;;
+    http://*|https://*)
+      url="$1"
+      shift
+      ;;
+    *)
+      echo "unexpected mock curl argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+printf '%s\t%s\n' "$method" "$url" >>"${MOCK_CURL_DIR}/calls.tsv"
+
+case "${method} ${url}" in
+  "POST "*/releases/)
+    printf '%s\n' "$payload" >"${MOCK_CURL_DIR}/release-create.json"
+    printf '{}\n'
+    ;;
+  "GET "*/deploys/)
+    if [[ -f "${MOCK_CURL_DIR}/deployment-created" ]]; then
+      printf '[{"environment":"production","name":"cloudflare/axel-ingest-worker"}]\n'
+    else
+      printf '[]\n'
+    fi
+    ;;
+  "POST "*/deploys/)
+    printf '%s\n' "$payload" >"${MOCK_CURL_DIR}/deployment-create.json"
+    touch "${MOCK_CURL_DIR}/deployment-created"
+    printf '{}\n'
+    ;;
+  "GET "*/releases/*/)
+    if [[ -f "${MOCK_CURL_DIR}/release-finalized" ]]; then
+      printf '{"dateReleased":"2026-07-09T00:00:00Z"}\n'
+    else
+      printf '{"dateReleased":null}\n'
+    fi
+    ;;
+  "PUT "*/releases/*/)
+    printf '%s\n' "$payload" >"${MOCK_CURL_DIR}/release-finalize.json"
+    touch "${MOCK_CURL_DIR}/release-finalized"
+    printf '{}\n'
+    ;;
+  *)
+    echo "unexpected mock curl request: ${method} ${url}" >&2
+    exit 2
+    ;;
+esac

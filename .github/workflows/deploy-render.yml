@@ -1,0 +1,118 @@
+name: Deploy Render Services
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      # Keep the control plane and native delivery runtime from drifting. A
+      # dashboard change can start emitting a new route binding shape, while
+      # the corresponding connector/shared-type change teaches Render how to
+      # consume it. The July 2026 BigQuery incident happened because only the
+      # dashboard auto-deployed and this workflow remained manual-only.
+      - apps/delivery-service/**
+      - apps/pull-worker/**
+      - packages/connectors/**
+      - packages/observability/**
+      - packages/shared/**
+      - package.json
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - render.yaml
+      - scripts/deploy-render-service.sh
+      - scripts/sentry-release-deploy.sh
+      - .github/workflows/deploy-render.yml
+  workflow_dispatch:
+    inputs:
+      service:
+        description: Render service to deploy
+        required: true
+        default: axel-delivery-native
+        type: choice
+        options:
+          - axel-delivery-native
+          - axel-pull-worker
+          - all
+
+concurrency:
+  group: deploy-render-production
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify before deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Require the protected main branch
+        run: test "$GITHUB_REF" = "refs/heads/main"
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.12.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+
+  deploy:
+    name: Deploy Render services
+    runs-on: ubuntu-latest
+    needs: verify
+    environment: Production
+    timeout-minutes: 270
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Prepare commit release in Sentry
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: rolln
+          SENTRY_PROJECT: javascript
+          SENTRY_RELEASE: ${{ github.sha }}
+        run: |
+          bash scripts/sentry-release-deploy.sh prepare \
+            "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
+
+      - name: Deploy axel-delivery-native
+        if: ${{ github.event_name == 'push' || inputs.service == 'axel-delivery-native' || inputs.service == 'all' }}
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+        run: bash scripts/deploy-render-service.sh axel-delivery-native "$GITHUB_SHA"
+
+      - name: Record axel-delivery-native deploy in Sentry
+        if: ${{ github.event_name == 'push' || inputs.service == 'axel-delivery-native' || inputs.service == 'all' }}
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: rolln
+          SENTRY_PROJECT: javascript
+          SENTRY_RELEASE: ${{ github.sha }}
+        run: |
+          bash scripts/sentry-release-deploy.sh record \
+            render/axel-delivery-native \
+            "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+      - name: Deploy axel-pull-worker
+        if: ${{ github.event_name == 'push' || inputs.service == 'axel-pull-worker' || inputs.service == 'all' }}
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+        run: bash scripts/deploy-render-service.sh axel-pull-worker "$GITHUB_SHA"
+
+      - name: Record axel-pull-worker deploy in Sentry
+        if: ${{ github.event_name == 'push' || inputs.service == 'axel-pull-worker' || inputs.service == 'all' }}
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: rolln
+          SENTRY_PROJECT: javascript
+          SENTRY_RELEASE: ${{ github.sha }}
+        run: |
+          bash scripts/sentry-release-deploy.sh record \
+            render/axel-pull-worker \
+            "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"

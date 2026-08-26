@@ -1,0 +1,242 @@
+services:
+  # Self-hosted ClickHouse for event / delivery analytics.
+  # Replaces ClickHouse Cloud (~$125/mo) per docs/cost-model.md trigger.
+  # Public HTTPS so Cloudflare Workers (ingest-worker, delivery-edge) can reach
+  # it; auth is HTTP Basic via X-ClickHouse-User / X-ClickHouse-Key headers,
+  # which the existing client code already sends.
+  - type: web
+    name: axel-clickhouse
+    runtime: docker
+    dockerfilePath: ./infra/clickhouse/Dockerfile
+    dockerContext: .
+    # Keep the Pro Render instance stable. Pro is a 4 GB instance,
+    # so ClickHouse must leave headroom for the OS, allocator overhead, and
+    # merges. The image bakes in config.d/users.d files that cap server and
+    # query memory, shrink caches, and disable persistent diagnostic log
+    # tables. The 2026-05-28 memory alert was caused by a background merge of
+    # ClickHouse's own system.metric_log, not by product tables.
+    plan: pro
+    region: oregon
+    branch: main
+    autoDeploy: false
+    # Render routes external HTTPS to the container port set by $PORT. The
+    # official ClickHouse image listens on 8123 by default (see its bundled
+    # /etc/clickhouse-server/config.d/docker_related_config.xml), so we tell
+    # Render to use 8123 instead of overriding ClickHouse's port. ClickHouse
+    # 24.x rejects `--http_port` as an unknown CLI option, so the previous
+    # `dockerCommand: clickhouse-server --http_port=$PORT` approach fails to
+    # start (verified 2026-05-26 during the cutover).
+    healthCheckPath: /ping
+    disk:
+      name: clickhouse-data
+      mountPath: /var/lib/clickhouse
+      sizeGB: 50
+    envVars:
+      - key: PORT
+        value: "8123"
+      # The official image bootstraps a `default` user with this password on
+      # first boot. Must match CLICKHOUSE_USER / CLICKHOUSE_PASSWORD on every
+      # client service (dashboard, delivery-service, pull-worker, ingest-worker,
+      # delivery-edge). Rotating this is a coordinated change — see
+      # docs/runbook-clickhouse-migration.md.
+      - key: CLICKHOUSE_USER
+        sync: false
+      - key: CLICKHOUSE_PASSWORD
+        sync: false
+      - key: CLICKHOUSE_DB
+        value: default
+      # Lets the seeded user run BACKUP / RESTORE and DDL — required for the
+      # daily backup workflow and the schema migration workflow.
+      - key: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
+        value: "1"
+
+  - type: web
+    name: axel-delivery-native
+    env: node
+    # SCALING / COST FLAG: standard plan + scaling (2-4 instances) replaces the
+    # single starter instance to remove the single-instance delivery bottleneck.
+    # This is a real cost increase (standard base x up to 4 instances). Safe to
+    # scale ONLY because the singleton loops moved to axel-delivery-workers
+    # below: DELIVERY_ROLE=web here runs the HTTP surface + the poll loop, which
+    # CF Queue pull leases distribute across instances. Tune min/max to your
+    # throughput + budget; to revert, set plan back to starter and remove the
+    # scaling block + DELIVERY_ROLE (defaults to "all").
+    plan: standard
+    scaling:
+      minInstances: 2
+      maxInstances: 4
+      targetCPUPercent: 70
+    region: oregon
+    branch: main
+    # Deploys are triggered explicitly by .github/workflows/deploy-render.yml
+    # through the Render API at an exact Git SHA.
+    # Keeping Render's git auto-deploy enabled as well starts two builds for the
+    # same commit whenever the release workflow runs.
+    autoDeploy: false
+    # Skip corepack — Node 22+ ships with stale signing keys that can't verify
+    # the latest pnpm release manifest from npm. Install via npm directly to a
+    # user-writable global prefix (Render's default is /opt/render/..., not /usr).
+    buildCommand: npm install -g pnpm@9.12.0 && pnpm install --frozen-lockfile && pnpm --filter @axel/delivery-service build
+    startCommand: pnpm --filter @axel/delivery-service start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: DELIVERY_ROLE
+        value: web
+      - key: CLOUDFLARE_ACCOUNT_ID
+        sync: false
+      - key: CLOUDFLARE_API_TOKEN
+        sync: false
+      # UUID of axel-delivery-native. Router-edge now enqueues native
+      # destinations here and this service drains it in pull mode.
+      - key: DELIVERY_QUEUE_ID
+        sync: false
+      # Optional: UUID of axel-delivery for replay fan-out to edge-capable
+      # destinations. If unset, replay falls back to DELIVERY_QUEUE_ID.
+      - key: EDGE_DELIVERY_QUEUE_ID
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_POOL_MAX
+        # Right-sized 20→10 so the web tier (up to maxInstances=4 → ≤40 conns)
+        # plus worker/pull/edge pools stay under max_connections=103. The
+        # /deliver gate + brief idempotency-op connection holds mean 10 serves
+        # the in-flight cap fine. Raise once a pooler lands. See scaling analysis.
+        value: "10"
+      - key: CREDENTIALS_MASTER_KEY
+        sync: false
+      - key: DELIVERY_SHARED_SECRET
+        sync: false
+      # Dedicated bearer for the secret-bearing /internal/source endpoint.
+      # SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS may be set temporarily during a
+      # rotation, but must be removed after ingest has cut over.
+      - key: SOURCE_LOOKUP_SHARED_SECRET
+        sync: false
+      - key: CLICKHOUSE_URL
+        sync: false
+      - key: CLICKHOUSE_USER
+        sync: false
+      - key: CLICKHOUSE_PASSWORD
+        sync: false
+      - key: SENTRY_DSN
+        sync: false
+      - key: SENTRY_ENVIRONMENT
+        value: production
+      - key: POLL_BATCH_SIZE
+        value: "25"
+      - key: POLL_INTERVAL_MS
+        value: "1000"
+      - key: REPLAY_WORKER_BATCH_SIZE
+        value: "500"
+      - key: REPLAY_WORKER_INTERVAL_MS
+        value: "1000"
+
+  # Singleton background workers (replay processor, backfill job worker,
+  # retention loop), moved out of the scaled delivery web service so they run
+  # on EXACTLY ONE instance. Do NOT add a `scaling:` block here — duplicate
+  # instances would double-run backfill/retention and race replays. Needs the
+  # same delivery-runtime secrets as axel-delivery-native, configured in the
+  # Render dashboard. Do not copy SOURCE_LOOKUP_SHARED_SECRET here: this role
+  # does not expose HTTP and should not be able to read source signing secrets.
+  - type: worker
+    name: axel-delivery-workers
+    env: node
+    plan: starter
+    region: oregon
+    branch: main
+    # No dedicated deploy-hook secret exists for this singleton yet, so Render
+    # git auto-deploy remains its deployment authority.
+    autoDeploy: true
+    buildCommand: npm install -g pnpm@9.12.0 && pnpm install --frozen-lockfile && pnpm --filter @axel/delivery-service build
+    startCommand: pnpm --filter @axel/delivery-service start
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: DELIVERY_ROLE
+        value: worker
+      - key: CLOUDFLARE_ACCOUNT_ID
+        sync: false
+      - key: CLOUDFLARE_API_TOKEN
+        sync: false
+      # UUID of axel-delivery-native. Required at boot even for worker role
+      # because replay/backfill share the delivery-service runtime.
+      - key: DELIVERY_QUEUE_ID
+        sync: false
+      # Optional: UUID of axel-delivery for replay fan-out to edge-capable
+      # destinations. If unset, replay falls back to DELIVERY_QUEUE_ID.
+      - key: EDGE_DELIVERY_QUEUE_ID
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_POOL_MAX
+        # Right-sized so all delivery-path pools sum under axel-control-plane's
+        # max_connections=103 (storm guard until a pooler lands). Worker runs
+        # low-concurrency singleton loops. See 10M/day scaling analysis.
+        value: "6"
+      - key: CREDENTIALS_MASTER_KEY
+        sync: false
+      - key: DELIVERY_SHARED_SECRET
+        sync: false
+      - key: CLICKHOUSE_URL
+        sync: false
+      - key: CLICKHOUSE_USER
+        sync: false
+      - key: CLICKHOUSE_PASSWORD
+        sync: false
+      - key: SENTRY_DSN
+        sync: false
+      - key: SENTRY_ENVIRONMENT
+        value: production
+      - key: REPLAY_WORKER_BATCH_SIZE
+        value: "500"
+      - key: REPLAY_WORKER_INTERVAL_MS
+        value: "1000"
+      # Single-instance Parquet batching. Set to the UUID of the
+      # axel-delivery-parquet queue once provisioned; the worker (singleton)
+      # then drains it so Parquet batches on ONE instance. Unset → no parquet
+      # poll loop (router falls back to the native queue; web role delivers).
+      - key: PARQUET_DELIVERY_QUEUE_ID
+        sync: false
+      # Parquet compaction safety net (singleton). "1" to enable; merges small
+      # Parquet objects into large ones, deleting originals only after a
+      # verified PUT. Off by default — enabling mutates customer buckets.
+      - key: PARQUET_COMPACTION_ENABLED
+        value: "0"
+
+  - type: worker
+    name: axel-pull-worker
+    env: node
+    plan: starter
+    region: oregon
+    branch: main
+    # This service is covered by the exact-SHA Render API deploy workflow; use
+    # the verified GitHub workflow as the single deployment authority.
+    autoDeploy: false
+    buildCommand: npm install -g pnpm@9.12.0 && pnpm install --frozen-lockfile && pnpm --filter @axel/pull-worker build
+    startCommand: pnpm --filter @axel/pull-worker start
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_POOL_MAX
+        # Was unset (code default 10). Pin to 6 so pull-worker's share of the
+        # max_connections=103 budget is explicit. See 10M/day scaling analysis.
+        value: "6"
+      - key: CREDENTIALS_MASTER_KEY
+        sync: false
+      - key: CLICKHOUSE_URL
+        sync: false
+      - key: CLICKHOUSE_USER
+        sync: false
+      - key: CLICKHOUSE_PASSWORD
+        sync: false
+      - key: SENTRY_DSN
+        sync: false
+      - key: SENTRY_ENVIRONMENT
+        value: production
+      - key: AXEL_INGEST_URL
+        value: https://ingest.axelapp.ai
+      - key: PULL_WORKER_INTERVAL_MS
+        value: "60000"

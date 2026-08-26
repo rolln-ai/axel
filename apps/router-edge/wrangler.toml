@@ -1,0 +1,177 @@
+name = "axel-router"
+main = "src/index.ts"
+compatibility_date = "2026-04-01"
+compatibility_flags = ["nodejs_compat"]
+# Queue-only worker — no HTTP endpoint needed.
+workers_dev = false
+
+[version_metadata]
+binding = "CF_VERSION_METADATA"
+
+# Inbound: consume the 16 sharded ingest queues. Cloudflare delivers each
+# message exactly once per dead-letter setting and retries on msg.retry().
+[[queues.consumers]]
+queue = "axel-events-00"
+max_batch_size = 25
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "axel-dead-letter"
+
+[[queues.consumers]]
+queue = "axel-events-01"
+max_batch_size = 25
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "axel-dead-letter"
+
+[[queues.consumers]]
+queue = "axel-events-02"
+max_batch_size = 25
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "axel-dead-letter"
+
+[[queues.consumers]]
+queue = "axel-events-03"
+max_batch_size = 25
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "axel-dead-letter"
+
+[[queues.consumers]]
+queue = "axel-events-04"
+max_batch_size = 25
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "axel-dead-letter"
+
+[[queues.consumers]]
+queue = "axel-events-05"
+max_batch_size = 25
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "axel-dead-letter"
+
+[[queues.consumers]]
+queue = "axel-events-06"
+max_batch_size = 25
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "axel-dead-letter"
+
+[[queues.consumers]]
+queue = "axel-events-07"
+max_batch_size = 25
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "axel-dead-letter"
+
+[[queues.consumers]]
+queue = "axel-events-08"
+max_batch_size = 25
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "axel-dead-letter"
+
+[[queues.consumers]]
+queue = "axel-events-09"
+max_batch_size = 25
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "axel-dead-letter"
+
+[[queues.consumers]]
+queue = "axel-events-10"
+max_batch_size = 25
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "axel-dead-letter"
+
+[[queues.consumers]]
+queue = "axel-events-11"
+max_batch_size = 25
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "axel-dead-letter"
+
+[[queues.consumers]]
+queue = "axel-events-12"
+max_batch_size = 25
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "axel-dead-letter"
+
+[[queues.consumers]]
+queue = "axel-events-13"
+max_batch_size = 25
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "axel-dead-letter"
+
+[[queues.consumers]]
+queue = "axel-events-14"
+max_batch_size = 25
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "axel-dead-letter"
+
+[[queues.consumers]]
+queue = "axel-events-15"
+max_batch_size = 25
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "axel-dead-letter"
+
+# Outbound: fan-out destination messages.
+# DELIVERY_QUEUE        → CF delivery-edge worker (HTTP, R2, S3)
+# DELIVERY_NATIVE_QUEUE → Render Node service pull loop (postgres/mongodb/databricks
+#                         native destinations; runs apps/delivery-service)
+[[queues.producers]]
+binding = "DELIVERY_QUEUE"
+queue = "axel-delivery"
+
+[[queues.producers]]
+binding = "DELIVERY_NATIVE_QUEUE"
+queue = "axel-delivery-native"
+
+# DELIVERY_PARQUET_QUEUE → dedicated single-instance Parquet-S3 consumer
+# (the Render worker role drains it; see PARQUET_DELIVERY_QUEUE_ID in render.yaml).
+# Provision the queue FIRST (`wrangler queues create axel-delivery-parquet`),
+# then uncomment — `wrangler deploy` fails on a producer bound to a missing
+# queue. Until then the router falls back to DELIVERY_NATIVE_QUEUE.
+# [[queues.producers]]
+# binding = "DELIVERY_PARQUET_QUEUE"
+# queue = "axel-delivery-parquet"
+
+[[queues.producers]]
+binding = "DEAD_LETTER_QUEUE"
+queue = "axel-dead-letter"
+
+# Raw payload storage shared with the ingest worker.
+[[r2_buckets]]
+binding = "EVENTS_RAW"
+bucket_name = "axel-events-raw"
+preview_bucket_name = "axel-events-raw-preview"
+
+# DATABASE_URL is set as a wrangler secret (NOT a vars entry).
+# `wrangler secret put DATABASE_URL` from the apps/router-edge dir.
+
+# DELIVERY_SHARED_SECRET is also a wrangler secret. Used to authenticate
+# /internal/routes and /internal/heartbeat requests to the Render
+# delivery-service. The same value is set as DELIVERY_SHARED_SECRET on Render.
+# `wrangler secret put DELIVERY_SHARED_SECRET` from the apps/router-edge dir.
+
+[vars]
+DELIVERY_SERVICE_URL = "https://axel-delivery-native.onrender.com"
+SENTRY_ENVIRONMENT = "production"
+
+# FIFO/ordered delivery (Phase 2). Per-key serializer Durable Object — the first
+# DO in this stack. Inert until call sites are wired (see src/ordering/README.md)
+# and a source opts into ordered delivery; no traffic reaches it before then.
+[[durable_objects.bindings]]
+name = "ORDERING"
+class_name = "OrderingDurableObject"
+
+[[migrations]]
+tag = "v1-ordering-do"
+new_classes = ["OrderingDurableObject"]

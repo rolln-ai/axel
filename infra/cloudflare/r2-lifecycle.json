@@ -1,0 +1,43 @@
+{
+  "rules": [
+    {
+      "id": "delete-raw-events-after-30-days",
+      "enabled": true,
+      "conditions": {
+        "prefix": "events/"
+      },
+      "deleteObjectsTransition": {
+        "condition": {
+          "type": "Age",
+          "maxAge": 2592000
+        }
+      }
+    },
+    {
+      "id": "delete-queue-spill-after-7-days",
+      "enabled": true,
+      "conditions": {
+        "prefix": "queue-spill/"
+      },
+      "deleteObjectsTransition": {
+        "condition": {
+          "type": "Age",
+          "maxAge": 604800
+        }
+      }
+    },
+    {
+      "id": "abort-stale-multipart-uploads",
+      "enabled": true,
+      "conditions": {
+        "prefix": ""
+      },
+      "abortMultipartUploadsTransition": {
+        "condition": {
+          "type": "Age",
+          "maxAge": 86400
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "name": "@axel/pull-worker",
+  "version": "0.0.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "echo 'pull-worker runs source via tsx — no bundle step' && exit 0",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "pnpm --filter @axel/shared build && tsx src/server.ts",
+    "dev": "tsx src/server.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@axel/observability": "workspace:*",
+    "@axel/pull-connectors": "workspace:*",
+    "@axel/shared": "workspace:*",
+    "@google-cloud/bigquery": "^8.3.1",
+    "mongodb": "^7.2.0",
+    "pg": "^8.21.0",
+    "tsx": "^4.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.3",
+    "@types/pg": "^8.20.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  }
+}

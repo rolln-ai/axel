@@ -1,0 +1,60 @@
+name: Verify Postgres tables
+
+# Ad-hoc verifier for "does table X exist in prod and have row Y" kinds
+# of questions. Read-only — runs `to_regclass` + COUNT(*) and exits.
+# Useful when triaging stale Sentry "relation X does not exist" reports
+# without needing a psql shell to prod.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tables:
+        description: Comma-separated unqualified table names (e.g. `data_contracts,event_maps`)
+        required: true
+        default: data_contracts
+
+concurrency:
+  group: verify-postgres-tables
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    environment: Production
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Build verify SQL
+        run: |
+          tables="${{ inputs.tables }}"
+          # Use a DO block so each table's row-count branch is planned at
+          # runtime via EXECUTE rather than at the outer query's parse
+          # time. (UNION-ALL-of-CASE blew up at plan time when one table
+          # didn't exist — PG validates the COUNT(*) reference even when
+          # its CASE branch is unreachable.)
+          #
+          # Write to a file rather than pass via `psql -c` because the
+          # dollar-quote tag markers conflict with shell variable
+          # expansion when the SQL is interpolated through GH Actions
+          # expression syntax into another run step.
+          IFS=',' read -ra arr <<< "$tables"
+          {
+            printf 'DO $$\nDECLARE n bigint;\nBEGIN\n'
+            for t in "${arr[@]}"; do
+              t=$(echo "$t" | xargs)
+              printf "  IF to_regclass('public.%s') IS NOT NULL THEN\n" "$t"
+              printf "    EXECUTE format('SELECT COUNT(*) FROM %%I', '%s') INTO n;\n" "$t"
+              printf "    RAISE NOTICE '%s: exists, %% rows', n;\n" "$t"
+              printf "  ELSE\n"
+              printf "    RAISE NOTICE '%s: NOT FOUND';\n" "$t"
+              printf "  END IF;\n"
+            done
+            printf 'END $$;\n'
+          } > /tmp/verify.sql
+          echo "--- sql ---"
+          cat /tmp/verify.sql
+      - name: Run
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f /tmp/verify.sql
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

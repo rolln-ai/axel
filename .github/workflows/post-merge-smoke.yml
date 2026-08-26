@@ -1,0 +1,45 @@
+name: Post-merge Smoke
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: post-merge-smoke-main
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: Production smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+
+      - name: Wait for production deploys
+        run: sleep 120
+
+      - name: Run production smoke
+        id: smoke
+        continue-on-error: true
+        run: bash scripts/smoke.sh
+        env:
+          AXEL_MARKETING_URL: ${{ vars.AXEL_MARKETING_URL || 'https://axelapp.ai' }}
+          AXEL_APP_URL: ${{ vars.AXEL_APP_URL || 'https://app.axelapp.ai' }}
+          AXEL_INGEST_URL: ${{ vars.AXEL_INGEST_URL || 'https://ingest.axelapp.ai' }}
+          AXEL_OPS_TEST_TOKEN: ${{ secrets.OPS_TEST_TOKEN }}
+
+      - name: Sync deploy result to Linear
+        if: always()
+        run: node scripts/linear-deploy-sync.mjs --status=${{ steps.smoke.outcome == 'success' && 'success' || 'failure' }}
+        env:
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+
+      - name: Fail on smoke failure
+        if: ${{ steps.smoke.outcome != 'success' }}
+        run: exit 1
