@@ -23,11 +23,12 @@ jobs:
             case "$repo" in
               *rolln-ai/hookrail*)
                 echo "switching: $name ($id)"
-                curl -fsS -X PATCH \
+                resp=$(curl -sS -w '\nHTTP_STATUS:%{http_code}' -X PATCH \
                   -H "Authorization: Bearer $RENDER_API_KEY" \
                   -H "content-type: application/json" \
                   -d '{"repo":"https://github.com/rolln-ai/axel"}' \
-                  "https://api.render.com/v1/services/$id" | jq -r '"now: \(.name) -> \(.repo)"'
+                  "https://api.render.com/v1/services/$id")
+                echo "$resp" | sed 's/HTTP_STATUS:/status: /'
                 ;;
               *)
                 echo "skip: $name ($repo)"
