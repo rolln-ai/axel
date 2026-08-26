@@ -6,9 +6,11 @@ deliver them to HTTP endpoints, Postgres, MongoDB, BigQuery, Databricks, or
 object storage — with retries, dead-lettering, replay, and full delivery
 history.
 
-Axel is the code behind [Axel Cloud](https://axelapp.ai), the hosted version.
-This repo is the real production source, not a mirror: the cloud deploys from
-`main`.
+Axel is the code behind [**Axel Cloud**](https://axelapp.ai) — the hosted
+version, if you'd rather not run it yourself. This repo is the real production
+source, not a mirror: the cloud deploys from `main`.
+
+![Axel dashboard — workspace overview](docs/assets/axel-dashboard.png)
 
 ## How it works
 
