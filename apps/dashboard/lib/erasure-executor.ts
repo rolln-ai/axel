@@ -397,7 +397,7 @@ async function reconstructSpillKeys(
 
 /** sha256 over the sorted, de-duplicated (event_id, r2_key) set actually erased. */
 function deletionManifestHash(matches: ErasureMatch[]): string {
-  const pairs = [...new Set(matches.map((m) => `${m.event_id} ${m.r2_key ?? ""}`))].sort();
+  const pairs = [...new Set(matches.map((m) => `${m.event_id}\0${m.r2_key ?? ""}`))].sort();
   return createHash("sha256").update(pairs.join("\n")).digest("hex");
 }
 

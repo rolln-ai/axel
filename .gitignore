@@ -30,6 +30,38 @@ _scratch/
 .vercel
 .playwright-mcp/
 
+# Local agent state and common credential or infrastructure files. Keep these
+# repository-level so safety does not depend on a contributor's global ignores.
+.claude/
+.npmrc
+**/.npmrc
+.netrc
+**/.netrc
+.ssh/
+**/.ssh/
+.aws/
+**/.aws/
+.kube/
+**/.kube/
+.terraform/
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+credentials.json
+**/credentials.json
+service-account*.json
+**/service-account*.json
+
 # Grok local config and session data (MCP servers, credentials, implementation plans, etc.).
 # Never commit tool state. Project-scoped config may live in .grok/config.toml but we ignore the dir by default.
 .grok/

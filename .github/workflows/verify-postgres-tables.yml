@@ -20,41 +20,55 @@ concurrency:
 jobs:
   verify:
     name: Verify
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     environment: Production
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: sudo apt-get update && sudo apt-get install -y postgresql-client
       - name: Build verify SQL
+        env:
+          TABLES_INPUT: ${{ inputs.tables }}
         run: |
-          tables="${{ inputs.tables }}"
+          set -euo pipefail
+          sql_file="$RUNNER_TEMP/verify.sql"
           # Use a DO block so each table's row-count branch is planned at
           # runtime via EXECUTE rather than at the outer query's parse
           # time. (UNION-ALL-of-CASE blew up at plan time when one table
           # didn't exist — PG validates the COUNT(*) reference even when
           # its CASE branch is unreachable.)
           #
-          # Write to a file rather than pass via `psql -c` because the
-          # dollar-quote tag markers conflict with shell variable
-          # expansion when the SQL is interpolated through GH Actions
-          # expression syntax into another run step.
-          IFS=',' read -ra arr <<< "$tables"
+          # Write to a file rather than pass the generated block through an
+          # extra shell-quoting layer in the execution step.
+          IFS=',' read -ra arr <<< "$TABLES_INPUT"
+          if [ "${#arr[@]}" -eq 0 ]; then
+            echo "::error::At least one table name is required."
+            exit 1
+          fi
+
           {
-            printf 'DO $$\nDECLARE n bigint;\nBEGIN\n'
-            for t in "${arr[@]}"; do
-              t=$(echo "$t" | xargs)
+            printf 'BEGIN TRANSACTION READ ONLY;\nDO $$\nDECLARE n bigint;\nBEGIN\n'
+            for raw_table in "${arr[@]}"; do
+              t="${raw_table#"${raw_table%%[![:space:]]*}"}"
+              t="${t%"${t##*[![:space:]]}"}"
+              if [[ ! "$t" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+                echo "::error::Invalid table name. Use letters, numbers, and underscores, starting with a letter or underscore." >&2
+                exit 1
+              fi
               printf "  IF to_regclass('public.%s') IS NOT NULL THEN\n" "$t"
-              printf "    EXECUTE format('SELECT COUNT(*) FROM %%I', '%s') INTO n;\n" "$t"
+              printf "    EXECUTE format('SELECT COUNT(*) FROM public.%%I', '%s') INTO n;\n" "$t"
               printf "    RAISE NOTICE '%s: exists, %% rows', n;\n" "$t"
               printf "  ELSE\n"
               printf "    RAISE NOTICE '%s: NOT FOUND';\n" "$t"
               printf "  END IF;\n"
             done
-            printf 'END $$;\n'
-          } > /tmp/verify.sql
+            printf 'END $$;\nCOMMIT;\n'
+          } > "$sql_file"
           echo "--- sql ---"
-          cat /tmp/verify.sql
+          cat "$sql_file"
       - name: Run
-        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f /tmp/verify.sql
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$RUNNER_TEMP/verify.sql"
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

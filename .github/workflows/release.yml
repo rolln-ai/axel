@@ -16,6 +16,7 @@ permissions:
 jobs:
   verify:
     name: Verify release
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -32,10 +33,21 @@ jobs:
 
       - name: Resolve version
         id: ver
+        env:
+          RAW_VERSION: ${{ inputs.version }}
         run: |
-          RAW="${{ inputs.version }}"
+          set -euo pipefail
+          RAW="$RAW_VERSION"
+          if [[ ! "$RAW" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::dispatch version must be a semantic version such as v1.2.3"
+            exit 1
+          fi
           VER="${RAW#v}"
           FILE="$(cat VERSION)"
+          if [[ ! "$FILE" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::VERSION contains an invalid semantic version"
+            exit 1
+          fi
           if [ "$VER" != "$FILE" ]; then
             echo "::error::dispatch version $VER does not match the VERSION file ($FILE). Bump VERSION (scripts/release-verify.mjs --bump ...) and commit it first."
             exit 1
@@ -47,22 +59,29 @@ jobs:
       # so no release is cut for a red ledger. The per-version ledger JSON is
       # gitignored (internal); only CHANGELOG.md and VERSION are committed.
       - name: Release verify
-        run: node scripts/release-verify.mjs --version "${{ steps.ver.outputs.ver }}" --notes "${{ inputs.notes }}"
+        env:
+          RELEASE_NOTES: ${{ inputs.notes }}
+          RELEASE_VERSION: ${{ steps.ver.outputs.ver }}
+        run: node scripts/release-verify.mjs --version "$RELEASE_VERSION" --notes "$RELEASE_NOTES"
 
       - name: Commit changelog
+        env:
+          RELEASE_VERSION: ${{ steps.ver.outputs.ver }}
         run: |
+          set -euo pipefail
           git config user.name "axel-release-bot"
           git config user.email "release-bot@axelapp.ai"
           git add releases/ VERSION
           if git diff --cached --quiet; then
             echo "changelog unchanged — nothing to commit"
           else
-            git commit -m "release: changelog for v${{ steps.ver.outputs.ver }}"
+            git commit -m "release: changelog for v${RELEASE_VERSION}"
             git push || echo "::warning::changelog push rejected (branch protection?)"
           fi
 
   tag:
     name: Tag release
+    if: ${{ github.ref == 'refs/heads/main' && needs.verify.result == 'success' }}
     runs-on: ubuntu-latest
     needs: verify
     environment: Production

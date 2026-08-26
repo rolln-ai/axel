@@ -27,9 +27,11 @@ concurrency:
 jobs:
   migrate:
     name: Apply pending migrations
-    if: ${{ inputs.confirm == 'apply' }}
+    if: ${{ github.ref == 'refs/heads/main' && inputs.confirm == 'apply' }}
     runs-on: ubuntu-latest
     environment: Production
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install psql

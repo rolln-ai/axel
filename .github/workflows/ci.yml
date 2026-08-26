@@ -131,6 +131,8 @@ jobs:
         with:
           node-version-file: .node-version
           cache: pnpm
+      - name: Workflow expression safety
+        run: node scripts/check-workflow-shell-interpolation.mjs
       - run: pnpm install --frozen-lockfile
       - run: pnpm audit --audit-level high
       - name: Secret scan

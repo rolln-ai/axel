@@ -67,6 +67,7 @@ jobs:
 
   deploy:
     name: Deploy Render services
+    if: ${{ github.ref == 'refs/heads/main' && needs.verify.result == 'success' }}
     runs-on: ubuntu-latest
     needs: verify
     environment: Production

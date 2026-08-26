@@ -206,7 +206,7 @@ export function extractSubjectPairs(
           ? scalar(query[path])
           : scalarAtPath(body(), path);
     if (value === null || value.length === 0) continue;
-    const dedupeKey = `${kind} ${value}`;
+    const dedupeKey = `${kind}\0${value}`;
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
     out.push({ kind, value });
