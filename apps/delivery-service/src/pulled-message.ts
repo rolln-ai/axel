@@ -57,16 +57,24 @@ function parseUnencodedBody(raw: unknown): DestinationQueueMessage | null {
 /**
  * Decode a Cloudflare Queues HTTP Pull message.
  *
- * Pull consumers receive both `json` and `bytes` bodies as base64, while
- * `text` bodies are plain UTF-8. Axel publishes JSON, but accepting bytes here
- * makes the failure mode safe if a queue producer is reconfigured.
+ * Pull consumers can return `json` bodies as base64 or plain JSON strings.
+ * `bytes` bodies remain base64-only, while `text` bodies are plain UTF-8.
+ * Axel publishes JSON, but accepting bytes here makes the failure mode safe if
+ * a queue producer is reconfigured.
  */
 export function parsePulledMessageBody(
   message: Pick<PulledMessage, "body" | "metadata">,
 ): DestinationQueueMessage | null {
   const contentType = message.metadata?.["CF-Content-Type"];
 
-  if (contentType === "json" || contentType === "bytes") {
+  if (contentType === "json") {
+    if (typeof message.body !== "string") return null;
+    const decoded = decodeBase64Utf8(message.body);
+    const decodedMessage = decoded === null ? null : parseJsonObject(decoded);
+    return decodedMessage ?? parseJsonObject(message.body);
+  }
+
+  if (contentType === "bytes") {
     if (typeof message.body !== "string") return null;
     const decoded = decodeBase64Utf8(message.body);
     return decoded === null ? null : parseJsonObject(decoded);

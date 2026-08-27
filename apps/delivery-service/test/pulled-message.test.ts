@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { DestinationQueueMessage } from "@axel/shared";
-import { parsePulledMessageBody } from "../src/pulled-message.ts";
+import {
+  parsePulledMessageBody,
+  type PulledMessage,
+} from "../src/pulled-message.ts";
 
 const MESSAGE: DestinationQueueMessage = {
   event_id: "evt_1",
@@ -36,6 +39,20 @@ describe("parsePulledMessageBody", () => {
     ).toEqual(MESSAGE);
   });
 
+  it("parses the plain JSON string observed in Cloudflare HTTP Pull responses", () => {
+    const productionResponse: PulledMessage = {
+      body: JSON.stringify(MESSAGE),
+      lease_id: "lease_1",
+      id: "message_1",
+      metadata: {
+        CF_QUEUE_NAME: "axel-delivery-native",
+        "CF-Content-Type": "json",
+      },
+    };
+
+    expect(parsePulledMessageBody(productionResponse)).toEqual(MESSAGE);
+  });
+
   it("decodes a bytes message containing Axel JSON", () => {
     expect(
       parsePulledMessageBody({
@@ -54,7 +71,7 @@ describe("parsePulledMessageBody", () => {
     expect(parsePulledMessageBody({ body: MESSAGE })).toEqual(MESSAGE);
   });
 
-  it("rejects malformed base64, non-object JSON, and unsupported content types", () => {
+  it("rejects malformed and non-object JSON bodies", () => {
     expect(
       parsePulledMessageBody({
         body: "not base64!",
@@ -65,6 +82,33 @@ describe("parsePulledMessageBody", () => {
       parsePulledMessageBody({
         body: Buffer.from('"not an object"').toString("base64"),
         metadata: { "CF-Content-Type": "json" },
+      }),
+    ).toBeNull();
+    expect(
+      parsePulledMessageBody({
+        body: "{not json}",
+        metadata: { "CF-Content-Type": "json" },
+      }),
+    ).toBeNull();
+    expect(
+      parsePulledMessageBody({
+        body: JSON.stringify([MESSAGE]),
+        metadata: { "CF-Content-Type": "json" },
+      }),
+    ).toBeNull();
+    expect(
+      parsePulledMessageBody({
+        body: MESSAGE,
+        metadata: { "CF-Content-Type": "json" },
+      }),
+    ).toBeNull();
+  });
+
+  it("keeps bytes and v8 bodies fail-closed", () => {
+    expect(
+      parsePulledMessageBody({
+        body: JSON.stringify(MESSAGE),
+        metadata: { "CF-Content-Type": "bytes" },
       }),
     ).toBeNull();
     expect(
