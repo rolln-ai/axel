@@ -80,9 +80,9 @@ retention or indexed erasure is required.
 - A Cloudflare account with a Workers subdomain enabled
 - A provisioning-only Cloudflare API token that can edit Workers scripts,
   Queues, and R2 storage
-- A separate, account-restricted runtime Cloudflare token that can pull,
-  acknowledge, and enqueue Queue messages and read, write, and delete R2
-  objects
+- A separate, account-restricted runtime Cloudflare token with Queues Edit and
+  Workers R2 Storage Write. The latter is currently account-wide because the
+  delivery service uses Cloudflare's REST object API.
 - A public HTTPS URL that reaches this host
 - A domain whose DNS points at the host if Caddy will obtain the certificate
 
@@ -121,9 +121,14 @@ container.
 
    The provisioning token deploys Workers and creates the installation's
    Queue and R2 bucket. It never enters an application container. The separate
-   account-restricted runtime token must be able to pull, acknowledge, and
-   enqueue on that Queue and read, write, and delete objects in that R2 bucket.
-   It does not need Workers Scripts edit or resource-creation permission.
+   account-restricted runtime token needs Queues Edit and Workers R2 Storage
+   Write. It does not need Workers Scripts, Workers Routes, zone, or token-
+   management permissions. Cloudflare's REST API does not accept the bucket-
+   scoped Object Read & Write permission: Workers R2 Storage Write also permits
+   bucket management across the selected account. If that blast radius is not
+   acceptable, use a dedicated Cloudflare account or migrate the delivery
+   runtime to the S3-compatible API before deploying; its credentials can be
+   limited to this bucket.
    The helper rejects reuse of the provisioning token and verifies Queue edit
    plus an isolated R2 write/read/delete round trip before starting the stack;
    it never leases a customer message for this check.
@@ -240,9 +245,11 @@ connection explicitly uses `sslmode=disable` inside the host network.
   requires inspecting and explicitly adopting existing Cloudflare resources.
 - Rotate the Cloudflare token and internal shared secrets after suspected
   exposure.
-- Keep the required `CLOUDFLARE_RUNTIME_API_TOKEN` limited to Queue and R2
-  runtime operations so a dashboard or delivery compromise does not also
-  expose the Worker-deployment credential.
+- Keep the required `CLOUDFLARE_RUNTIME_API_TOKEN` limited to Queues Edit and
+  Workers R2 Storage Write so a dashboard or delivery compromise does not also
+  expose the Worker-deployment credential. Treat the account-wide R2 bucket-
+  management capability as residual risk unless the runtime is moved to
+  bucket-scoped S3-compatible credentials or a dedicated Cloudflare account.
 - Monitor Queue backlog and the `/health` endpoint.
 - Confirm the R2 lifecycle rule after manual bucket changes.
 - Add ClickHouse if searchable delivery history is required.

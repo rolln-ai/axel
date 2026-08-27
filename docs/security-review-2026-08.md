@@ -172,11 +172,16 @@ The self-host profile supports a separate `CLOUDFLARE_RUNTIME_API_TOKEN`, so the
 dashboard and delivery service do not need the Worker Scripts edit permission
 used during provisioning. The runtime token still needs queue and R2 access and
 therefore remains broader than Axel's workspace-level authorization boundaries.
+The current Cloudflare REST object API requires account-scoped Workers R2
+Storage Write, which also permits bucket management; Cloudflare's bucket-scoped
+Object Read & Write credentials apply only to the S3-compatible API.
 
 Prefer narrowly scoped R2 credentials or an authenticated workspace-scoped raw
-payload service, encrypt cached source secrets with a separate runtime key, and
-replace global admin credentials with service bindings or independently scoped
-credentials where the platform permits it.
+payload service. Reaching bucket-only scope requires migrating the delivery
+runtime to S3-compatible authentication or isolating Axel in a dedicated
+Cloudflare account. Encrypt cached source secrets with a separate runtime key,
+and replace global admin credentials with service bindings or independently
+scoped credentials where the platform permits it.
 
 ### Medium: Cloudflare secret rotation is sequential
 

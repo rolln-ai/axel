@@ -153,6 +153,7 @@ test("Vercel production is staged, smoked, then promoted", () => {
     /AXEL_CANARY_RECEIPT_URL: \$\{\{ steps\.dashboard\.outputs\.url \}\}\/api\/ops\/delivery-canary\/receipt\?probe=\{probe_id\}/,
   );
   const stagedSmoke = workflow.slice(smoke, promote);
+  assert.match(stagedSmoke, /AXEL_REQUIRE_OPERATIONAL_STATUS: "1"/);
   assert.match(
     stagedSmoke,
     /AXEL_CANARY_RECEIPT_AUTH_HEADER: \$\{\{ secrets\.AXEL_CANARY_RECEIPT_AUTH_HEADER \}\}/,
