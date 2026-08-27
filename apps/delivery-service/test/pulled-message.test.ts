@@ -116,13 +116,59 @@ describe("parsePulledBatchResponse", () => {
     expect(parsePulledBatchResponse(source)).toEqual([fixture("plain")]);
   });
 
+  it("accepts Cloudflare's schema-permitted attempt and opaque metadata variants", () => {
+    const body = JSON.stringify(MESSAGE);
+    const parsed = parsePulledBatchResponse({
+      result: {
+        messages: [
+          {
+            id: "message-zero-attempt",
+            lease_id: "lease-zero-attempt",
+            attempts: 0,
+            timestamp_ms: 0,
+            body,
+            metadata: null,
+          },
+          {
+            id: "message-opaque-metadata",
+            lease_id: "lease-opaque-metadata",
+            body,
+            metadata: "provider-owned-metadata",
+          },
+        ],
+      },
+    });
+
+    expect(parsed).toEqual([
+      {
+        id: "message-zero-attempt",
+        lease_id: "lease-zero-attempt",
+        attempts: 0,
+        timestamp_ms: 0,
+        body,
+      },
+      {
+        id: "message-opaque-metadata",
+        lease_id: "lease-opaque-metadata",
+        body,
+      },
+    ]);
+    expect(parsed.map(parsePulledMessage)).toEqual([
+      { ok: true, message: MESSAGE, wireVersion: 1 },
+      { ok: true, message: MESSAGE, wireVersion: 1 },
+    ]);
+  });
+
   it.each([
     null,
     { success: false, errors: [{ message: "credential must never reach logs" }] },
     { errors: [{ message: "payload must never reach logs" }], result: { messages: [] } },
     { result: { messages: "not-an-array" } },
     { result: { messages: [{ id: "message", body: "{}" }] } },
-    { result: { messages: [{ id: "message", lease_id: "lease", attempts: 0, body: "{}" }] } },
+    { result: { messages: [{ lease_id: "lease", body: "{}" }] } },
+    { result: { messages: [{ id: "message", lease_id: "lease" }] } },
+    { result: { messages: [{ id: "message", lease_id: "lease", attempts: -1, body: "{}" }] } },
+    { result: { messages: [{ id: "message", lease_id: "lease", attempts: 1.5, body: "{}" }] } },
   ])("rejects an invalid pull response without exposing its body", (candidate) => {
     expect(() => parsePulledBatchResponse(candidate)).toThrow("cloudflare_pull_response_contract_invalid");
   });

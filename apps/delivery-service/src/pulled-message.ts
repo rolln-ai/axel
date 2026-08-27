@@ -195,14 +195,17 @@ export function parsePulledBatchResponse(value: unknown): PulledMessage[] {
       || !validNonEmptyString(candidate.id, 256)
       || !validNonEmptyString(candidate.lease_id, 8_192)
       || (candidate.attempts !== undefined
-        && (!Number.isSafeInteger(candidate.attempts) || (candidate.attempts as number) < 1))
+        && (!Number.isSafeInteger(candidate.attempts) || (candidate.attempts as number) < 0))
       || (candidate.timestamp_ms !== undefined
         && (!Number.isFinite(candidate.timestamp_ms) || (candidate.timestamp_ms as number) < 0))
-      || (candidate.metadata !== undefined && !isRecord(candidate.metadata))
     ) {
       throw new PulledBatchContractError();
     }
 
+    // Cloudflare's HTTP Pull schema leaves metadata unconstrained and does not
+    // give attempts a positive minimum. Only project the two string metadata
+    // fields Axel understands; downstream validation still rejects any body
+    // that is not an exact v0/v1 destination message.
     const metadata = isRecord(candidate.metadata)
       ? {
           ...(typeof candidate.metadata.CF_QUEUE_NAME === "string"
