@@ -161,17 +161,23 @@ writes or transaction keys when available.
 
 ### Medium: broad infrastructure credentials
 
-Dashboard and delivery-service use a Cloudflare account token that can read,
-overwrite, and delete raw objects and mutate Queue consumers. Source
-configuration contains decrypted signing material at the edge, and internal
-edge APIs use deployment-wide shared secrets. A runtime credential compromise
-therefore has a wider tenant blast radius than the application authorization
-model.
+The hosted dashboard uses a dedicated `CLOUDFLARE_R2_API_TOKEN`; the protected
+Vercel deploy proves isolated R2 read/write/delete and rejects any token that
+can list Queues or Worker scripts. Delivery uses a different runtime token for
+Queue and R2 operations, while the Worker-deployment/provisioning token remains
+in protected workflows. Source configuration still contains decrypted signing
+material at the edge, and internal edge APIs use deployment-wide shared
+secrets. A runtime credential compromise therefore has a wider tenant blast
+radius than the application authorization model.
 
-The self-host profile supports a separate `CLOUDFLARE_RUNTIME_API_TOKEN`, so the
-dashboard and delivery service do not need the Worker Scripts edit permission
-used during provisioning. The runtime token still needs queue and R2 access and
-therefore remains broader than Axel's workspace-level authorization boundaries.
+The self-host profile requires a separate `CLOUDFLARE_RUNTIME_API_TOKEN`; its
+startup verifier proves Queue/R2 operations and rejects Worker Scripts access,
+so the provisioning permission cannot silently enter application containers.
+For simpler installation, that profile
+maps the same Queue/R2 runtime value to isolated dashboard and delivery
+containers; operators can split those credentials further in a customized
+deployment. The runtime still remains broader than Axel's workspace-level
+authorization boundaries.
 The current Cloudflare REST object API requires account-scoped Workers R2
 Storage Write, which also permits bucket management; Cloudflare's bucket-scoped
 Object Read & Write credentials apply only to the S3-compatible API.

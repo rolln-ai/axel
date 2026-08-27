@@ -99,7 +99,7 @@ export function webhookAlertSink(options: WebhookAlertSinkOptions): AlertSink {
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), timeoutMs);
       try {
-        await fetchImpl(options.url, {
+        const response = await fetchImpl(options.url, {
           method: "POST",
           redirect: "manual",
           signal: ac.signal,
@@ -112,6 +112,9 @@ export function webhookAlertSink(options: WebhookAlertSinkOptions): AlertSink {
             event,
           }),
         });
+        if (!response.ok) {
+          throw new Error(`alert_webhook_http_${response.status}`);
+        }
       } catch (err) {
         // Logged-and-swallowed: alerting must never page the service itself.
         console.error("[alert webhook] post failed", err);

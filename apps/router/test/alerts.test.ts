@@ -206,4 +206,34 @@ describe("alert sinks", () => {
     expect(errSpy).toHaveBeenCalled();
     errSpy.mockRestore();
   });
+
+  it("webhook sink reports non-success responses without reading receiver bodies", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let bodyRead = false;
+    const response = new Response("receiver-secret-never-log", { status: 503 });
+    Object.defineProperty(response, "text", {
+      value: async () => {
+        bodyRead = true;
+        return "receiver-secret-never-log";
+      },
+    });
+    const fakeFetch: typeof fetch = (async () => response) as typeof fetch;
+
+    await expect(webhookAlertSink({ url: "https://x", fetchImpl: fakeFetch }).notify({
+      severity: "critical",
+      rule: "queue_lag",
+      summary: "lagged",
+      source: "delivery",
+      details: { backlog: 12 },
+      occurred_at: new Date().toISOString(),
+    })).resolves.toBeUndefined();
+
+    expect(bodyRead).toBe(false);
+    expect(errSpy).toHaveBeenCalledWith(
+      "[alert webhook] post failed",
+      expect.objectContaining({ message: "alert_webhook_http_503" }),
+    );
+    expect(JSON.stringify(errSpy.mock.calls)).not.toContain("receiver-secret-never-log");
+    errSpy.mockRestore();
+  });
 });

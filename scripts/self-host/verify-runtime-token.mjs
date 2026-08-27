@@ -30,9 +30,9 @@ function findOneHttpPullConsumer(consumers) {
   return matches[0];
 }
 
-async function fetchBounded(fetchImpl, input, init) {
+async function fetchBounded(fetchImpl, input, init, timeoutMs) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetchImpl(input, { ...init, redirect: "error", signal: controller.signal });
   } catch {
@@ -42,32 +42,57 @@ async function fetchBounded(fetchImpl, input, init) {
   }
 }
 
-async function queueJson(fetchImpl, url, token, init = {}) {
+async function consumeBodyBounded(readBody, timeoutMs, errorCode) {
+  let timeout;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(readBody),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(errorCode)), timeoutMs);
+      }),
+    ]);
+  } catch {
+    throw new Error(errorCode);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function queueJson(fetchImpl, url, token, timeoutMs, init = {}) {
   const response = await fetchBounded(fetchImpl, url, {
     ...init,
     headers: {
       authorization: `Bearer ${token}`,
       ...(init.body ? { "content-type": "application/json" } : {}),
     },
-  });
+  }, timeoutMs);
   if (!response.ok) throw new Error(`cloudflare_runtime_queue_http_${response.status}`);
-  let body;
-  try {
-    body = await response.json();
-  } catch {
-    throw new Error("cloudflare_runtime_queue_response_invalid");
-  }
+  const body = await consumeBodyBounded(
+    () => response.json(),
+    timeoutMs,
+    "cloudflare_runtime_queue_response_invalid",
+  );
   if (!body || body.success !== true) throw new Error("cloudflare_runtime_queue_response_unsuccessful");
   return body.result;
 }
 
-async function objectRequest(fetchImpl, url, token, init) {
+async function objectRequest(fetchImpl, url, token, init, timeoutMs) {
   const response = await fetchBounded(fetchImpl, url, {
     ...init,
     headers: { authorization: `Bearer ${token}`, ...(init.headers ?? {}) },
-  });
+  }, timeoutMs);
   if (!response.ok) throw new Error(`cloudflare_runtime_r2_http_${response.status}`);
   return response;
+}
+
+async function requireDenied(fetchImpl, url, token, capability, timeoutMs) {
+  const response = await fetchBounded(fetchImpl, url, {
+    method: "GET",
+    headers: { authorization: `Bearer ${token}` },
+  }, timeoutMs);
+  if (response.status === 401 || response.status === 403) return;
+  if (response.ok) throw new Error(`cloudflare_runtime_token_${capability}_permission_present`);
+  throw new Error(`cloudflare_runtime_${capability}_denial_probe_http_${response.status}`);
 }
 
 /**
@@ -81,6 +106,7 @@ export async function verifyRuntimeToken(options = {}) {
   const fetchImpl = options.fetchImpl ?? fetch;
   const log = options.log ?? console.log;
   const apiBase = options.apiBase ?? DEFAULT_API_BASE;
+  const requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
 
   const accountId = resourceId(requiredEnv(env, "CLOUDFLARE_ACCOUNT_ID"), "cloudflare_account_id");
   let queueId = env.DELIVERY_QUEUE_ID
@@ -99,6 +125,7 @@ export async function verifyRuntimeToken(options = {}) {
       fetchImpl,
       `${apiBase}/accounts/${accountId}/queues?per_page=100`,
       runtimeToken,
+      requestTimeoutMs,
     );
     if (!Array.isArray(queues)) throw new Error("cloudflare_runtime_queues_response_invalid");
     const matches = queues.filter((queue) => queue?.queue_name === queueName);
@@ -109,13 +136,13 @@ export async function verifyRuntimeToken(options = {}) {
   const consumersUrl = `${apiBase}/accounts/${accountId}/queues/${queueId}/consumers`;
   let primaryError = null;
   let cleanupError = null;
-  let objectCreated = false;
+  let objectCleanupRequired = false;
   const objectKey = `_axel/runtime-token-probes/${randomUUID()}`;
   const objectUrl = `${apiBase}/accounts/${accountId}/r2/buckets/${encodeURIComponent(bucket)}/objects/${objectKey}`;
 
   try {
     const current = findOneHttpPullConsumer(
-      await queueJson(fetchImpl, consumersUrl, runtimeToken),
+      await queueJson(fetchImpl, consumersUrl, runtimeToken, requestTimeoutMs),
     );
     const consumerId = resourceId(current.consumer_id, "delivery_consumer_id");
     const expected = {
@@ -123,12 +150,18 @@ export async function verifyRuntimeToken(options = {}) {
       dead_letter_queue: current.dead_letter_queue,
       settings: current.settings,
     };
-    await queueJson(fetchImpl, `${consumersUrl}/${consumerId}`, runtimeToken, {
-      method: "PUT",
-      body: JSON.stringify(expected),
-    });
+    await queueJson(
+      fetchImpl,
+      `${consumersUrl}/${consumerId}`,
+      runtimeToken,
+      requestTimeoutMs,
+      {
+        method: "PUT",
+        body: JSON.stringify(expected),
+      },
+    );
     const readback = findOneHttpPullConsumer(
-      await queueJson(fetchImpl, consumersUrl, runtimeToken),
+      await queueJson(fetchImpl, consumersUrl, runtimeToken, requestTimeoutMs),
     );
     const settingsMatch = expected.settings
       && Object.entries(expected.settings).every(([key, value]) => readback.settings?.[key] === value);
@@ -139,20 +172,47 @@ export async function verifyRuntimeToken(options = {}) {
       throw new Error("cloudflare_runtime_queue_consumer_readback_failed");
     }
 
+    // A timed-out PUT may still have committed provider-side. Always attempt
+    // deletion after the request begins so an ambiguous response cannot leave
+    // a probe object behind.
+    objectCleanupRequired = true;
     await objectRequest(fetchImpl, objectUrl, runtimeToken, {
       method: "PUT",
       headers: { "content-type": "text/plain" },
       body: PROBE_BODY,
-    });
-    objectCreated = true;
-    const read = await objectRequest(fetchImpl, objectUrl, runtimeToken, { method: "GET" });
-    if (await read.text() !== PROBE_BODY) throw new Error("cloudflare_runtime_r2_probe_mismatch");
+    }, requestTimeoutMs);
+    const read = await objectRequest(
+      fetchImpl,
+      objectUrl,
+      runtimeToken,
+      { method: "GET" },
+      requestTimeoutMs,
+    );
+    const probeBody = await consumeBodyBounded(
+      () => read.text(),
+      requestTimeoutMs,
+      "cloudflare_runtime_r2_probe_read_failed",
+    );
+    if (probeBody !== PROBE_BODY) throw new Error("cloudflare_runtime_r2_probe_mismatch");
+    await requireDenied(
+      fetchImpl,
+      `${apiBase}/accounts/${accountId}/workers/scripts`,
+      runtimeToken,
+      "workers_scripts",
+      requestTimeoutMs,
+    );
   } catch (error) {
     primaryError = error;
   } finally {
-    if (objectCreated) {
+    if (objectCleanupRequired) {
       try {
-        await objectRequest(fetchImpl, objectUrl, runtimeToken, { method: "DELETE" });
+        await objectRequest(
+          fetchImpl,
+          objectUrl,
+          runtimeToken,
+          { method: "DELETE" },
+          requestTimeoutMs,
+        );
       } catch (error) {
         cleanupError ??= error;
       }

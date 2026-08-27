@@ -561,7 +561,7 @@ async function ReplayPanelLoader({
     return (
       <EmptyState
         title="Raw bytes unavailable"
-        body="The R2 payload for this event couldn't be loaded — replay snippets need the original bytes. This usually means CLOUDFLARE_API_TOKEN/CLOUDFLARE_ACCOUNT_ID aren't set on the dashboard, or the payload exceeds the 5 MB cap."
+        body="The R2 payload for this event couldn't be loaded — replay snippets need the original bytes. This usually means CLOUDFLARE_R2_API_TOKEN/CLOUDFLARE_ACCOUNT_ID aren't set on the dashboard, or the payload exceeds the 5 MB cap."
       />
     );
   }

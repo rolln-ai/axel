@@ -36,7 +36,33 @@ test("standalone production smoke is an explicit protected operation", () => {
   assert.match(smoke, /^  group: production-deploy$/m);
   assert.match(smoke, /^    environment: Production$/m);
   assert.match(smoke, /github\.ref == 'refs\/heads\/main'/);
+  assert.match(
+    smoke,
+    /AXEL_SOAK_CANDIDATE_SHA: \$\{\{ vars\.AXEL_SOAK_CANDIDATE_SHA \}\}/,
+  );
+  assert.match(smoke, /test "\$\{AXEL_SOAK_CANDIDATE_SHA\}" = "\$\{GITHUB_SHA\}"/);
+  assert.ok(
+    smoke.indexOf("Require the pinned soak candidate") < smoke.indexOf("bash scripts/smoke.sh"),
+  );
   assert.match(smoke, /bash scripts\/smoke\.sh/);
+
+  assert.match(smoke, /^      test_queue_lag_alert:$/m);
+  assert.match(smoke, /^        default: false$/m);
+  assert.match(smoke, /^        type: boolean$/m);
+  const alertProof = smoke.slice(smoke.indexOf("Prove critical Queue-lag alert transport"));
+  assert.match(
+    alertProof,
+    /github\.event_name == 'workflow_dispatch' && inputs\.test_queue_lag_alert/,
+  );
+  assert.match(alertProof, /OPS_TEST_TOKEN: \$\{\{ secrets\.OPS_TEST_TOKEN \}\}/);
+  assert.match(
+    alertProof,
+    /VERCEL_AUTOMATION_BYPASS_SECRET_DASHBOARD: \$\{\{ secrets\.VERCEL_AUTOMATION_BYPASS_SECRET_DASHBOARD \}\}/,
+  );
+  assert.match(alertProof, /sentry-test\?mode=queue-lag-critical/);
+  assert.match(alertProof, /--fail-with-body --silent --show-error/);
+  assert.match(alertProof, /'\{"ok":true,"probe":"queue_lag","severity":"critical"\}'/);
+  assert.doesNotMatch(alertProof, /echo[^\n]*probe_response/);
 });
 
 test("Postgres workflows share the production deployment lock", () => {
@@ -141,6 +167,7 @@ test("Vercel production is staged, smoked, then promoted", () => {
   assert.match(deployHelper, /export VERCEL_ENV="\$environment"/);
   assert.match(deployHelper, /export CI=1/);
   assert.match(deployHelper, /export VERCEL_GIT_COMMIT_SHA="\$SENTRY_RELEASE"/);
+  assert.match(deployHelper, /verify-dashboard-r2-token\.mjs/);
   assert.match(deployHelper, /generatedHost/);
   const dashboardStage = workflow.slice(
     workflow.indexOf("Stage dashboard at the reviewed commit"),
@@ -181,6 +208,29 @@ test("Vercel production is staged, smoked, then promoted", () => {
 test("scheduled operations do not share the reviewer-gated deploy environment", () => {
   assert.match(read(".github/workflows/delivery-canary.yml"), /environment: Monitoring/);
   assert.match(read(".github/workflows/clickhouse-backup.yml"), /environment: Backup/);
+});
+
+test("delivery canary uses an off-minute schedule and the pinned soak candidate", () => {
+  const workflow = read(".github/workflows/delivery-canary.yml");
+  assert.match(workflow, /cron: "7,22,37,52 \* \* \* \*"/);
+  assert.match(workflow, /^  queue: max$/m);
+  assert.match(workflow, /^  cancel-in-progress: false$/m);
+  assert.match(workflow, /AXEL_SOAK_CANDIDATE_SHA/);
+  assert.match(workflow, /test "\$\{AXEL_SOAK_CANDIDATE_SHA\}" = "\$\{GITHUB_SHA\}"/);
+  assert.match(workflow, /production-delivery-canary '' '7,22,37,52 \* \* \* \*' 5 10/);
+});
+
+test("protected production smokes require the Sentry transport probe", () => {
+  for (const file of [
+    ".github/workflows/deploy-cloudflare.yml",
+    ".github/workflows/deploy-render.yml",
+    ".github/workflows/deploy-vercel.yml",
+    ".github/workflows/smoke.yml",
+    ".github/workflows/sync-cloudflare-secrets.yml",
+  ]) {
+    assert.match(read(file), /AXEL_REQUIRE_SENTRY_TEST: "1"/, file);
+  }
+  assert.match(read("scripts/smoke.sh"), /Sentry transport test is required/);
 });
 
 test("Sentry cron check-ins surface rejected HTTP responses without response bodies", () => {

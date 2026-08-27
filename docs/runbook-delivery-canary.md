@@ -239,6 +239,27 @@ the workflow does not read them.
 
 ## First production rollout
 
+Before the rollout, create two account-restricted Cloudflare runtime tokens:
+
+- Delivery: Queues Edit plus Workers R2 Storage Write.
+- Dashboard: Workers R2 Storage Write only. Omit Queues, Worker Scripts,
+  Worker Routes, zones, and token-management permissions.
+
+Cloudflare's REST object API requires account-wide Workers R2 Storage Write,
+which also permits bucket management. Use a dedicated Cloudflare account if
+that residual scope is unacceptable. Do not reuse the Worker-deployment token.
+Install the delivery value as GitHub secret `CLOUDFLARE_QUEUE_API_TOKEN` and the
+dashboard value as Vercel Production variable `CLOUDFLARE_R2_API_TOKEN`, both
+through standard input. Remove the legacy dashboard Production variable
+`CLOUDFLARE_API_TOKEN` before building the new candidate. Existing Vercel
+deployments keep their captured environment until promotion, so this sequence
+does not change the live deployment in place.
+
+The production Vercel helper fails before build unless the new dashboard token
+can complete an isolated R2 PUT/GET/DELETE, cannot list Queues or Worker
+scripts, and the legacy variable is absent. No probe prints a credential,
+provider response body, or object body.
+
 After the standalone migration reaches terminal success, run the provisioner,
 install the dashboard receipt token, and configure both GitHub environments.
 Then dispatch these workflows strictly in order:
@@ -283,8 +304,16 @@ environment secret; an existing repository secret of the same name is also
 available as a fallback. A missing DSN does not fail the canary—the Sentry
 steps skip—so confirm this separately instead of inferring it from a green run.
 
-After the complete rollout sequence succeeds, dispatch the first canary and
-wait for terminal success:
+After the complete rollout sequence succeeds, pin the merged candidate SHA as
+a repository variable. Every manual and scheduled canary fails if `main` drifts
+from this value:
+
+```sh
+gh variable set AXEL_SOAK_CANDIDATE_SHA --repo rolln-ai/axel \
+  --body '<full-40-character-candidate-sha>'
+```
+
+Dispatch the first canary and wait for terminal success:
 
 ```sh
 gh workflow run delivery-canary.yml --ref main
@@ -293,15 +322,43 @@ gh run list --workflow delivery-canary.yml --branch main \
 gh run watch <canary-run-id> --exit-status
 ```
 
-In Sentry, verify that the `production-delivery-canary` cron monitor now
-exists, the manual run recorded a successful check-in, and its missed/error
-check-in alert reaches the intended on-call route. The monitor should show a
-15-minute schedule, a five-minute maximum runtime, and a 30-minute check-in
-margin. Keep both the GitHub scheduled workflow and the Sentry monitor under
-observation for the full 72 hours.
+In Sentry, verify that the `production-delivery-canary` cron monitor exists and
+that the manual run recorded a successful check-in. The monitor must show the
+UTC `7,22,37,52 * * * *` schedule, a five-minute maximum runtime, and a
+10-minute check-in margin.
 
-If Sentry monitor creation or alert delivery cannot be proved before the
-window starts, assign a named on-call owner to monitor the Production Delivery
-Canary runs in GitHub Actions for failures and missing scheduled runs throughout
-the 72 hours. Sentry remains the target state; Actions-only monitoring is an
-explicit temporary fallback, not silent acceptance of missing alerts.
+Then send one controlled critical queue-lag alert through the authenticated
+dashboard route. Read both credentials from the operator environment. Do not
+put either value in the URL:
+
+```sh
+curl --fail-with-body --silent --show-error --request POST \
+  --header "x-axel-ops-token: ${AXEL_OPS_TEST_TOKEN}" \
+  --header "x-vercel-protection-bypass: ${VERCEL_AUTOMATION_BYPASS_SECRET_DASHBOARD}" \
+  'https://app.axelapp.ai/api/ops/sentry-test?mode=queue-lag-critical'
+```
+
+The response must be `{"ok":true,"probe":"queue_lag","severity":"critical"}`.
+The route sends only fixed labels and uses the same service tag and
+severity-specific Sentry fingerprint as a live delivery alert. It also marks
+the event `controlled_probe=true`. A non-2xx Sentry response or transport
+timeout makes the route fail.
+
+Before the first probe, confirm that no unresolved Issue with the fixed message
+`operational_alert:delivery:queue_lag:critical` already exists. Ask the named
+on-call recipient to confirm the actual page or email arrived, resolve the
+controlled Issue, and verify that Sentry reports it resolved. Then send the
+same probe a second time and require a second human-confirmed notification as a
+regression. Resolve it again and verify that the Issue is resolved before T0.
+This proves that a prior warning cannot consume the critical Issue and that a
+later critical recurrence notifies instead of silently grouping into the
+probe. A Sentry event, workflow success, or configured notification rule is
+not delivery proof. Do not start T0 without both confirmations and the final
+resolved state.
+
+Do not start T0 until two consecutive `schedule` event runs succeed at the
+pinned SHA after the manual proof. GitHub schedules are best-effort; any
+missing, replaced, canceled, wrong-SHA, or non-success slot during the window
+invalidates the 288-slot evidence and restarts the soak after investigation.
+Actions-only monitoring is not an accepted substitute for the proven Sentry
+route. Keep both systems under observation for the full 72 hours.

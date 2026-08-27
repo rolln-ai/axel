@@ -60,6 +60,9 @@ if [[ -n "${AXEL_OPS_TEST_TOKEN:-}" ]]; then
     exit 1
   fi
   echo "ok sentry-test: ${ops_status}"
+elif [[ "${AXEL_REQUIRE_SENTRY_TEST:-0}" == "1" ]]; then
+  echo "Smoke check failed: Sentry transport test is required but AXEL_OPS_TEST_TOKEN is unset" >&2
+  exit 1
 fi
 
 ingest_status="$(curl "${curl_network_args[@]}" -sS -o /tmp/axel-smoke-ingest -w "%{http_code}" -X POST "${ingest_url%/}/in/__smoke__")"

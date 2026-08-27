@@ -284,7 +284,7 @@ export async function executeErasure(
     const r2 = await deleteR2Objects(r2Keys, { env, ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}) });
     storeResults.push(
       r2.skipped
-        ? { store: "r2:axel-events-raw", status: "skipped", count: 0, detail: "CLOUDFLARE_API_TOKEN/ACCOUNT_ID not configured" }
+        ? { store: "r2:axel-events-raw", status: "skipped", count: 0, detail: "CLOUDFLARE_R2_API_TOKEN/ACCOUNT_ID not configured" }
         : { store: "r2:axel-events-raw", status: "deleted", count: r2.deleted, detail: `${plan.r2.knownKeys.length} events/ + ${spillKeys.length} queue-spill/` },
     );
     mutationsIssued += r2.deleted;

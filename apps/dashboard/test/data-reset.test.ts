@@ -27,7 +27,7 @@ describe("data reset", () => {
       fetchImpl,
       env: {
         CLOUDFLARE_ACCOUNT_ID: "acct",
-        CLOUDFLARE_API_TOKEN: "token",
+        CLOUDFLARE_R2_API_TOKEN: "token",
         RAW_PAYLOAD_BUCKET: "selfhost-raw",
       },
     })).resolves.toEqual({ deleted: 1, skipped: false });
@@ -44,7 +44,7 @@ describe("data reset", () => {
       env: {
         AXEL_DEPLOYMENT_MODE: "self-hosted",
         CLOUDFLARE_ACCOUNT_ID: "acct",
-        CLOUDFLARE_API_TOKEN: "token",
+        CLOUDFLARE_R2_API_TOKEN: "token",
       },
     })).rejects.toThrow(/RAW_PAYLOAD_BUCKET is required/);
   });
@@ -235,7 +235,7 @@ describe("data reset", () => {
       deps: {
         clickhouse,
         fetchImpl,
-        env: { CLOUDFLARE_ACCOUNT_ID: "account", CLOUDFLARE_API_TOKEN: "token" },
+        env: { CLOUDFLARE_ACCOUNT_ID: "account", CLOUDFLARE_R2_API_TOKEN: "token" },
       },
     })).rejects.toThrow("r2_bulk_purge_required");
     expect(fetchImpl).not.toHaveBeenCalled();
@@ -267,7 +267,7 @@ describe("data reset", () => {
         fetchImpl,
         env: {
           CLOUDFLARE_ACCOUNT_ID: "account",
-          CLOUDFLARE_API_TOKEN: "token",
+          CLOUDFLARE_R2_API_TOKEN: "token",
         },
       },
     });
@@ -305,7 +305,7 @@ describe("data reset", () => {
         fetchImpl,
         env: {
           CLOUDFLARE_ACCOUNT_ID: "account",
-          CLOUDFLARE_API_TOKEN: "token",
+          CLOUDFLARE_R2_API_TOKEN: "token",
         },
       },
     });

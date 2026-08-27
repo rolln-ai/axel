@@ -149,7 +149,7 @@ export async function processErasureRequest(
   // store_results + manifest so the audit records exactly what WAS deleted (a
   // bare 'failed' with no detail would lose that record). Otherwise `partial`
   // (the finder never claims completeness, so never `done`).
-  // A SKIPPED destructive store (e.g. R2 with no CLOUDFLARE_API_TOKEN) means PII
+  // A SKIPPED destructive store (e.g. R2 with no CLOUDFLARE_R2_API_TOKEN) means PII
   // was NOT erased — treat it as a failure, not silently as 'partial' (audit: a
   // skipped R2 store masked un-erased raw payloads). out_of_scope is legitimately
   // not-in-scope, so it is NOT counted as incomplete.

@@ -19,7 +19,7 @@ export { GENERIC_SAMPLE, TEST_PAYLOADS };
  * success; `null` on creds-missing / non-2xx / network error.
  *
  * Uses the Cloudflare R2 HTTP API (account-scoped). The dashboard server
- * runtime needs CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID to call it.
+ * runtime needs CLOUDFLARE_R2_API_TOKEN + CLOUDFLARE_ACCOUNT_ID to call it.
  *
  * Why null instead of GENERIC_SAMPLE on failure: substituting a sample
  * payload poisoned the Data Contracts inference pipeline — every failed
@@ -41,7 +41,7 @@ export async function fetchPayloadForR2Key(
   options: FetchOptions = {},
 ): Promise<unknown | null> {
   const env = options.env ?? process.env;
-  const token = env.CLOUDFLARE_API_TOKEN;
+  const token = env.CLOUDFLARE_R2_API_TOKEN;
   const accountId = env.CLOUDFLARE_ACCOUNT_ID;
   const bucket = options.bucket ?? resolveRawPayloadBucket(env);
   if (!token || !accountId) return null;
@@ -79,7 +79,7 @@ export async function fetchRawPayloadBase64ForR2Key(
   options: FetchOptions = {},
 ): Promise<string | null> {
   const env = options.env ?? process.env;
-  const token = env.CLOUDFLARE_API_TOKEN;
+  const token = env.CLOUDFLARE_R2_API_TOKEN;
   const accountId = env.CLOUDFLARE_ACCOUNT_ID;
   const bucket = options.bucket ?? resolveRawPayloadBucket(env);
   if (!token || !accountId) return null;

@@ -100,10 +100,15 @@ if (!hasPort(published, 80, "tcp")
   || !hasPort(published, 443, "udp")) {
   throw new Error("public Compose override does not publish HTTP, HTTPS, and HTTP/3 ports");
 }
+if (local.services.dashboard.environment.CLOUDFLARE_R2_API_TOKEN !== "runtime-token"
+  || local.services.dashboard.environment.CLOUDFLARE_API_TOKEN !== undefined) {
+  throw new Error("dashboard did not receive only the R2-named runtime Cloudflare token");
+}
+if (local.services.delivery.environment.CLOUDFLARE_API_TOKEN !== "runtime-token"
+  || local.services.delivery.environment.CLOUDFLARE_R2_API_TOKEN !== undefined) {
+  throw new Error("delivery did not receive only the Queue/R2 runtime Cloudflare token");
+}
 for (const service of ["dashboard", "delivery"]) {
-  if (local.services[service].environment.CLOUDFLARE_API_TOKEN !== "runtime-token") {
-    throw new Error(`${service} did not receive the narrower runtime Cloudflare token`);
-  }
   if (local.services[service].environment.AXEL_SELF_HOST_PROFILE !== "small") {
     throw new Error(`${service} does not advertise the small-profile capability limits`);
   }

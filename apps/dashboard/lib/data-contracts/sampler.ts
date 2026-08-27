@@ -95,7 +95,7 @@ export interface SamplerOptions {
   untypedOnly?: boolean;
   /**
    * Whether R2 credentials are present. Defaults to checking
-   * CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID in process.env. Only used
+   * CLOUDFLARE_R2_API_TOKEN + CLOUDFLARE_ACCOUNT_ID in process.env. Only used
    * to decide how to treat an "every payload unreadable" result: a genuine
    * creds gap escalates (throw), whereas creds-present-but-unreadable is
    * treated as benign retention-swept payloads (return []). Injectable so
@@ -433,13 +433,13 @@ export async function sampleSourceEvents(
     const credsPresent =
       options.r2CredsPresent ??
       Boolean(
-        process.env.CLOUDFLARE_API_TOKEN && process.env.CLOUDFLARE_ACCOUNT_ID,
+        process.env.CLOUDFLARE_R2_API_TOKEN && process.env.CLOUDFLARE_ACCOUNT_ID,
       );
     if (!credsPresent) {
       throw new SamplerPayloadFetchError(
         `Couldn't read any payloads from R2 across ${unfetchable} candidate event${
           unfetchable === 1 ? "" : "s"
-        }. Check CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID in the dashboard runtime.`,
+        }. Check CLOUDFLARE_R2_API_TOKEN and CLOUDFLARE_ACCOUNT_ID in the dashboard runtime.`,
       );
     }
     return [];

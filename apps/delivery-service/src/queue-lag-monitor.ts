@@ -1,21 +1,15 @@
 /**
  * Deployed queue-lag monitoring for the delivery queue.
  *
- * The audit flagged that the threshold evaluators in @axel/router were never
- * fed a live snapshot in production — `evaluateQueueLag` existed but nothing
- * called it on a running service. Rather than poll the (hard-to-verify)
- * Cloudflare Queues stats API, we derive lag from data already in hand: every
- * DestinationQueueMessage carries `enqueued_at`, so the age of the oldest
- * message in a pulled batch is a direct measure of how long work sat on the
- * delivery queue before this consumer reached it.
+ * The monitor consumes both Cloudflare's realtime Queue metrics and timestamps
+ * from pulled messages. The API snapshot detects a growing backlog even when
+ * no message is successfully leased; the pulled-message path is retained as a
+ * second signal during provider metric gaps.
  *
- * The poll loop calls `observe()` once per batch. When the oldest age crosses
- * the configured threshold it emits via the AlertSink (alertSinkFromEnv —
- * a no-op unless ALERT_WEBHOOK_URL is set, so this is safe to wire
- * unconditionally). Emission is throttled per-process; with the delivery web
- * role scaled to N instances each instance may emit, so receiver-side
- * de-duplication is expected (see infra/alerts/README.md). `backlog` is a
- * lower bound (the batch size) — true backlog depth needs the CF stats API.
+ * When the oldest age crosses the configured threshold it emits through the
+ * combined Sentry/operator AlertSink. Emission is throttled per process; with
+ * the delivery web role scaled to N instances each instance may emit, so
+ * receiver-side de-duplication is expected (see infra/alerts/README.md).
  */
 
 import {
@@ -38,6 +32,7 @@ export interface QueueLagMonitorOptions {
 
 export interface QueueLagMonitor {
   observe(messages: ReadonlyArray<{ enqueued_at?: string }>): Promise<void>;
+  observeSnapshot(snapshot: QueueLagSnapshot): Promise<void>;
 }
 
 export function createQueueLagMonitor(options: QueueLagMonitorOptions): QueueLagMonitor {
@@ -45,6 +40,17 @@ export function createQueueLagMonitor(options: QueueLagMonitorOptions): QueueLag
   const now = options.now ?? (() => Date.now());
   const source = options.source ?? "delivery";
   let lastEmitAt = 0;
+
+  async function observeSnapshot(snapshot: QueueLagSnapshot): Promise<void> {
+    const nowMs = now();
+    const events = evaluateQueueLag(snapshot, options.thresholds, source);
+    if (events.length === 0) return;
+    if (nowMs - lastEmitAt < throttleMs) return;
+    lastEmitAt = nowMs;
+    for (const event of events) {
+      await options.sink.notify(event);
+    }
+  }
 
   async function observe(messages: ReadonlyArray<{ enqueued_at?: string }>): Promise<void> {
     if (messages.length === 0) return;
@@ -61,14 +67,8 @@ export function createQueueLagMonitor(options: QueueLagMonitorOptions): QueueLag
       oldest_unacked_age_seconds: Math.round(oldestSeconds),
       backlog: messages.length,
     };
-    const events = evaluateQueueLag(snapshot, options.thresholds, source);
-    if (events.length === 0) return;
-    if (nowMs - lastEmitAt < throttleMs) return;
-    lastEmitAt = nowMs;
-    for (const event of events) {
-      await options.sink.notify(event);
-    }
+    await observeSnapshot(snapshot);
   }
 
-  return { observe };
+  return { observe, observeSnapshot };
 }

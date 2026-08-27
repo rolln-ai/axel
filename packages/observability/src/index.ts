@@ -19,10 +19,14 @@ export interface SentryClientOptions {
   release?: string;
   fetchImpl?: typeof fetch;
   now?: () => Date;
+  /** Hard deadline for each envelope request. Default 10 seconds. */
+  timeoutMs?: number;
 }
 
 export interface CaptureContext {
   level?: "error" | "fatal" | "warning" | "info";
+  /** Explicit Sentry grouping key. Keep every part operator-defined. */
+  fingerprint?: readonly string[];
   tags?: Record<string, string | number | boolean | null | undefined>;
   extra?: Record<string, unknown>;
   user?: {
@@ -51,6 +55,29 @@ export interface SentryClient {
    */
   captureTransaction(input: CaptureTransactionInput): Promise<void>;
   captureCheckIn(input: CronCheckInInput): Promise<string>;
+}
+
+export type OperationalAlertSeverity = "info" | "warn" | "critical";
+
+export interface OperationalAlertSentryIdentity {
+  message: string;
+  fingerprint: readonly ["operational_alert", string, string, OperationalAlertSeverity];
+}
+
+/**
+ * Give each operational alert source, rule, and severity its own Sentry Issue.
+ * In particular, a warning must not create the Issue that a later critical
+ * event would otherwise join.
+ */
+export function operationalAlertSentryIdentity(input: {
+  source: string;
+  rule: string;
+  severity: OperationalAlertSeverity;
+}): OperationalAlertSentryIdentity {
+  return {
+    message: `operational_alert:${input.source}:${input.rule}:${input.severity}`,
+    fingerprint: ["operational_alert", input.source, input.rule, input.severity],
+  };
 }
 
 export interface CronMonitorConfig {
@@ -90,6 +117,10 @@ export function createSentryClient(options: SentryClientOptions): SentryClient {
   const parsed = parseDsn(options.dsn);
   const fetchImpl = options.fetchImpl ?? fetch;
   const now = options.now ?? (() => new Date());
+  const configuredTimeoutMs = options.timeoutMs;
+  const timeoutMs = typeof configuredTimeoutMs === "number" && Number.isFinite(configuredTimeoutMs)
+    ? Math.max(1, configuredTimeoutMs)
+    : 10_000;
 
   async function sendEnvelope(
     envelopeHeader: Record<string, unknown>,
@@ -97,18 +128,38 @@ export function createSentryClient(options: SentryClientOptions): SentryClient {
     payload: Record<string, unknown>,
   ): Promise<void> {
     const envelope = `${JSON.stringify(envelopeHeader)}\n${JSON.stringify(itemHeader)}\n${JSON.stringify(payload)}\n`;
-    const response = await fetchImpl(parsed.envelopeUrl, {
-      method: "POST",
-      headers: {
-        "content-type": "application/x-sentry-envelope",
-        "x-sentry-auth": [
-          "Sentry sentry_version=7",
-          `sentry_client=axel-observability/0.1`,
-          `sentry_key=${parsed.publicKey}`,
-        ].join(", "),
-      },
-      body: envelope,
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error("sentry_send_timeout"));
+      }, timeoutMs);
     });
+    let response: Response;
+    try {
+      response = await Promise.race([
+        fetchImpl(parsed.envelopeUrl, {
+          method: "POST",
+          headers: {
+            "content-type": "application/x-sentry-envelope",
+            "x-sentry-auth": [
+              "Sentry sentry_version=7",
+              `sentry_client=axel-observability/0.1`,
+              `sentry_key=${parsed.publicKey}`,
+            ].join(", "),
+          },
+          body: envelope,
+          signal: controller.signal,
+        }),
+        deadline,
+      ]);
+    } catch (error) {
+      if (controller.signal.aborted) throw new Error("sentry_send_timeout");
+      throw error;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
     if (!response.ok) {
       throw new Error(`sentry_send_failed status=${response.status} project=${parsed.projectId}`);
     }
@@ -175,6 +226,7 @@ export function createSentryClient(options: SentryClientOptions): SentryClient {
     async captureException(error, context) {
       await sendEvent({
         level: context?.level ?? "error",
+        fingerprint: sanitizeSentryFingerprint(context?.fingerprint),
         exception: {
           values: [exceptionValue(error)],
         },
@@ -186,6 +238,7 @@ export function createSentryClient(options: SentryClientOptions): SentryClient {
     async captureMessage(message, context) {
       await sendEvent({
         level: context?.level ?? "info",
+        fingerprint: sanitizeSentryFingerprint(context?.fingerprint),
         message: sanitizeSentryText(message),
         tags: context?.tags,
         extra: sanitizeSentryValue(context?.extra),
@@ -785,6 +838,11 @@ function sanitizeSentryValue(value: unknown, depth = 0): unknown {
       : sanitizeSentryValue(child, depth + 1);
   }
   return out;
+}
+
+function sanitizeSentryFingerprint(fingerprint: readonly string[] | undefined): string[] | undefined {
+  if (!fingerprint) return undefined;
+  return fingerprint.slice(0, 8).map((part) => sanitizeSentryText(part));
 }
 
 function stackFrames(stack: string | undefined): Array<Record<string, unknown>> {

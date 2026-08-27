@@ -11,7 +11,7 @@ describe("fetchPayloadForR2Key", () => {
   // real events ended up clustered as Stripe `payment_intent.succeeded`
   // because the empty-CF-creds branch returned a Stripe-shaped sample
   // and the sampler clustered the same shape across every "fetch".
-  it("returns null when CLOUDFLARE_API_TOKEN is missing", async () => {
+  it("returns null when CLOUDFLARE_R2_API_TOKEN is missing", async () => {
     const result = await fetchPayloadForR2Key("any/key", {
       env: { CLOUDFLARE_ACCOUNT_ID: "acct_x" },
       fetchImpl: () => {
@@ -21,11 +21,11 @@ describe("fetchPayloadForR2Key", () => {
     expect(result).toBeNull();
   });
 
-  it("returns null when CLOUDFLARE_API_TOKEN is the empty string", async () => {
+  it("returns null when CLOUDFLARE_R2_API_TOKEN is the empty string", async () => {
     // The prod misconfig that caused the bug: encrypted env var present
     // in Vercel but with an empty value.
     const result = await fetchPayloadForR2Key("any/key", {
-      env: { CLOUDFLARE_API_TOKEN: "", CLOUDFLARE_ACCOUNT_ID: "" },
+      env: { CLOUDFLARE_R2_API_TOKEN: "", CLOUDFLARE_ACCOUNT_ID: "" },
     });
     expect(result).toBeNull();
   });
@@ -33,7 +33,7 @@ describe("fetchPayloadForR2Key", () => {
   it("returns null on non-2xx response", async () => {
     const fetchImpl = vi.fn(async () => new Response("nope", { status: 404 }));
     const result = await fetchPayloadForR2Key("missing/key", {
-      env: { CLOUDFLARE_API_TOKEN: "tok", CLOUDFLARE_ACCOUNT_ID: "acct" },
+      env: { CLOUDFLARE_R2_API_TOKEN: "tok", CLOUDFLARE_ACCOUNT_ID: "acct" },
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
     expect(result).toBeNull();
@@ -41,7 +41,7 @@ describe("fetchPayloadForR2Key", () => {
 
   it("returns null when fetch throws (network error)", async () => {
     const result = await fetchPayloadForR2Key("any/key", {
-      env: { CLOUDFLARE_API_TOKEN: "tok", CLOUDFLARE_ACCOUNT_ID: "acct" },
+      env: { CLOUDFLARE_R2_API_TOKEN: "tok", CLOUDFLARE_ACCOUNT_ID: "acct" },
       fetchImpl: (() => {
         throw new Error("ECONNRESET");
       }) as unknown as typeof fetch,
@@ -54,7 +54,7 @@ describe("fetchPayloadForR2Key", () => {
       async () => new Response('{"hello":"world"}', { status: 200 }),
     );
     const result = await fetchPayloadForR2Key("ok/key", {
-      env: { CLOUDFLARE_API_TOKEN: "tok", CLOUDFLARE_ACCOUNT_ID: "acct" },
+      env: { CLOUDFLARE_R2_API_TOKEN: "tok", CLOUDFLARE_ACCOUNT_ID: "acct" },
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
     expect(result).toEqual({ hello: "world" });
@@ -64,7 +64,7 @@ describe("fetchPayloadForR2Key", () => {
     const fetchImpl = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
     await fetchPayloadForR2Key("events/one.json", {
       env: {
-        CLOUDFLARE_API_TOKEN: "tok",
+        CLOUDFLARE_R2_API_TOKEN: "tok",
         CLOUDFLARE_ACCOUNT_ID: "acct",
         RAW_PAYLOAD_BUCKET: "axel-selfhost-raw",
       },
@@ -81,7 +81,7 @@ describe("fetchPayloadForR2Key", () => {
     await expect(fetchPayloadForR2Key("events/one.json", {
       env: {
         AXEL_DEPLOYMENT_MODE: "self-hosted",
-        CLOUDFLARE_API_TOKEN: "tok",
+        CLOUDFLARE_R2_API_TOKEN: "tok",
         CLOUDFLARE_ACCOUNT_ID: "acct",
       },
     })).rejects.toThrow(/RAW_PAYLOAD_BUCKET is required/);
@@ -91,7 +91,7 @@ describe("fetchPayloadForR2Key", () => {
     const fetchImpl = vi.fn(async () => new Response("raw", { status: 200 }));
     await fetchRawPayloadBase64ForR2Key("events/two.bin", {
       env: {
-        CLOUDFLARE_API_TOKEN: "tok",
+        CLOUDFLARE_R2_API_TOKEN: "tok",
         CLOUDFLARE_ACCOUNT_ID: "acct",
         RAW_PAYLOAD_BUCKET: "axel-selfhost-raw",
       },
@@ -109,7 +109,7 @@ describe("fetchPayloadForR2Key", () => {
       async () => new Response("not json at all", { status: 200 }),
     );
     const result = await fetchPayloadForR2Key("ok/key", {
-      env: { CLOUDFLARE_API_TOKEN: "tok", CLOUDFLARE_ACCOUNT_ID: "acct" },
+      env: { CLOUDFLARE_R2_API_TOKEN: "tok", CLOUDFLARE_ACCOUNT_ID: "acct" },
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
     expect(result).toEqual({ raw: "not json at all" });

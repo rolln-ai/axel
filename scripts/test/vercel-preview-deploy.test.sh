@@ -7,6 +7,7 @@ trap 'rm -rf "$TEST_DIR"' EXIT
 RELEASE_SHA="0123456789abcdef0123456789abcdef01234567"
 
 mkdir -p "$TEST_DIR/bin" "$TEST_DIR/work"
+REAL_NODE="$(command -v node)"
 cat > "$TEST_DIR/bin/npx" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -19,6 +20,17 @@ esac
 EOF
 chmod 700 "$TEST_DIR/bin/npx"
 
+cat > "$TEST_DIR/bin/node" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "\${1:-}" = "$ROOT_DIR/scripts/verify-dashboard-r2-token.mjs" ]; then
+  printf '%s\n' "\$*" >> "\$MOCK_NODE_LOG"
+  exit 0
+fi
+exec "$REAL_NODE" "\$@"
+EOF
+chmod 700 "$TEST_DIR/bin/node"
+
 run_deploy() {
   local app="$1"
   local environment="$2"
@@ -27,6 +39,7 @@ run_deploy() {
     cd "$TEST_DIR/work"
     PATH="$TEST_DIR/bin:$PATH" \
       MOCK_NPX_LOG="$TEST_DIR/npx.log" \
+      MOCK_NODE_LOG="$TEST_DIR/node.log" \
       MOCK_DEPLOY_OUTPUT="${4:-}" \
       VERCEL_TOKEN=test-token \
       VERCEL_ORG_ID=test-org \
@@ -38,6 +51,7 @@ run_deploy() {
 }
 
 : > "$TEST_DIR/npx.log"
+: > "$TEST_DIR/node.log"
 preview_output="$(run_deploy dashboard preview)"
 printf '%s\n' "$preview_output" | tail -n 1 | grep -Fxq 'https://axel-test-0123456789.vercel.app'
 grep -Eq 'vercel@58\.4\.0 pull .*--environment=preview' "$TEST_DIR/npx.log"
@@ -47,6 +61,12 @@ if grep -Eq 'build --prod|deploy --prebuilt --prod' "$TEST_DIR/npx.log"; then
   echo "preview deployment used production flags" >&2
   exit 1
 fi
+
+: > "$TEST_DIR/npx.log"
+: > "$TEST_DIR/node.log"
+dashboard_production_output="$(run_deploy dashboard production)"
+printf '%s\n' "$dashboard_production_output" | tail -n 1 | grep -Fxq 'https://axel-test-0123456789.vercel.app'
+grep -Fxq "$ROOT_DIR/scripts/verify-dashboard-r2-token.mjs .vercel/.env.production.local" "$TEST_DIR/node.log"
 
 : > "$TEST_DIR/npx.log"
 production_output="$(run_deploy marketing production)"

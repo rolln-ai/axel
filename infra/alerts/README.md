@@ -8,24 +8,36 @@ which alert rules exist, what their thresholds are, and how to wire a receiver.
 What is live today:
 
 - **Sentry exception reporting** — wired in every deployed service (see "Sentry
-  exception reporting" below). This is the alerting you actually get right now.
-- **The `AlertSink` client + threshold evaluators** in `apps/router/src/alerts.ts`
-  are implemented and unit-tested, but **no deployed service currently feeds the
-  evaluators a live metrics snapshot**, and `alertSinkFromEnv()` returns a no-op
-  sink unless `ALERT_WEBHOOK_URL` is set. So the threshold rules below
-  (`retry_rate`, `queue_lag`, `destination_p95_latency`, …) **do not fire in
-  production yet.** Treat the rest of this doc as the design for that wiring, not
-  a description of running behaviour. Wiring a deployed snapshot producer to
-  `alertSinkFromEnv()` is tracked separately.
+  exception reporting" below).
+- **Delivery Queue lag** — the delivery service reads Cloudflare's realtime
+  backlog count and oldest-message timestamp every minute without leasing a
+  message, with pulled-message timestamps as a second signal. Warn/critical
+  events go to Sentry. The generic webhook is an optional second sink.
+- **Production delivery canary** — the pinned-candidate GitHub workflow proves
+  ingest-to-destination delivery every 15 minutes and reports missed, failed,
+  and recovered runs through Sentry Cron Monitoring.
+
+The other aggregate threshold evaluators in `apps/router/src/alerts.ts`
+(`retry_rate`, `dead_letter_count`, `engine_error_rate`, and
+`destination_p95_latency`) remain implemented and unit-tested but do not yet
+have deployed window producers. Do not claim those four numeric thresholds as
+live alerts. Individual service exceptions, the end-to-end canary, Queue lag,
+and operator six-hour snapshots are the current production signals.
+
+No external Slack, PagerDuty, OpsGenie, or generic receiver is part of the
+verified production baseline yet. Severity is included in each event, but Axel
+does not route `warn` and `critical` events to different destinations. Treat
+the receiver recipes below as optional operator configuration until a synthetic
+alert proves authentication, payload compatibility, delivery, and paging.
 
 ## How it works
 
-Each long-running Axel service constructs an `AlertSink` from the environment
-via `alertSinkFromEnv()`:
+The delivery service combines its Sentry sink with the optional sink returned
+by `alertSinkFromEnv()`:
 
-- `ALERT_WEBHOOK_URL` — receiver URL (Slack incoming webhook, PagerDuty Events
-  API v2, OpsGenie inbound, Sentry webhook, generic Cloudflare Worker, …).
-  When unset, the sink is a no-op so the service never fails to start.
+- `ALERT_WEBHOOK_URL` — optional receiver URL. When unset, the sink is a no-op
+  so the service never fails to start. Setting it sends every severity to the
+  same URL; receiver compatibility and downstream routing must be tested.
 - `ALERT_WEBHOOK_TOKEN` — optional shared secret added as `x-axel-alert-token`
   on every POST.
 
@@ -47,6 +59,10 @@ The receiver gets a JSON body of the shape:
 
 The top-level `text` field is Slack-friendly; the structured `event` body is
 useful for dashboards / Sentry / PagerDuty-style consumers.
+
+Non-success webhook responses are treated as failed delivery and logged by
+status code without reading the receiver body. Alert transport failures remain
+non-fatal to the delivery path.
 
 ## Rules and default thresholds
 
@@ -102,28 +118,31 @@ curl -fsS -X POST \
 
 The route returns 404 when `OPS_TEST_TOKEN` is unset or wrong.
 
-### Slack
+### Slack (optional, not production-verified)
 
 1. Create an incoming webhook in your Slack workspace, capture the URL.
 2. Set `ALERT_WEBHOOK_URL=https://hooks.slack.com/services/...` on each service.
-3. Done — Slack reads the top-level `text` field directly.
+3. Send synthetic `warn` and `critical` events and verify both arrive. The
+   built-in sink does not route them to different channels.
 
-### PagerDuty (Events API v2)
+### PagerDuty (optional, not production-verified)
 
 PagerDuty's API v2 expects `routing_key` and an `event_action`. Wrap our
 webhook with a tiny relay (e.g. a Cloudflare Worker) that translates our
-`event.severity` to PagerDuty `severity`. A 30-line worker is enough.
+`event.severity` to PagerDuty `severity`. Test the relay with a synthetic
+critical event and confirm an on-call notification before relying on it.
 
-### Sentry
+### Sentry webhook receiver (optional, not production-verified)
 
-Sentry webhooks accept arbitrary JSON; configure the integration to fire
-internal alerts based on the `severity` field.
+This is separate from the verified Sentry SDK exception and Queue-lag sink.
+Any generic-webhook integration must be configured and tested against the
+expected `severity` field before it is treated as an alert route.
 
-### Generic OpsGenie
+### Generic OpsGenie (optional, not production-verified)
 
-Set `ALERT_WEBHOOK_URL` to the OpsGenie API endpoint plus an `apikey` query
-param; OpsGenie reads the `text` field for the alert message and stores the
-structured `event` payload as alert details.
+Use a relay that authenticates to OpsGenie and maps the Axel payload to the
+receiver's current schema. Verify a synthetic critical event reaches the
+intended team and escalation policy.
 
 ## Testing
 
@@ -134,17 +153,22 @@ pnpm --filter @axel/observability test
 
 The router test suite covers the threshold evaluators end-to-end with a
 mocked `fetch` for the webhook sink. The observability tests verify Sentry
-envelope formatting and failure swallowing.
+envelope formatting and failure swallowing. These tests do not prove external
+receiver authentication, payload compatibility, severity routing, or paging.
+Operators must test those paths end-to-end before counting them as production
+controls.
 
 ## Operational notes
 
 - **Alerts must never page the service itself.** The webhook sink swallows
   fetch errors; a noisy alert receiver cannot take down the router.
-- **Severities map to colour, not action.** `info` is for context, `warn`
-  goes to a Slack channel, `critical` should page on-call.
+- **Severity is payload data, not a route.** The built-in sink sends `info`,
+  `warn`, and `critical` events to the same optional URL. A tested receiver or
+  relay must decide which events notify a channel or page on-call.
 - **De-duplication is the receiver's job.** Axel re-emits an alert every
   evaluation tick if the threshold remains breached. Set Slack-side or
   PagerDuty-side suppression to avoid notification storms.
-- **Routing:** warning alerts go to the operations Slack channel; critical
-  alerts page the on-call rotation through PagerDuty. Sentry exception issues
-  route to the owning service project with `service` and `environment` tags.
+- **There is no default external route.** Slack channels, PagerDuty escalation,
+  and other receiver behavior remain optional and unproven until synthetic
+  tests confirm them. Sentry exception issues retain `service` and
+  `environment` tags for project-side rules.

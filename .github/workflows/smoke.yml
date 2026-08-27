@@ -14,6 +14,11 @@ on:
         type: choice
         options:
           - production
+      test_queue_lag_alert:
+        description: Send one controlled critical Queue-lag alert through Sentry
+        required: true
+        default: false
+        type: boolean
   workflow_call:
 
 concurrency:
@@ -30,6 +35,11 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Require the pinned soak candidate
+        env:
+          AXEL_SOAK_CANDIDATE_SHA: ${{ vars.AXEL_SOAK_CANDIDATE_SHA }}
+        run: |
+          test "${AXEL_SOAK_CANDIDATE_SHA}" = "${GITHUB_SHA}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Run smoke checks
         run: bash scripts/smoke.sh
@@ -40,6 +50,7 @@ jobs:
           AXEL_DELIVERY_URL: ${{ vars.AXEL_DELIVERY_URL || 'https://axel-delivery-native.onrender.com' }}
           AXEL_REQUIRE_OPERATIONAL_STATUS: "1"
           AXEL_OPS_TEST_TOKEN: ${{ secrets.OPS_TEST_TOKEN }}
+          AXEL_REQUIRE_SENTRY_TEST: "1"
           AXEL_REQUIRE_DELIVERY_CANARY: "1"
           AXEL_CANARY_INGEST_URL: ${{ secrets.AXEL_CANARY_INGEST_URL }}
           AXEL_CANARY_INGEST_AUTH_HEADER: ${{ secrets.AXEL_CANARY_INGEST_AUTH_HEADER }}
@@ -47,3 +58,25 @@ jobs:
           AXEL_CANARY_RECEIPT_URL: ${{ secrets.AXEL_CANARY_RECEIPT_URL }}
           AXEL_CANARY_RECEIPT_AUTH_HEADER: ${{ secrets.AXEL_CANARY_RECEIPT_AUTH_HEADER }}
           AXEL_CANARY_RECEIPT_AUTH_VALUE: ${{ secrets.AXEL_CANARY_RECEIPT_AUTH_VALUE }}
+      - name: Prove critical Queue-lag alert transport
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.test_queue_lag_alert }}
+        env:
+          AXEL_APP_URL: ${{ vars.AXEL_APP_URL || 'https://app.axelapp.ai' }}
+          AXEL_OPS_TEST_TOKEN: ${{ secrets.OPS_TEST_TOKEN }}
+          VERCEL_AUTOMATION_BYPASS_SECRET_DASHBOARD: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET_DASHBOARD }}
+        run: |
+          : "${AXEL_OPS_TEST_TOKEN:?OPS_TEST_TOKEN is required}"
+          : "${VERCEL_AUTOMATION_BYPASS_SECRET_DASHBOARD:?dashboard Vercel bypass secret is required}"
+          if ! probe_response="$(curl --fail-with-body --silent --show-error \
+            --connect-timeout 10 --max-time 30 --request POST \
+            --header "x-axel-ops-token: ${AXEL_OPS_TEST_TOKEN}" \
+            --header "x-vercel-protection-bypass: ${VERCEL_AUTOMATION_BYPASS_SECRET_DASHBOARD}" \
+            "${AXEL_APP_URL%/}/api/ops/sentry-test?mode=queue-lag-critical")"; then
+            echo "::error::Controlled Queue-lag alert probe request failed"
+            exit 1
+          fi
+          if [ "${probe_response}" != '{"ok":true,"probe":"queue_lag","severity":"critical"}' ]; then
+            echo "::error::Controlled Queue-lag alert probe returned an unexpected response"
+            exit 1
+          fi
+          echo "ok controlled critical Queue-lag alert transport"

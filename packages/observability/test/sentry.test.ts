@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { captureException, createSentryClient, installNodeSentryHandlers, isCircuitBreakerOpenError, isCloudflareQueueInternalError, isCloudflareQueueOverloadError, isPoolAcquireTimeout, isTransientFetchError, isTransientPlatformHttpError, isTransientPostgresError, isTransientR2Error, sentryClientFromEnv, withPgRetry } from "../src/index.ts";
+import { captureException, createSentryClient, installNodeSentryHandlers, isCircuitBreakerOpenError, isCloudflareQueueInternalError, isCloudflareQueueOverloadError, isPoolAcquireTimeout, isTransientFetchError, isTransientPlatformHttpError, isTransientPostgresError, isTransientR2Error, operationalAlertSentryIdentity, sentryClientFromEnv, withPgRetry } from "../src/index.ts";
 
 describe("sentry client", () => {
   it("sends Sentry envelopes to the DSN project endpoint", async () => {
@@ -24,6 +24,58 @@ describe("sentry client", () => {
     expect((calls[0]?.init.headers as Record<string, string>)["content-type"]).toBe("application/x-sentry-envelope");
     expect(calls[0]?.init.body).toContain("\"service\":\"test-service\"");
     expect(calls[0]?.init.body).toContain("\"value\":\"boom\"");
+  });
+
+  it("sends the exact severity-specific operational alert fingerprint", async () => {
+    const calls: RequestInit[] = [];
+    const client = createSentryClient({
+      dsn: "https://public@example.sentry.io/12345",
+      service: "delivery-service",
+      fetchImpl: (async (_url, init) => {
+        calls.push(init as RequestInit);
+        return new Response(null, { status: 200 });
+      }) as typeof fetch,
+    });
+    const identity = operationalAlertSentryIdentity({
+      source: "delivery",
+      rule: "queue_lag",
+      severity: "critical",
+    });
+
+    await client.captureException(new Error(identity.message), {
+      fingerprint: identity.fingerprint,
+    });
+
+    expect(identity).toEqual({
+      message: "operational_alert:delivery:queue_lag:critical",
+      fingerprint: ["operational_alert", "delivery", "queue_lag", "critical"],
+    });
+    expect(operationalAlertSentryIdentity({
+      source: "delivery",
+      rule: "queue_lag",
+      severity: "warn",
+    }).fingerprint).toEqual(["operational_alert", "delivery", "queue_lag", "warn"]);
+    const envelope = String(calls[0]?.body).trim().split("\n");
+    expect(JSON.parse(envelope[2] ?? "{}")).toMatchObject({
+      fingerprint: ["operational_alert", "delivery", "queue_lag", "critical"],
+      exception: {
+        values: [{ value: "operational_alert:delivery:queue_lag:critical" }],
+      },
+    });
+  });
+
+  it("aborts and rejects a hung envelope transport at its hard deadline", async () => {
+    const fetchImpl: typeof fetch = ((_url, init) => new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    })) as typeof fetch;
+    const client = createSentryClient({
+      dsn: "https://public@example.sentry.io/12345",
+      service: "test-service",
+      fetchImpl,
+      timeoutMs: 10,
+    });
+
+    await expect(client.captureMessage("timeout probe")).rejects.toThrow("sentry_send_timeout");
   });
 
   it("redacts webhook values and secret-bearing context before sending", async () => {

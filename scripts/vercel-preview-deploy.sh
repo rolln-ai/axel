@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
 app="${1:-}"
 environment="${2:-preview}"
 case "$app" in
@@ -57,6 +59,9 @@ fi
 cli="vercel@${VERCEL_CLI_VERSION:-58.4.0}"
 
 npx --yes "$cli" pull --yes --environment="$environment" --token "$VERCEL_TOKEN"
+if [ "$app" = "dashboard" ] && [ "$environment" = "production" ]; then
+  node "$ROOT_DIR/scripts/verify-dashboard-r2-token.mjs" ".vercel/.env.production.local"
+fi
 if [ "$environment" = "production" ]; then
   npx --yes "$cli" build --prod --token "$VERCEL_TOKEN"
   # Build with production configuration but leave custom domains untouched.

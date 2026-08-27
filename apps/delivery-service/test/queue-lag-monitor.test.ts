@@ -41,6 +41,21 @@ describe("createQueueLagMonitor", () => {
     expect(events[0]!.severity).toBe("critical");
   });
 
+  it("emits from realtime provider metrics even when no message was leased", async () => {
+    const events: AlertEvent[] = [];
+    const mon = createQueueLagMonitor({
+      sink: { notify: async (e) => void events.push(e) },
+      now: () => NOW,
+    });
+    await mon.observeSnapshot({
+      oldest_unacked_age_seconds: 400,
+      backlog: 75,
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ severity: "critical", rule: "queue_lag" });
+    expect(events[0]!.details.backlog).toBe(75);
+  });
+
   it("throttles repeated emits within throttleMs", async () => {
     let now = NOW;
     const notify = vi.fn<(e: AlertEvent) => Promise<void>>(async () => {});

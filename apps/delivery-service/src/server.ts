@@ -97,8 +97,9 @@ import { startBackfillJobWorker } from "./backfill-job-worker.js";
 import { startParquetCompactionLoop } from "./parquet-compaction-runner.js";
 import { advanceReplayJobOnTerminal } from "./replay-job-completion.js";
 import { replayRequestIdFromEventId } from "./replay-event-id.js";
-import { alertSinkFromEnv } from "@axel/router";
+import { alertSinkFromEnv, multiAlertSink } from "@axel/router";
 import { createQueueLagMonitor } from "./queue-lag-monitor.js";
+import { createSentryAlertSink } from "./sentry-alert-sink.js";
 import {
   handleInternalSourceRequest,
   isInternalSecretAuthorized,
@@ -124,6 +125,11 @@ import { createPollIdleBackoff } from "./poll-idle-backoff.js";
 import { createPostgresIdempotencyStore } from "./postgres-idempotency.js";
 import { QueueConsumerMetrics } from "./queue-consumer-metrics.js";
 import { recordQueueQuarantine } from "./queue-quarantine.js";
+import {
+  createQueueRealtimeMetricsRunner,
+  fetchQueueRealtimeMetrics,
+  queueRealtimeMetricsToLagSnapshot,
+} from "./queue-realtime-metrics.js";
 
 const ACCOUNT_ID = requireEnv("CLOUDFLARE_ACCOUNT_ID");
 const API_TOKEN = requireEnv("CLOUDFLARE_API_TOKEN");
@@ -169,6 +175,10 @@ const MAX_IDLE_INTERVAL_MS = Math.max(
   INTERVAL_MS,
   sharedNumericEnv(process.env, "POLL_MAX_IDLE_INTERVAL_MS", INTERVAL_MS),
 );
+const QUEUE_METRICS_INTERVAL_MS = Math.max(
+  15_000,
+  sharedNumericEnv(process.env, "QUEUE_METRICS_INTERVAL_MS", 60_000),
+);
 // Live owners renew at one third of this lease, including while Parquet waits
 // for a batch flush. Keep the Queue lease slightly longer than the base claim
 // so a crash leaves an eligible stale claim by the next Queue delivery.
@@ -200,13 +210,6 @@ const MAX_INFLIGHT_DELIVER = Math.max(
   Number(process.env.MAX_DELIVER_INFLIGHT ?? String(MAX_CONCURRENT_DELIVERIES)),
 );
 let inFlightDeliverCount = 0;
-// Deployed queue-lag monitor: emits AlertEvents when the oldest message in a
-// pulled batch exceeds the threshold. alertSinkFromEnv() returns a no-op sink
-// unless ALERT_WEBHOOK_URL is set, so this is safe to wire unconditionally.
-const queueLagMonitor = createQueueLagMonitor({ sink: alertSinkFromEnv() });
-const queueConsumerMetrics = new QueueConsumerMetrics();
-const PORT = Number(process.env.PORT ?? "10000");
-
 // Service role. "all" (default) runs the HTTP server + delivery poll loop AND
 // the singleton background loops (retention/replay/backfill) in one process —
 // the single-instance default, unchanged. To scale delivery horizontally, run
@@ -220,6 +223,13 @@ const runWorkers = DELIVERY_ROLE === "all" || DELIVERY_ROLE === "worker";
 const PULL_AUTH_ERROR_CAPTURE_INTERVAL_MS = Number(process.env.PULL_AUTH_ERROR_CAPTURE_INTERVAL_MS ?? "900000");
 const sentry = sentryClientFromEnv(process.env, "delivery-service");
 installNodeSentryHandlers(sentry);
+// Deployed queue-lag alerts always reach Sentry when it is configured and can
+// additionally reach an operator webhook. Neither sink can fail delivery.
+const queueLagMonitor = createQueueLagMonitor({
+  sink: multiAlertSink([alertSinkFromEnv(), createSentryAlertSink(sentry)]),
+});
+const queueConsumerMetrics = new QueueConsumerMetrics();
+const PORT = Number(process.env.PORT ?? "10000");
 
 // Deliberately NOT the throwing `requireEnv` from @axel/shared: at boot we
 // want a clean one-line `[boot]` log and exit(1), not a stack trace.
@@ -1063,6 +1073,22 @@ async function pullBatch(queueId: string = QUEUE_ID): Promise<PulledMessage[]> {
   return parsePulledBatchResponse(data);
 }
 
+async function observeRealtimeQueueLag(queueId: string): Promise<void> {
+  const metrics = await fetchQueueRealtimeMetrics({
+    accountId: ACCOUNT_ID,
+    queueId,
+    token: API_TOKEN,
+  });
+  await queueLagMonitor.observeSnapshot(queueRealtimeMetricsToLagSnapshot(metrics, Date.now()));
+}
+
+const queueRealtimeMetricsRunner = createQueueRealtimeMetricsRunner({
+  observe: observeRealtimeQueueLag,
+  onError: (err, queueId) => captureException(sentry, err, {
+    tags: { component: "delivery_queue_realtime_metrics", queue: queueId },
+  }),
+});
+
 async function ackOrRetry(
   leases: { ack?: string[]; retry?: string[] },
   queueId: string = QUEUE_ID,
@@ -1126,6 +1152,7 @@ async function pollLoop(
   component: string = "delivery-service",
 ): Promise<void> {
   const idleBackoff = createPollIdleBackoff(INTERVAL_MS, MAX_IDLE_INTERVAL_MS);
+  let nextQueueMetricsAtMs = 0;
   while (!stopping) {
     pollLoopTickCount += 1;
     // Heartbeat every tick — last_seen + monotonic counter let the
@@ -1137,6 +1164,13 @@ async function pollLoop(
       environment: process.env.NODE_ENV ?? "production",
       expectedIntervalSeconds: Math.max(5, Math.ceil(MAX_IDLE_INTERVAL_MS / 1000) * 3),
     });
+    const nowMs = Date.now();
+    if (nowMs >= nextQueueMetricsAtMs) {
+      nextQueueMetricsAtMs = nowMs + QUEUE_METRICS_INTERVAL_MS;
+      // Monitoring must never delay Queue pulls. The bounded metrics request
+      // runs beside delivery, and any failure becomes a grouped Sentry issue.
+      queueRealtimeMetricsRunner.start(queueId);
+    }
     try {
       const messages = await pullBatch(queueId);
       queueConsumerMetrics.recordPulled(messages.length);

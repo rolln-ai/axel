@@ -16,7 +16,7 @@ const ORIGINAL_ENV = {
   SENTRY_RELEASE: process.env.SENTRY_RELEASE,
 };
 
-function request(token?: string, mode?: "source-map"): Request {
+function request(token?: string, mode?: "source-map" | "queue-lag-critical"): Request {
   const url = new URL("https://app.axelapp.ai/api/ops/sentry-test");
   if (mode) url.searchParams.set("mode", mode);
   return new Request(url, {
@@ -100,6 +100,70 @@ describe("operator Sentry transport probe", () => {
 
     expect(response.status).toBe(502);
     expect(await response.json()).toEqual({ ok: false, error: "sentry_transport_failed" });
+  });
+
+  it("emits the fixed critical queue-lag alert identity and no runtime data", async () => {
+    process.env.SENTRY_DSN = "https://public@example.sentry.io/12345";
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await POST(request("ops-secret", "queue-lag-critical"));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      probe: "queue_lag",
+      severity: "critical",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const envelope = String(fetchMock.mock.calls[0]?.[1]?.body).trim().split("\n");
+    const payload = JSON.parse(envelope[2] ?? "{}") as Record<string, unknown>;
+    expect(JSON.parse(envelope[1] ?? "{}")).toEqual({ type: "event" });
+    expect(payload).toMatchObject({
+      level: "error",
+      fingerprint: ["operational_alert", "delivery", "queue_lag", "critical"],
+      exception: {
+        values: [{ value: "operational_alert:delivery:queue_lag:critical" }],
+      },
+    });
+    expect(payload.tags).toEqual({
+      service: "delivery-service",
+      component: "operational_alert",
+      alert_rule: "queue_lag",
+      alert_source: "delivery",
+      alert_severity: "critical",
+      controlled_probe: true,
+    });
+    expect(payload.extra).toEqual({ controlled_probe: true });
+    expect(payload).not.toHaveProperty("user");
+  });
+
+  it("fails the critical queue-lag probe when Sentry rejects the envelope", async () => {
+    process.env.SENTRY_DSN = "https://public@example.sentry.io/12345";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 503 })),
+    );
+
+    const response = await POST(request("ops-secret", "queue-lag-critical"));
+
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({
+      ok: false,
+      error: "sentry_alert_probe_failed",
+    });
+  });
+
+  it("keeps the critical queue-lag probe hidden when the operator token is invalid", async () => {
+    process.env.SENTRY_DSN = "https://public@example.sentry.io/12345";
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await POST(request("wrong", "queue-lag-critical"));
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ ok: false, error: "not_found" });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("captures and flushes a deterministic handled error in source-map mode", async () => {

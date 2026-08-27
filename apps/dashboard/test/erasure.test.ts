@@ -199,7 +199,7 @@ describe("executeErasure", () => {
 
   const ENABLED_ENV = {
     ERASURE_EXECUTE_ENABLED: "true",
-    CLOUDFLARE_API_TOKEN: "tok",
+    CLOUDFLARE_R2_API_TOKEN: "tok",
     CLOUDFLARE_ACCOUNT_ID: "acc",
   };
 

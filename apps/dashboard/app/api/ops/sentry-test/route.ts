@@ -1,4 +1,8 @@
-import { sentryClientFromEnv } from "@axel/observability";
+import {
+  operationalAlertSentryIdentity,
+  sentryClientFromEnv,
+} from "@axel/observability";
+import { constantTimeEqual } from "../../../../lib/cron-auth";
 import { captureDashboardExceptionAndFlush } from "../../../../lib/sentry-capture";
 import { resolveDashboardSentryDsn } from "../../../../lib/sentry-runtime-config";
 
@@ -7,7 +11,7 @@ export const runtime = "nodejs";
 export async function POST(request: Request): Promise<Response> {
   const configuredToken = process.env.OPS_TEST_TOKEN;
   const providedToken = request.headers.get("x-axel-ops-token");
-  if (!configuredToken || providedToken !== configuredToken) {
+  if (!configuredToken || !providedToken || !constantTimeEqual(providedToken, configuredToken)) {
     return Response.json({ ok: false, error: "not_found" }, { status: 404 });
   }
 
@@ -37,9 +41,40 @@ export async function POST(request: Request): Promise<Response> {
     }
   }
 
-  const sentry = sentryClientFromEnv(process.env, "dashboard");
+  const sentry = sentryClientFromEnv(
+    process.env,
+    mode === "queue-lag-critical" ? "delivery-service" : "dashboard",
+  );
   if (!sentry) {
     return Response.json({ ok: false, error: "sentry_not_configured" }, { status: 503 });
+  }
+
+  if (mode === "queue-lag-critical") {
+    const identity = operationalAlertSentryIdentity({
+      source: "delivery",
+      rule: "queue_lag",
+      severity: "critical",
+    });
+    try {
+      // Send fixed operator-owned metadata only. Calling the client directly
+      // makes a rejected or timed-out Sentry envelope fail this probe.
+      await sentry.captureException(new Error(identity.message), {
+        level: "error",
+        fingerprint: identity.fingerprint,
+        tags: {
+          component: "operational_alert",
+          alert_rule: "queue_lag",
+          alert_source: "delivery",
+          alert_severity: "critical",
+          controlled_probe: true,
+        },
+        extra: { controlled_probe: true },
+      });
+    } catch {
+      return Response.json({ ok: false, error: "sentry_alert_probe_failed" }, { status: 502 });
+    }
+
+    return Response.json({ ok: true, probe: "queue_lag", severity: "critical" });
   }
 
   try {

@@ -173,6 +173,7 @@ jobs:
           AXEL_DELIVERY_URL: ${{ vars.AXEL_DELIVERY_URL || 'https://axel-delivery-native.onrender.com' }}
           AXEL_REQUIRE_OPERATIONAL_STATUS: "1"
           AXEL_OPS_TEST_TOKEN: ${{ secrets.OPS_TEST_TOKEN }}
+          AXEL_REQUIRE_SENTRY_TEST: "1"
           AXEL_REQUIRE_DELIVERY_CANARY: "1"
           AXEL_CANARY_INGEST_URL: ${{ secrets.AXEL_CANARY_INGEST_URL }}
           AXEL_CANARY_INGEST_AUTH_HEADER: ${{ secrets.AXEL_CANARY_INGEST_AUTH_HEADER }}

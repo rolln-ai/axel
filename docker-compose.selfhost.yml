@@ -17,9 +17,6 @@ x-control-plane-env: &control-plane-env
   NEXT_PUBLIC_AXEL_APP_URL: ${AXEL_PUBLIC_URL}
   NEXT_PUBLIC_AXEL_DELIVERY_URL: ${AXEL_DELIVERY_PUBLIC_URL}
   CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID}
-  # Never place the provisioning/Worker-deployment token in an application
-  # container. The helper requires a separate Queue/R2 runtime token.
-  CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_RUNTIME_API_TOKEN:?CLOUDFLARE_RUNTIME_API_TOKEN is required}
   RAW_PAYLOAD_BUCKET: ${RAW_PAYLOAD_BUCKET}
 
 services:
@@ -75,6 +72,9 @@ services:
         NEXT_PUBLIC_AXEL_DELIVERY_URL: ${AXEL_DELIVERY_PUBLIC_URL}
     environment:
       <<: *control-plane-env
+      # Dashboard code deliberately does not read CLOUDFLARE_API_TOKEN, so a
+      # provisioning/Worker-deployment token cannot be used accidentally.
+      CLOUDFLARE_R2_API_TOKEN: ${CLOUDFLARE_RUNTIME_API_TOKEN:?CLOUDFLARE_RUNTIME_API_TOKEN is required}
       CRON_SECRET: ${CRON_SECRET}
       INGEST_ADMIN_URL: ${NEXT_PUBLIC_AXEL_INGEST_URL}
       RESEND_API_KEY: ${RESEND_API_KEY:-}
@@ -102,6 +102,9 @@ services:
       target: delivery
     environment:
       <<: *control-plane-env
+      # The delivery service needs Queue plus R2 runtime access. This legacy
+      # variable name is confined to the delivery container.
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_RUNTIME_API_TOKEN:?CLOUDFLARE_RUNTIME_API_TOKEN is required}
       PORT: "10000"
       DELIVERY_ROLE: all
       DELIVERY_QUEUE_ID: ${DELIVERY_QUEUE_ID}

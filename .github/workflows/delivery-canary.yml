@@ -2,11 +2,14 @@ name: Production Delivery Canary
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    # Avoid GitHub's busiest top-of-hour scheduling window while preserving a
+    # 15-minute cadence.
+    - cron: "7,22,37,52 * * * *"
   workflow_dispatch: {}
 
 concurrency:
   group: production-delivery-canary
+  queue: max
   cancel-in-progress: false
 
 jobs:
@@ -29,10 +32,16 @@ jobs:
         with:
           node-version-file: .node-version
 
+      - name: Require the pinned soak candidate
+        env:
+          AXEL_SOAK_CANDIDATE_SHA: ${{ vars.AXEL_SOAK_CANDIDATE_SHA }}
+        run: |
+          test "${AXEL_SOAK_CANDIDATE_SHA}" = "${GITHUB_SHA}"
+
       - name: Sentry check-in started
         id: checkin
         if: env.SENTRY_DSN != ''
-        run: bash scripts/sentry-cron-checkin.sh in_progress production-delivery-canary '' '*/15 * * * *' 5 30
+        run: bash scripts/sentry-cron-checkin.sh in_progress production-delivery-canary '' '7,22,37,52 * * * *' 5 10
 
       - name: Prove production delivery
         run: node scripts/delivery-canary.mjs

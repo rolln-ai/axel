@@ -675,7 +675,7 @@ describe("sampleSourceEvents", () => {
   });
 
   it("throws SamplerPayloadFetchError when creds are absent and every R2 fetch returns null", async () => {
-    // Prod regression: when CLOUDFLARE_API_TOKEN was empty,
+    // Prod regression: when CLOUDFLARE_R2_API_TOKEN was empty,
     // fetchPayloadForR2Key fell back to GENERIC_SAMPLE for every event,
     // producing a fake `payment_intent.succeeded` cluster on a newsletter provider
     // source with 800,000 real events. After the fix, null returns mean

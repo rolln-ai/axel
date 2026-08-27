@@ -319,7 +319,7 @@ async function deleteWorkspaceRawPayloads(
       deps,
     );
   }
-  if (!env.CLOUDFLARE_API_TOKEN || !env.CLOUDFLARE_ACCOUNT_ID) {
+  if (!env.CLOUDFLARE_R2_API_TOKEN || !env.CLOUDFLARE_ACCOUNT_ID) {
     return { deleted: 0, skipped: true, complete: true };
   }
   if (!hasClickhouseUrl()) return { deleted: 0, skipped: false, complete: true };
@@ -470,7 +470,7 @@ export async function deleteR2Objects(
   deps: WorkspaceDataWipeOptions["deps"] = {},
 ): Promise<{ deleted: number; skipped: boolean }> {
   const env = deps.env ?? process.env;
-  const token = env.CLOUDFLARE_API_TOKEN;
+  const token = env.CLOUDFLARE_R2_API_TOKEN;
   const accountId = env.CLOUDFLARE_ACCOUNT_ID;
   const bucket = resolveRawPayloadBucket(env);
   if (!token || !accountId || keys.length === 0) {
