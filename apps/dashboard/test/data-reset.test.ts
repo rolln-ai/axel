@@ -337,6 +337,27 @@ describe("data reset", () => {
     expect(pg.query.mock.calls[0]?.[1]).toEqual(["ws_large", 10_000]);
   });
 
+  it("includes Data Contract fixtures and drift in an event-data wipe", async () => {
+    const { wipeWorkspaceData } = await import("../lib/data-reset");
+    const sql: string[] = [];
+    const pg: Queryable = {
+      async query(statement) {
+        sql.push(statement);
+        return { rows: [], rowCount: 0 };
+      },
+    };
+
+    const result = await wipeWorkspaceData("ws_private", {
+      includeRawPayloads: false,
+      deps: { pg },
+    });
+
+    expect(result.postgresLimitReached).toBe(false);
+    expect(sql.some((statement) => statement.includes("FROM data_contract_fixtures"))).toBe(true);
+    expect(sql.some((statement) => statement.includes("FROM data_contract_drift_events"))).toBe(true);
+    expect(sql.every((statement) => statement.includes("workspace_id = $1"))).toBe(true);
+  });
+
   it("starts ClickHouse mutations asynchronously and waits for completion on later ticks", async () => {
     process.env.CLICKHOUSE_URL = "https://clickhouse.example";
     const { wipeWorkspaceData } = await import("../lib/data-reset");

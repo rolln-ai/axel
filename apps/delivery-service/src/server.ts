@@ -110,13 +110,20 @@ import {
   markRouteErrored,
   type RouteWithDestinationTypes,
 } from "./route-store.js";
-import { parsePulledMessageBody, type PulledMessage } from "./pulled-message.js";
+import {
+  parsePulledBatchResponse,
+  parsePulledMessage,
+  validateDestinationQueueMessage,
+  type PulledMessage,
+} from "./pulled-message.js";
 import {
   closeSafeOutboundDispatcher,
   safeOutboundFetch,
 } from "./safe-outbound-fetch.js";
 import { createPollIdleBackoff } from "./poll-idle-backoff.js";
 import { createPostgresIdempotencyStore } from "./postgres-idempotency.js";
+import { QueueConsumerMetrics } from "./queue-consumer-metrics.js";
+import { recordQueueQuarantine } from "./queue-quarantine.js";
 
 const ACCOUNT_ID = requireEnv("CLOUDFLARE_ACCOUNT_ID");
 const API_TOKEN = requireEnv("CLOUDFLARE_API_TOKEN");
@@ -197,6 +204,7 @@ let inFlightDeliverCount = 0;
 // pulled batch exceeds the threshold. alertSinkFromEnv() returns a no-op sink
 // unless ALERT_WEBHOOK_URL is set, so this is safe to wire unconditionally.
 const queueLagMonitor = createQueueLagMonitor({ sink: alertSinkFromEnv() });
+const queueConsumerMetrics = new QueueConsumerMetrics();
 const PORT = Number(process.env.PORT ?? "10000");
 
 // Service role. "all" (default) runs the HTTP server + delivery poll loop AND
@@ -1051,8 +1059,8 @@ async function pullBatch(queueId: string = QUEUE_ID): Promise<PulledMessage[]> {
     }
     throw new Error(`[pull] HTTP ${res.status}: ${text.slice(0, 300)}`);
   }
-  const data = (await res.json()) as { result?: { messages?: PulledMessage[] } };
-  return data.result?.messages ?? [];
+  const data: unknown = await res.json();
+  return parsePulledBatchResponse(data);
 }
 
 async function ackOrRetry(
@@ -1065,6 +1073,9 @@ async function ackOrRetry(
   if (leases.retry && leases.retry.length > 0) {
     body.retries = leases.retry.map((id) => ({ lease_id: id, delay_seconds: 30 }));
   }
+  const expectedAcks = leases.ack?.length ?? 0;
+  const expectedRetries = leases.retry?.length ?? 0;
+  queueConsumerMetrics.recordDisposition({ acks: expectedAcks, retries: expectedRetries });
   const res = await fetch(
     `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/queues/${queueId}/messages/ack`,
     {
@@ -1078,7 +1089,21 @@ async function ackOrRetry(
     },
   );
   if (!res.ok) {
-    console.error(`[ack] failed: ${res.status} ${safeDeliveryDiagnostic(await res.text())}`);
+    queueConsumerMetrics.recordAckApiFailure();
+    throw new Error(
+      `[ack] Cloudflare queue API failed with HTTP ${res.status}: ${safeDeliveryDiagnostic(await res.text())}`,
+    );
+  }
+  const data = (await res.json()) as {
+    result?: { ackCount?: number; retryCount?: number };
+  };
+  const ackCount = data.result?.ackCount ?? 0;
+  const retryCount = data.result?.retryCount ?? 0;
+  if (ackCount !== expectedAcks || retryCount !== expectedRetries) {
+    queueConsumerMetrics.recordAckApiFailure();
+    throw new Error(
+      `[ack] Cloudflare queue API count mismatch: expected ${expectedAcks}/${expectedRetries}, received ${ackCount}/${retryCount}`,
+    );
   }
 }
 
@@ -1114,21 +1139,22 @@ async function pollLoop(
     });
     try {
       const messages = await pullBatch(queueId);
+      queueConsumerMetrics.recordPulled(messages.length);
       if (messages.length === 0) {
         await waitForNextPoll(idleBackoff.nextEmptyDelayMs());
         continue;
       }
       idleBackoff.reset();
 
-      // Observe queue lag from enqueued_at on the pulled batch (fire-and-forget
-      // so alerting never blocks delivery). Best-effort second parse — cheap at
-      // batch sizes in the tens.
+      const parsedMessages = messages.map((message) => ({
+        message,
+        parsed: parsePulledMessage(message),
+      }));
+
+      // Observe lag only from messages that passed the queue contract. Invalid
+      // timestamp fields must not distort the operational gauge.
       void queueLagMonitor
-        .observe(
-          messages
-            .map((m) => parsePulledMessageBody(m))
-            .filter((b): b is DestinationQueueMessage => b !== null),
-        )
+        .observe(parsedMessages.flatMap(({ parsed }) => parsed.ok ? [parsed.message] : []))
         .catch(() => undefined);
 
       const acks: string[] = [];
@@ -1138,16 +1164,47 @@ async function pollLoop(
       // an unbounded number of in-flight deliveries and saturate the DB pool or
       // destination. MAX_CONCURRENT_DELIVERIES caps the in-flight work.
       await mapWithConcurrency(
-        messages,
+        parsedMessages,
         MAX_CONCURRENT_DELIVERIES,
-        async (m) => {
-          let body = parsePulledMessageBody(m);
-          if (!body) {
-            // Unparseable bodies are terminal — ack so we don't retry forever.
-            console.error(`[loop] dropping unparseable message ${m.id}`);
-            acks.push(m.lease_id);
+        async ({ message: m, parsed }) => {
+          if (!parsed.ok) {
+            queueConsumerMetrics.recordInvalid(parsed.code);
+            const attempt = Number.isSafeInteger(m.attempts) ? m.attempts! : 1;
+            console.error(
+              `[loop] rejected queue message reason=${parsed.code}`
+              + `${parsed.field ? ` field=${parsed.field}` : ""}`
+              + ` attempt=${attempt}; retrying for dead-letter handling`,
+            );
+            try {
+              await withPgRetry("queue-quarantine", () => recordQueueQuarantine(pool, {
+                queueName: component,
+                message: m,
+                failure: {
+                  code: parsed.code,
+                  ...(parsed.field ? { field: parsed.field } : {}),
+                },
+              }));
+            } catch (err) {
+              queueConsumerMetrics.recordQuarantineWriteFailure();
+              console.error(`[loop] queue quarantine write failed: ${safeDeliveryDiagnostic(err)}`);
+            }
+            void sentry?.captureMessage("Destination queue message failed runtime validation", {
+              level: "error",
+              tags: {
+                component: "delivery_queue_contract",
+                reason: parsed.code,
+                field: parsed.field,
+                queue: component,
+              },
+              extra: { attempts: attempt },
+            }).catch(() => undefined);
+            // Never ACK malformed data. Explicit retries increment the bounded
+            // Cloudflare attempt counter and move the original body to its DLQ.
+            retries_.push(m.lease_id);
             return;
           }
+          queueConsumerMetrics.recordValid(parsed.wireVersion);
+          let body = parsed.message;
           const startedAt = Date.now();
           body = await hydrateRouteDestinationBinding(body);
           try {
@@ -1191,6 +1248,10 @@ async function pollLoop(
                 console.error(
                   `[loop] dead_letter insert failed for ${body.event_id}: ${safeDeliveryDiagnostic(deadLetterErr)}`,
                 );
+                // A terminal outcome without its durable dead-letter row is
+                // not ACK-safe. Re-deliver after the database recovers.
+                retries_.push(m.lease_id);
+                return;
               }
               try {
                 await markReplayDeliveryOutcome(body, attempt);
@@ -1276,20 +1337,26 @@ async function pollLoop(
             // Terminal failure — persist a dead_letters row BEFORE acking so the
             // event is visible in the inbox + replayable (audit: the pull loop
             // acked 'dead' with NO dead_letters insert = silent, non-replayable
-            // loss across every native delivery). Best-effort (matches the edge):
-            // a PG hiccup logs + still acks rather than re-running a dead delivery.
+            // loss across every native delivery). A database failure retries the
+            // lease because a terminal result without this row is not ACK-safe.
             const r = attempt.response;
             const ddMessage = (
               r && typeof r === "object" && typeof (r as Record<string, unknown>).error === "string"
                 ? ((r as Record<string, unknown>).error as string)
                 : JSON.stringify(r ?? {})
             );
+            let deadLetterPersisted = true;
             try {
               await insertDeliveryDeadLetter(body, "delivery_dead", ddMessage, attempt.created_at);
             } catch (err) {
+              deadLetterPersisted = false;
               console.error(
                 `[loop] dead_letter insert failed for ${body.event_id}: ${safeDeliveryDiagnostic(err)}`,
               );
+            }
+            if (!deadLetterPersisted) {
+              retries_.push(m.lease_id);
+              return;
             }
           }
           if (attempt.status === "success" || attempt.status === "dead") {
@@ -1308,7 +1375,9 @@ async function pollLoop(
             // a halved attempt budget, and bypassed backoff. A failed re-enqueue
             // throws and lands in the catch above (lease retried), so a returned
             // "retry" guarantees the re-enqueue succeeded. The spill object is
-            // intentionally NOT deleted — the re-enqueued message must hydrate it.
+            // now copied to the next attempt's canonical key before enqueue, so
+            // the old attempt's object can be removed without racing hydration.
+            await deleteSpillIfPresent(body, spillReader);
             acks.push(m.lease_id);
           }
         },
@@ -1381,10 +1450,6 @@ if (runWeb && SOURCE_LOOKUP_AUTH.usingDeliveryFallback) {
     "[boot] SOURCE_LOOKUP_SHARED_SECRET is not set — /internal/source is temporarily " +
     "using DELIVERY_SHARED_SECRET for bootstrap compatibility",
   );
-}
-
-interface DirectDeliverRequest {
-  message: DestinationQueueMessage;
 }
 
 interface InternalRoutesRequest {
@@ -1471,7 +1536,7 @@ const server = http.createServer((req, res) => {
     }
     void (async () => {
       try {
-        const snapshot = await renderMetrics(pool);
+        const snapshot = await renderMetrics(pool, queueConsumerMetrics);
         res.writeHead(200, { "content-type": "text/plain; version=0.0.4" });
         res.end(snapshot.text);
       } catch {
@@ -1675,22 +1740,34 @@ const server = http.createServer((req, res) => {
         return;
       }
 
-      let body: DirectDeliverRequest;
+      let rawMessage: unknown;
       try {
         const raw = await readBody(req);
-        body = JSON.parse(raw) as DirectDeliverRequest;
+        const body = JSON.parse(raw) as unknown;
+        rawMessage = body !== null && typeof body === "object" && !Array.isArray(body)
+          ? (body as Record<string, unknown>).message
+          : undefined;
       } catch {
         res.writeHead(400, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: "invalid_body" }));
         return;
       }
 
-      let message = body?.message;
-      if (!message || typeof message !== "object" || !message.event_id || !message.destination_id) {
+      const validated = validateDestinationQueueMessage(rawMessage);
+      if (!validated.ok) {
+        void sentry?.captureMessage("Direct delivery message failed runtime validation", {
+          level: "error",
+          tags: {
+            component: "direct_delivery_contract",
+            reason: validated.code,
+            field: validated.field,
+          },
+        }).catch(() => undefined);
         res.writeHead(400, { "content-type": "application/json" });
-        res.end(JSON.stringify({ ok: false, error: "missing_message" }));
+        res.end(JSON.stringify({ ok: false, error: "invalid_message" }));
         return;
       }
+      let message = validated.message;
       message = await hydrateRouteDestinationBinding(message);
       try {
         message = await hydrateIfSpilled(message, spillReader);
@@ -1759,6 +1836,12 @@ const server = http.createServer((req, res) => {
         // success/dead are terminal. All return 200; a genuine processing failure
         // throws and the catch below returns 503, where the edge correctly retries
         // (no re-enqueue happened in that case).
+        if (attempt.status === "retry") {
+          // Retry enqueue copies any spill to the next attempt's canonical key.
+          // Remove this attempt's copy only after processDeliveryMessage returns,
+          // which proves the replacement queue write succeeded.
+          await deleteSpillIfPresent(message, spillReader);
+        }
         const reportedStatus = attempt.status === "retry" ? "rescheduled" : attempt.status;
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({

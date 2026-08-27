@@ -1,6 +1,8 @@
-# Axel release ledger
+# Axel pre-public verification ledger
 
-Per-version verification results, written by `scripts/release-verify.mjs`.
+These entries came from internal verification runs before Axel had public Git
+tags. They are build records, not published releases. Public releases start at
+v0.1.0 and use reviewed tags.
 
 ## v1.0.11 — 2026-06-11 (green)
 

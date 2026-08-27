@@ -27,7 +27,7 @@ command -v jq >/dev/null
 api_base="https://api.render.com/v1"
 discovery_interval_seconds="${RENDER_DEPLOY_DISCOVERY_INTERVAL_SECONDS:-6}"
 poll_interval_seconds="${RENDER_DEPLOY_POLL_INTERVAL_SECONDS:-15}"
-timeout_seconds="${RENDER_DEPLOY_TIMEOUT_SECONDS:-7500}"
+timeout_seconds="${RENDER_DEPLOY_TIMEOUT_SECONDS:-2400}"
 
 if [[ ! "$discovery_interval_seconds" =~ ^[0-9]+$ ]] \
   || [[ ! "$poll_interval_seconds" =~ ^[0-9]+$ ]] \
@@ -40,6 +40,8 @@ readonly -a curl_read_args=(
   --fail-with-body
   --silent
   --show-error
+  --connect-timeout 10
+  --max-time 45
   --retry 5
   --retry-all-errors
   --retry-delay 3
@@ -114,6 +116,8 @@ case "$deploy_status" in
       curl \
         --silent \
         --show-error \
+        --connect-timeout 10 \
+        --max-time 45 \
         --write-out $'\n%{http_code}' \
         -H "Authorization: Bearer ${RENDER_API_KEY}" \
         -H 'Content-Type: application/json' \

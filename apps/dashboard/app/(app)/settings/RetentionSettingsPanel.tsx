@@ -16,6 +16,7 @@ import { Label } from "@/components/ui/label";
 export function RetentionSettingsPanel({
   current,
   canEdit,
+  rawPayloadControlAvailable,
 }: {
   current: {
     raw_payload_retention_days: number;
@@ -24,6 +25,7 @@ export function RetentionSettingsPanel({
     audit_log_retention_days: number;
   };
   canEdit: boolean;
+  rawPayloadControlAvailable: boolean;
 }) {
   const [state, action, pending] = useActionState<ActionState, FormData>(
     updateWorkspaceRetentionAction,
@@ -39,7 +41,7 @@ export function RetentionSettingsPanel({
           min={RETENTION_BOUNDS.raw_payload_retention_days.min}
           max={RETENTION_BOUNDS.raw_payload_retention_days.max}
           defaultValue={current.raw_payload_retention_days}
-          disabled={!canEdit}
+          disabled={!canEdit || !rawPayloadControlAvailable}
         />
         <RetentionField
           name="dead_letter_retention_days"
@@ -69,6 +71,16 @@ export function RetentionSettingsPanel({
           disabled={!canEdit}
         />
       </div>
+      {!rawPayloadControlAvailable ? (
+        <Alert>
+          <AlertDescription>
+            The small self-host profile fixes raw payload expiry at 30 days. Add
+            ClickHouse and the retention indexing path before offering shorter
+            raw retention or transient mode. Postgres retention settings below
+            remain enforceable.
+          </AlertDescription>
+        </Alert>
+      ) : null}
       {state.error ? (
         <Alert variant="destructive"><AlertDescription>{state.error}</AlertDescription></Alert>
       ) : null}

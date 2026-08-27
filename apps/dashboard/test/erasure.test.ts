@@ -156,7 +156,14 @@ describe("buildErasurePlan", () => {
 
   it("workspace-pins Postgres deletes by event_id (no ClickHouse-only base_event_id), and discloses out-of-scope stores", () => {
     const plan = buildErasurePlan("ws_1", matches);
-    expect(plan.postgres.map((s) => s.table)).toEqual(["dead_letters", "replay_requests", "delivery_idempotency", "erasure_subjects"]);
+    expect(plan.postgres.map((s) => s.table)).toEqual([
+      "data_contract_fixtures",
+      "data_contract_drift_events",
+      "dead_letters",
+      "replay_requests",
+      "delivery_idempotency",
+      "erasure_subjects",
+    ]);
     const replayStmt = plan.postgres.find((s) => s.table === "replay_requests")!.statement;
     expect(replayStmt).toContain("event_id = ANY($2)");
     // base_event_id does not exist in Postgres replay_requests — must never appear,

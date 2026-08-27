@@ -79,11 +79,14 @@ ENVELOPE=$(printf '%s\n%s\n%s\n' \
   '{"type":"check_in"}' \
   "$PAYLOAD")
 
-if ! curl -sS --max-time 10 -X POST "$ENVELOPE_URL" \
+if ! curl -sS --fail-with-body --output /dev/null --max-time 10 -X POST "$ENVELOPE_URL" \
   -H "content-type: application/x-sentry-envelope" \
   -H "x-sentry-auth: Sentry sentry_version=7, sentry_client=axel-ghactions/0.1, sentry_key=$DSN_KEY" \
   --data-binary "$ENVELOPE"; then
-  echo "[sentry-checkin] curl failed (non-fatal); status=$STATUS slug=$MONITOR_SLUG"
+  # Do not print the response body: provider errors can echo request context.
+  # The wrapped job remains authoritative, but a failed monitor signal must be
+  # visible in Actions rather than silently accepted as a successful check-in.
+  echo "::warning::[sentry-checkin] Sentry rejected or did not receive the check-in (non-fatal); status=$STATUS slug=$MONITOR_SLUG"
 fi
 
 # Emit check_in_id only on the in_progress call so follow-up steps can use it.

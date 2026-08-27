@@ -15,7 +15,7 @@ on:
         required: true
 
 concurrency:
-  group: migrate-clickhouse-${{ inputs.target }}
+  group: production-deploy
   cancel-in-progress: false
 
 jobs:
@@ -23,6 +23,7 @@ jobs:
     name: Apply schema
     if: ${{ github.ref == 'refs/heads/main' && inputs.confirm == 'apply-schema' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: Production
     permissions:
       contents: read

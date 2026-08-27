@@ -221,6 +221,93 @@ describe("delivery-edge queue handler", () => {
     expect(sqlState.deadLetters.length).toBe(1);
   });
 
+  it("retries a terminal delivery when its durable dead-letter write fails", async () => {
+    sqlState.destinations = [destination("http", { url: "https://receiver.example" })];
+    sqlState.failDeadLetterInsert = true;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("", { status: 404 }));
+    const spillBody = new TextEncoder().encode(JSON.stringify({
+      payload: { hello: "world" },
+      headers: {},
+      query: {},
+    }));
+    const del = vi.fn().mockResolvedValue(undefined);
+    const get = vi.fn().mockResolvedValue({
+      arrayBuffer: vi.fn().mockResolvedValue(spillBody.buffer),
+    });
+    const message = queueMessage({
+      ...destinationMessage(),
+      payload: null,
+      spill_r2_key: "queue-spill/ws-1/evt-1/dest-1/1.json",
+    });
+
+    await worker.queue(
+      batch("axel-delivery", [message]),
+      env({ EVENTS_RAW: { get, delete: del, put: vi.fn() } }),
+      executionContext(),
+    );
+
+    expect(get).toHaveBeenCalledOnce();
+    expect(message.retry).toHaveBeenCalledOnce();
+    expect(message.ack).not.toHaveBeenCalled();
+    expect(del).not.toHaveBeenCalled();
+    expect(sqlState.deadLetters).toHaveLength(0);
+  });
+
+  it("rejects unknown queue versions before R2 or database access", async () => {
+    const get = vi.fn();
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+    const message = queueMessage({
+      ...destinationMessage(),
+      queue_message_version: 2,
+      spill_r2_key: "queue-spill/ws-1/evt-1/dest-1/1.json",
+    });
+
+    await worker.queue(
+      batch("axel-delivery", [message]),
+      env({ EVENTS_RAW: { get, delete: vi.fn(), put: vi.fn() } }),
+      executionContext(),
+    );
+
+    expect(message.retry).toHaveBeenCalledOnce();
+    expect(message.ack).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(sqlState.queries).toEqual([]);
+    expect(sqlState.end).not.toHaveBeenCalled();
+    expect(logDeliveryAttemptMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed queue bodies before R2 or database access", async () => {
+    const get = vi.fn();
+    const { workspace_id: _, ...missingWorkspace } = destinationMessage();
+    const message = queueMessage(missingWorkspace);
+
+    await worker.queue(
+      batch("axel-delivery", [message]),
+      env({ EVENTS_RAW: { get, delete: vi.fn(), put: vi.fn() } }),
+      executionContext(),
+    );
+
+    expect(message.retry).toHaveBeenCalledOnce();
+    expect(message.ack).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+    expect(sqlState.queries).toEqual([]);
+    expect(sqlState.end).not.toHaveBeenCalled();
+  });
+
+  it("accepts an unversioned legacy message during a rolling deploy", async () => {
+    sqlState.destinations = [destination("http", { url: "https://receiver.example" })];
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+    const { queue_message_version: _, ...legacyBody } = destinationMessage();
+    const message = queueMessage(legacyBody);
+
+    await worker.queue(batch("axel-delivery", [message]), env(), executionContext());
+
+    expect(message.ack).toHaveBeenCalledOnce();
+    expect(message.retry).not.toHaveBeenCalled();
+    expect(sqlState.queries.some((query) => query.includes("FROM destinations"))).toBe(true);
+  });
+
   it("skips a delivery whose idempotency claim is already completed (no double-deliver)", async () => {
     // Theme B (b1): CF redelivery of an already-completed delivery must NOT
     // re-POST. The claim query reports a prior completion.
@@ -784,16 +871,9 @@ describe("delivery-edge queue handler", () => {
     // which previously leaked into R2 forever.
     const del = vi.fn().mockResolvedValue(undefined);
     const message = queueMessage({
-      workspace_id: "ws-1",
-      event_id: "evt-1",
-      source_id: "src-1",
-      route_id: "rt-1",
-      destination_id: "dest-1",
-      r2_key: "events/ws-1/evt-1.json",
+      ...destinationMessage(),
+      payload: null,
       spill_r2_key: "queue-spill/ws-1/evt-1/dest-1/1.json",
-      reason: "delivery_failed",
-      message: "exhausted retries",
-      errored_at: "2026-05-02T12:00:00.000Z",
     });
 
     await worker.queue(
@@ -804,6 +884,25 @@ describe("delivery-edge queue handler", () => {
 
     expect(sqlState.deadLetters).toHaveLength(1);
     expect(del).toHaveBeenCalledWith("queue-spill/ws-1/evt-1/dest-1/1.json");
+    expect(message.ack).toHaveBeenCalledOnce();
+  });
+
+  it("does not delete an untrusted spill key from a malformed auto-DLQ body", async () => {
+    const del = vi.fn().mockResolvedValue(undefined);
+    const message = queueMessage({
+      ...destinationMessage(),
+      queue_message_version: 2,
+      spill_r2_key: "queue-spill/ws-victim/evt-victim/dest-victim/1.json",
+    });
+
+    await worker.queue(
+      batch("axel-dead-letter", [message]),
+      env({ EVENTS_RAW: { put: vi.fn(), delete: del } }),
+      executionContext(),
+    );
+
+    expect(sqlState.deadLetters).toHaveLength(1);
+    expect(del).not.toHaveBeenCalled();
     expect(message.ack).toHaveBeenCalledOnce();
   });
 
@@ -910,6 +1009,7 @@ function executionContext() {
 
 function destinationMessage(): DestinationQueueMessage {
   return {
+    queue_message_version: 1,
     event_id: "evt-1",
     workspace_id: "ws-1",
     source_id: "src-1",

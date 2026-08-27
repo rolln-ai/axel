@@ -1,0 +1,55 @@
+name: Production Delivery Canary
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: production-delivery-canary
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    name: Ingest to native destination
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    # Unattended monitoring must not share the reviewer-gated deployment
+    # environment. This environment holds only canary and monitoring secrets.
+    environment: Monitoring
+    timeout-minutes: 8
+    permissions:
+      contents: read
+    env:
+      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+      SENTRY_ENVIRONMENT: production
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: .node-version
+
+      - name: Sentry check-in started
+        id: checkin
+        if: env.SENTRY_DSN != ''
+        run: bash scripts/sentry-cron-checkin.sh in_progress production-delivery-canary '' '*/15 * * * *' 5 30
+
+      - name: Prove production delivery
+        run: node scripts/delivery-canary.mjs
+        env:
+          AXEL_CANARY_INGEST_URL: ${{ secrets.AXEL_CANARY_INGEST_URL }}
+          AXEL_CANARY_INGEST_AUTH_HEADER: ${{ secrets.AXEL_CANARY_INGEST_AUTH_HEADER }}
+          AXEL_CANARY_INGEST_AUTH_VALUE: ${{ secrets.AXEL_CANARY_INGEST_AUTH_VALUE }}
+          AXEL_CANARY_RECEIPT_URL: ${{ secrets.AXEL_CANARY_RECEIPT_URL }}
+          AXEL_CANARY_RECEIPT_AUTH_HEADER: ${{ secrets.AXEL_CANARY_RECEIPT_AUTH_HEADER }}
+          AXEL_CANARY_RECEIPT_AUTH_VALUE: ${{ secrets.AXEL_CANARY_RECEIPT_AUTH_VALUE }}
+          AXEL_CANARY_TIMEOUT_MS: "180000"
+          AXEL_CANARY_POLL_INTERVAL_MS: "5000"
+
+      - name: Sentry check-in passed
+        if: success() && env.SENTRY_DSN != '' && steps.checkin.outputs.check_in_id != ''
+        run: bash scripts/sentry-cron-checkin.sh ok production-delivery-canary "${{ steps.checkin.outputs.check_in_id }}"
+
+      - name: Sentry check-in failed
+        if: failure() && env.SENTRY_DSN != '' && steps.checkin.outputs.check_in_id != ''
+        run: bash scripts/sentry-cron-checkin.sh error production-delivery-canary "${{ steps.checkin.outputs.check_in_id }}"

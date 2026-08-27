@@ -55,6 +55,10 @@ export interface CurrentSession {
 export interface AuthenticatedUser {
   user: SessionUser;
   impersonator: ImpersonatorInfo | null;
+  /** Per-user administrator MFA enrollment. Null for ordinary users and unenrolled admins. */
+  adminMfaEnabledAt: string | null;
+  /** Last successful MFA step-up for this specific session. */
+  adminMfaVerifiedAt: string | null;
 }
 
 export class WorkspaceSuspendedError extends Error {
@@ -253,15 +257,20 @@ export const getAuthenticatedUser = cache(async (): Promise<AuthenticatedUser | 
     user_email_verified_at: string | null;
     impersonator_user_id: string | null;
     impersonator_email: string | null;
+    admin_mfa_enabled_at: string | null;
+    admin_mfa_verified_at: string | null;
   }>(
     `SELECT u.id AS user_id, u.email AS user_email, u.name AS user_name,
             u.is_super_admin AS user_is_super_admin,
             u.email_verified_at::text AS user_email_verified_at,
             s.impersonator_user_id,
-            imp.email AS impersonator_email
+            imp.email AS impersonator_email,
+            m.enabled_at::text AS admin_mfa_enabled_at,
+            s.admin_mfa_verified_at::text AS admin_mfa_verified_at
        FROM user_sessions s
        JOIN users u ON u.id = s.user_id
        LEFT JOIN users imp ON imp.id = s.impersonator_user_id
+       LEFT JOIN admin_mfa_methods m ON m.user_id = u.id
       WHERE s.session_token_hash = $1
         AND s.expires_at > now()
       LIMIT 1`,
@@ -281,6 +290,8 @@ export const getAuthenticatedUser = cache(async (): Promise<AuthenticatedUser | 
       row.impersonator_user_id && row.impersonator_email
         ? { id: row.impersonator_user_id, email: row.impersonator_email }
         : null,
+    adminMfaEnabledAt: row.admin_mfa_enabled_at,
+    adminMfaVerifiedAt: row.admin_mfa_verified_at,
   };
 });
 

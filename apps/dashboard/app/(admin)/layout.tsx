@@ -1,9 +1,9 @@
 import { Suspense } from "react";
 import { redirect } from "next/navigation";
+import { adminMfaChallengePath, hasFreshAdminMfa } from "../../lib/admin-auth";
 import { getAuthenticatedUser, type AuthenticatedUser } from "../../lib/session";
 import { ToastProvider } from "../_components/Toast";
 import { AdminShell } from "./AdminShell";
-import { StopImpersonationBar } from "./_components/StopImpersonationBar";
 import { AdminShellChromeSkeleton } from "./AdminShellChromeSkeleton";
 
 /**
@@ -45,15 +45,9 @@ async function AuthenticatedAdminShell({
   // Mirror the requireSuperAdmin() gate: non-admins land back on /dashboard
   // so /admin URLs aren't enumerable as "you exist but you're not admin."
   if (!auth.user.isSuperAdmin) redirect("/dashboard");
-  return (
-    <>
-      {auth.impersonator ? (
-        <StopImpersonationBar
-          impersonatorEmail={auth.impersonator.email}
-          viewingAs={auth.user.email}
-        />
-      ) : null}
-      <AdminShell auth={auth}>{children}</AdminShell>
-    </>
-  );
+  if (auth.impersonator) redirect("/dashboard");
+  if (!hasFreshAdminMfa(auth)) {
+    redirect(adminMfaChallengePath());
+  }
+  return <AdminShell auth={auth}>{children}</AdminShell>;
 }

@@ -4,8 +4,12 @@ Talk to your Axel webhook pipeline from the terminal. Mint a Personal
 Access Token from the dashboard → Settings → Personal access tokens, then
 sign in.
 
+The npm package is not published yet. Build and install it from a source
+checkout:
+
 ```sh
-npm i -g @axel/cli
+pnpm --filter @axel/cli build
+npm install -g ./packages/cli
 axel auth login
 ```
 

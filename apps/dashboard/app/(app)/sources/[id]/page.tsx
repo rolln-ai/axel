@@ -47,6 +47,7 @@ import {
   type SourceEventStats,
 } from "../../../../lib/usage";
 import { fetchPayloadForR2Key, GENERIC_SAMPLE } from "../../../../lib/sample-payload";
+import { deploymentCapabilities } from "../../../../lib/deployment-capabilities";
 import type { FieldSpec, InferredDataContract } from "../../../../lib/data-contracts/inference";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -709,6 +710,7 @@ function SettingsTab({
           initialRetentionOverride={source.raw_payload_retention_days}
           workspaceDefaultDays={source.workspace_raw_payload_retention_days}
           canMutate={canMutate}
+          capabilityAvailable={deploymentCapabilities().configurableRawPayloadRetention}
         />
       </div>
       <small className="block text-xs text-muted-foreground">

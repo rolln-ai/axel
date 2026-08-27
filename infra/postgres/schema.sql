@@ -499,6 +499,83 @@ CREATE INDEX IF NOT EXISTS dead_letters_workspace_unresolved_reason_time_idx
   ON dead_letters (workspace_id, reason, errored_at DESC)
   WHERE resolved_at IS NULL;
 
+-- Metadata-only quarantine for malformed delivery queue messages. The raw
+-- body stays in Cloudflare's bounded retry and dead-letter flow; do not add a
+-- payload/body column here because the envelope may contain webhook data.
+CREATE TABLE IF NOT EXISTS queue_quarantine (
+  id bigserial PRIMARY KEY,
+  queue_name text NOT NULL,
+  cloudflare_message_id text NOT NULL,
+  failure_code text NOT NULL,
+  failure_field text,
+  contract_version integer,
+  attempts integer NOT NULL CHECK (attempts >= 1),
+  content_type text,
+  published_at timestamptz,
+  body_sha256 text NOT NULL CHECK (body_sha256 ~ '^[0-9a-f]{64}$'),
+  body_size_bytes integer NOT NULL CHECK (body_size_bytes >= 0),
+  first_seen_at timestamptz NOT NULL DEFAULT now(),
+  last_seen_at timestamptz NOT NULL DEFAULT now(),
+  seen_count integer NOT NULL DEFAULT 1 CHECK (seen_count >= 1),
+  expires_at timestamptz NOT NULL DEFAULT now() + interval '30 days',
+  UNIQUE (queue_name, cloudflare_message_id)
+);
+
+CREATE INDEX IF NOT EXISTS queue_quarantine_last_seen_idx
+  ON queue_quarantine (last_seen_at DESC);
+
+CREATE INDEX IF NOT EXISTS queue_quarantine_expires_idx
+  ON queue_quarantine (expires_at);
+
+COMMENT ON TABLE queue_quarantine IS
+  'Metadata-only audit records for malformed delivery queue messages. Never stores message bodies, headers, query values, credentials, or lease IDs.';
+
+-- Synthetic receipts for the production end-to-end delivery canary. The
+-- shape and size checks make an accidental customer-data route fail closed.
+-- The receipt API prunes rows older than seven days after a successful read.
+CREATE TABLE IF NOT EXISTS delivery_canary_receipts (
+  payload jsonb NOT NULL,
+  received_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT delivery_canary_receipts_shape_check CHECK (
+    COALESCE(
+      jsonb_typeof(payload) = 'object'
+      AND payload ?& ARRAY[
+        'event_type',
+        'axel_canary_probe_id',
+        'sent_at',
+        'expected_runtime'
+      ]::text[]
+      AND payload - ARRAY[
+        'event_type',
+        'axel_canary_probe_id',
+        'sent_at',
+        'expected_runtime'
+      ]::text[] = '{}'::jsonb
+      AND payload ->> 'event_type' = 'axel.delivery_canary'
+      AND payload ->> 'expected_runtime' = 'native'
+      AND payload ->> 'axel_canary_probe_id'
+        ~ '^axel_canary_[0-9]{10,16}_[0-9a-f]{12}$'
+      AND payload ->> 'sent_at'
+        ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$',
+      false
+    )
+  ),
+  CONSTRAINT delivery_canary_receipts_size_check CHECK (
+    pg_column_size(payload) <= 1024
+  )
+);
+
+CREATE INDEX IF NOT EXISTS delivery_canary_receipts_probe_time_idx
+  ON delivery_canary_receipts (
+    (payload ->> 'axel_canary_probe_id'),
+    received_at DESC
+  );
+
+REVOKE ALL PRIVILEGES ON TABLE delivery_canary_receipts FROM PUBLIC;
+
+COMMENT ON TABLE delivery_canary_receipts IS
+  'Short-lived synthetic delivery-canary receipts. The shape and size checks prevent this table from accepting customer webhook payloads.';
+
 -- Replay requests are written by the dashboard and consumed by the router.
 -- A replay re-fetches the raw payload from R2 (via r2_key) and re-runs the
 -- routing pipeline. State transitions: pending -> in_progress in the router;
@@ -906,6 +983,26 @@ CREATE INDEX IF NOT EXISTS pull_sync_runs_workspace_time_idx
 ALTER TABLE users
   ADD COLUMN IF NOT EXISTS is_super_admin boolean NOT NULL DEFAULT false;
 
+-- Authenticator-app MFA for platform super-admins. The secret is encrypted by
+-- the dashboard with CREDENTIALS_MASTER_KEY; only ciphertext reaches Postgres.
+CREATE TABLE IF NOT EXISTS admin_mfa_methods (
+  user_id text PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  secret_ciphertext bytea NOT NULL,
+  enabled_at timestamptz,
+  last_used_counter bigint CHECK (last_used_counter IS NULL OR last_used_counter >= 0),
+  enrollment_session_token_hash text,
+  enrollment_expires_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+ALTER TABLE user_sessions
+  ADD COLUMN IF NOT EXISTS admin_mfa_verified_at timestamptz;
+
+CREATE INDEX IF NOT EXISTS user_sessions_admin_mfa_verified_idx
+  ON user_sessions (user_id, admin_mfa_verified_at DESC)
+  WHERE admin_mfa_verified_at IS NOT NULL;
+
 -- Workspace lifecycle. `status='suspended'` blocks mutating actions via
 -- lib/session.ts#assertWorkspaceWritable but keeps the data visible.
 -- `status='deleted'` is reserved for admin soft-delete. `status='deleting'` is
@@ -1013,8 +1110,8 @@ CREATE INDEX IF NOT EXISTS digest_sends_date_idx ON digest_sends (digest_date);
 -- Data Contracts (formerly "Event Maps", renamed in migration 0024) — Axel's
 -- AI-native event understanding layer (AXE-22). See migrations 0006 (original)
 -- + 0024 (rename) for rationale. A Data Contract is a durable, versioned schema
--- + transform contract for a source. Versions are immutable. Raw payloads are
--- never stored here; only references back into ClickHouse/R2.
+-- + transform contract for a source. Versions are immutable. Migration 0069
+-- strips observed values and stores fixtures as type-and-shape templates.
 --
 -- These definitions MUST use the post-0024 names: this schema.sql is applied
 -- verbatim to fresh/CI environments (and, via migrate-postgres.yml, prod). The
@@ -1108,6 +1205,276 @@ CREATE INDEX IF NOT EXISTS data_contract_drift_events_unresolved_idx
 
 CREATE INDEX IF NOT EXISTS data_contract_drift_events_workspace_time_idx
   ON data_contract_drift_events (workspace_id, observed_at DESC);
+
+-- Durable Data Contracts retain structural metadata, never observed webhook
+-- values. Migration 0069 scrubs upgraded databases; these functions and
+-- triggers give fresh schema-bootstrap databases the same enforcement.
+CREATE OR REPLACE FUNCTION axel_scrub_data_contract_schema_node(value jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+IMMUTABLE
+PARALLEL SAFE
+AS $$
+DECLARE
+  kind text;
+  cleaned jsonb;
+BEGIN
+  IF value IS NULL THEN
+    RETURN NULL;
+  END IF;
+  kind := jsonb_typeof(value);
+  IF kind = 'array' THEN
+    SELECT COALESCE(jsonb_agg(axel_scrub_data_contract_schema_node(item)), '[]'::jsonb)
+      INTO cleaned
+      FROM jsonb_array_elements(value) AS items(item);
+    RETURN cleaned;
+  END IF;
+  IF kind = 'object' THEN
+    SELECT COALESCE(
+             jsonb_object_agg(
+               key,
+               CASE
+                 WHEN key IN ('values', 'example_event_ids') THEN '[]'::jsonb
+                 ELSE axel_scrub_data_contract_schema_node(child)
+               END
+             ),
+             '{}'::jsonb
+           )
+      INTO cleaned
+      FROM jsonb_each(value) AS entries(key, child)
+     WHERE key NOT IN ('examples', 'enum_values', 'numeric_range');
+    RETURN cleaned;
+  END IF;
+  RETURN value;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION axel_scrub_data_contract_schema(value jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+IMMUTABLE
+PARALLEL SAFE
+AS $$
+DECLARE
+  cleaned jsonb;
+BEGIN
+  cleaned := axel_scrub_data_contract_schema_node(COALESCE(value, '{}'::jsonb));
+  IF jsonb_typeof(cleaned) <> 'object' THEN
+    cleaned := '{}'::jsonb;
+  END IF;
+  RETURN jsonb_set(
+    cleaned,
+    '{summary}',
+    to_jsonb('Stored schema metadata. Observed payload values removed.'::text),
+    true
+  );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION axel_strip_data_contract_previews(value jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+IMMUTABLE
+PARALLEL SAFE
+AS $$
+DECLARE
+  kind text;
+  cleaned jsonb;
+BEGIN
+  IF value IS NULL THEN
+    RETURN NULL;
+  END IF;
+  kind := jsonb_typeof(value);
+  IF kind = 'array' THEN
+    SELECT COALESCE(jsonb_agg(axel_strip_data_contract_previews(item)), '[]'::jsonb)
+      INTO cleaned
+      FROM jsonb_array_elements(value) AS items(item);
+    RETURN cleaned;
+  END IF;
+  IF kind = 'object' THEN
+    SELECT COALESCE(
+             jsonb_object_agg(key, axel_strip_data_contract_previews(child)),
+             '{}'::jsonb
+           )
+      INTO cleaned
+      FROM jsonb_each(value) AS entries(key, child)
+     WHERE key <> 'preview';
+    RETURN cleaned;
+  END IF;
+  RETURN value;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION axel_generalize_data_contract_fixture(value jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+IMMUTABLE
+PARALLEL SAFE
+AS $$
+DECLARE
+  kind text;
+  cleaned jsonb;
+BEGIN
+  IF value IS NULL OR jsonb_typeof(value) = 'null' THEN
+    RETURN 'null'::jsonb;
+  END IF;
+  kind := jsonb_typeof(value);
+  IF kind = 'array' THEN
+    IF jsonb_array_length(value) = 0 THEN
+      RETURN '[]'::jsonb;
+    END IF;
+    RETURN jsonb_build_array(axel_generalize_data_contract_fixture(value -> 0));
+  END IF;
+  IF kind = 'object' THEN
+    SELECT COALESCE(
+             jsonb_object_agg(
+               CASE
+                 WHEN key ~ '^[A-Za-z_][A-Za-z0-9_.-]{0,127}$' THEN key
+                 ELSE 'field_' || ordinal::text
+               END,
+               axel_generalize_data_contract_fixture(child)
+             ),
+             '{}'::jsonb
+           )
+      INTO cleaned
+      FROM jsonb_each(value) WITH ORDINALITY AS entries(key, child, ordinal);
+    RETURN cleaned;
+  END IF;
+  IF kind = 'string' THEN
+    RETURN to_jsonb('[STRING]'::text);
+  END IF;
+  IF kind = 'number' THEN
+    RETURN '0'::jsonb;
+  END IF;
+  IF kind = 'boolean' THEN
+    RETURN 'false'::jsonb;
+  END IF;
+  RETURN 'null'::jsonb;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION axel_data_contract_json_allowlist(value jsonb, keys text[])
+RETURNS jsonb
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+AS $$
+  SELECT COALESCE(jsonb_object_agg(entry.key, entry.value), '{}'::jsonb)
+    FROM jsonb_each(
+      CASE WHEN jsonb_typeof(value) = 'object' THEN value ELSE '{}'::jsonb END
+    ) AS entry
+   WHERE entry.key = ANY(keys)
+$$;
+
+CREATE OR REPLACE FUNCTION axel_enforce_data_contract_version_privacy()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  mapped_destination_id text;
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM data_contracts c
+     WHERE c.id = NEW.data_contract_id AND c.workspace_id = NEW.workspace_id
+  ) THEN
+    RAISE EXCEPTION 'data contract version workspace mismatch'
+      USING ERRCODE = '23503';
+  END IF;
+  NEW.inferred_schema := axel_scrub_data_contract_schema(NEW.inferred_schema);
+  NEW.destination_mapping := axel_strip_data_contract_previews(NEW.destination_mapping);
+  NEW.model_metadata := axel_data_contract_json_allowlist(
+    NEW.model_metadata,
+    ARRAY[
+      'model', 'prompt_version', 'sample_count', 'llm_enriched', 'ms', 'auto',
+      'auto_extended_at', 'auto_extended_from_version_id',
+      'manually_extended_at', 'manually_extended_from_version_id',
+      'manually_extended_by_user_id', 'destination_mapping_saved_at',
+      'destination_mapping_saved_by_user_id', 'codegen_at', 'codegen_by_user_id',
+      'patched_at', 'patched_by_user_id', 'patch_confidence'
+    ]::text[]
+  );
+  NEW.fixture_results := CASE
+    WHEN NEW.fixture_results IS NULL THEN NULL
+    ELSE axel_data_contract_json_allowlist(
+      NEW.fixture_results,
+      ARRAY['passed', 'failed', 'total', 'ran_at']::text[]
+    )
+  END;
+  IF NEW.destination_mapping IS NOT NULL THEN
+    IF jsonb_typeof(NEW.destination_mapping) <> 'object' THEN
+      RAISE EXCEPTION 'data contract destination mapping must be an object'
+        USING ERRCODE = '23514';
+    END IF;
+    mapped_destination_id := NULLIF(NEW.destination_mapping ->> 'destination_id', '');
+    IF mapped_destination_id IS NULL OR NOT EXISTS (
+      SELECT 1 FROM destinations d
+       WHERE d.id = mapped_destination_id AND d.workspace_id = NEW.workspace_id
+    ) THEN
+      RAISE EXCEPTION 'data contract destination workspace mismatch'
+        USING ERRCODE = '23503';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS data_contract_versions_privacy_guard
+  ON data_contract_versions;
+CREATE TRIGGER data_contract_versions_privacy_guard
+BEFORE INSERT OR UPDATE ON data_contract_versions
+FOR EACH ROW EXECUTE FUNCTION axel_enforce_data_contract_version_privacy();
+
+CREATE OR REPLACE FUNCTION axel_enforce_data_contract_fixture_privacy()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM data_contract_versions v
+     WHERE v.id = NEW.data_contract_version_id AND v.workspace_id = NEW.workspace_id
+  ) THEN
+    RAISE EXCEPTION 'data contract fixture workspace mismatch'
+      USING ERRCODE = '23503';
+  END IF;
+  NEW.source_event_id := NULL;
+  NEW.event_type := NULL;
+  NEW.input_payload := axel_generalize_data_contract_fixture(NEW.input_payload);
+  NEW.expected_output := axel_generalize_data_contract_fixture(NEW.expected_output);
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS data_contract_fixtures_privacy_guard
+  ON data_contract_fixtures;
+CREATE TRIGGER data_contract_fixtures_privacy_guard
+BEFORE INSERT OR UPDATE ON data_contract_fixtures
+FOR EACH ROW EXECUTE FUNCTION axel_enforce_data_contract_fixture_privacy();
+
+CREATE OR REPLACE FUNCTION axel_enforce_data_contract_drift_privacy()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM data_contract_versions v
+     WHERE v.id = NEW.data_contract_version_id
+       AND v.data_contract_id = NEW.data_contract_id
+       AND v.workspace_id = NEW.workspace_id
+  ) THEN
+    RAISE EXCEPTION 'data contract drift workspace mismatch'
+      USING ERRCODE = '23503';
+  END IF;
+  NEW.sample_event_id := NULL;
+  NEW.detail := '{}'::jsonb;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS data_contract_drift_events_privacy_guard
+  ON data_contract_drift_events;
+CREATE TRIGGER data_contract_drift_events_privacy_guard
+BEFORE INSERT OR UPDATE ON data_contract_drift_events
+FOR EACH ROW EXECUTE FUNCTION axel_enforce_data_contract_drift_privacy();
 
 -- AXE-26: workspace-scoped Personal Access Tokens used by the Axel
 -- CLI. Stored as SHA-256 hash; plaintext is shown to the operator

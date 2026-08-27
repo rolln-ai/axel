@@ -15,16 +15,17 @@ permissions:
 jobs:
   enable:
     name: Enable auto-merge
+    # Keep the write-capable token unavailable to forks. The shell repeats
+    # this check as defense in depth before it calls the GitHub API.
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
     steps:
       - name: Enable auto-merge for Codex Linear branches
         env:
           # Enable auto-merge with a PAT/App token (secrets.AUTOMERGE_TOKEN) so
           # the resulting merge is attributed to a real identity. GitHub
-          # SUPPRESSES on:push workflows — CI, Deploy Cloudflare Workers,
-          # Post-merge Smoke, and the Linear move-to-Deployed sync — for merges
-          # driven by the default GITHUB_TOKEN (anti-recursion). A PAT/App token
-          # is not GITHUB_TOKEN, so those workflows run on the merge commit.
+          # suppresses downstream workflow runs created by GITHUB_TOKEN; a
+          # PAT/App token preserves push CI and release attribution.
           # Falls back to github.token until the secret is set (current behavior,
           # no regression) — see ROL-209.
           GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN || github.token }}

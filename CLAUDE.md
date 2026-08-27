@@ -4,9 +4,10 @@ Guidance for AI agents working in this repo (the Axel platform).
 
 ## What this repo is
 
-The open-source Axel webhook platform — and the production source for Axel
-Cloud, which deploys from `main`. Treat every change as production-bound:
-deploy workflows in `.github/workflows/` push to the cloud on merge.
+The Axel webhook platform — and the production source for Axel Cloud. Treat
+every change as production-bound: reviewed commits land on `main`, then a
+maintainer manually promotes them through the protected Production environment
+using the deployment workflows in `.github/workflows/`.
 
 ## Working here
 

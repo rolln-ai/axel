@@ -268,7 +268,7 @@ command_init() {
   fi
   node "$ROOT_DIR/scripts/self-host/env-file.mjs" init "$ENV_FILE"
   echo "[self-host] generated $ENV_FILE (mode 0600)"
-  echo "[self-host] set AXEL_PUBLIC_URL, CLOUDFLARE_ACCOUNT_ID, and CLOUDFLARE_API_TOKEN, then run:"
+  echo "[self-host] set AXEL_PUBLIC_URL, CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, and CLOUDFLARE_RUNTIME_API_TOKEN, then run:"
   echo "  ./scripts/axel-self-host edge"
 }
 
@@ -285,12 +285,17 @@ command_doctor() {
     echo "[self-host] workspace dependencies are missing; run 'pnpm install' or let the edge command install them"
     failed=1
   fi
-  for name in AXEL_PUBLIC_URL AXEL_DELIVERY_PUBLIC_URL AXEL_RESOURCE_PREFIX AXEL_INSTALLATION_ID CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN POSTGRES_PASSWORD DELIVERY_SHARED_SECRET SOURCE_LOOKUP_SHARED_SECRET INGEST_ADMIN_TOKEN CRON_SECRET; do
+  for name in AXEL_PUBLIC_URL AXEL_DELIVERY_PUBLIC_URL AXEL_RESOURCE_PREFIX AXEL_INSTALLATION_ID CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN CLOUDFLARE_RUNTIME_API_TOKEN POSTGRES_PASSWORD DELIVERY_SHARED_SECRET SOURCE_LOOKUP_SHARED_SECRET INGEST_ADMIN_TOKEN CRON_SECRET; do
     if [ -z "${!name:-}" ]; then
       echo "[self-host] missing: $name"
       failed=1
     fi
   done
+  if [ -n "${CLOUDFLARE_API_TOKEN:-}" ] \
+    && [ "${CLOUDFLARE_API_TOKEN}" = "${CLOUDFLARE_RUNTIME_API_TOKEN:-}" ]; then
+    echo "[self-host] CLOUDFLARE_RUNTIME_API_TOKEN must differ from the provisioning token"
+    failed=1
+  fi
   if [[ "${CREDENTIALS_MASTER_KEY:-}" =~ ^[0-9a-fA-F]{64}$ ]]; then
     echo "[self-host] credentials master key: valid length"
   else
@@ -324,6 +329,11 @@ command_edge() {
   require_value AXEL_DELIVERY_PUBLIC_URL
   require_value CLOUDFLARE_ACCOUNT_ID
   require_value CLOUDFLARE_API_TOKEN
+  require_value CLOUDFLARE_RUNTIME_API_TOKEN
+  if [ "$CLOUDFLARE_API_TOKEN" = "$CLOUDFLARE_RUNTIME_API_TOKEN" ]; then
+    echo "[self-host] CLOUDFLARE_RUNTIME_API_TOKEN must differ from the provisioning token" >&2
+    exit 1
+  fi
   require_value DELIVERY_SHARED_SECRET
   require_value SOURCE_LOOKUP_SHARED_SECRET
   require_value INGEST_ADMIN_TOKEN
@@ -383,6 +393,11 @@ command_edge() {
     exit 1
   fi
 
+  CLOUDFLARE_RUNTIME_API_TOKEN="$CLOUDFLARE_RUNTIME_API_TOKEN" \
+    DELIVERY_QUEUE_ID="$delivery_queue_id" \
+    RAW_PAYLOAD_BUCKET="$RAW_PAYLOAD_BUCKET" \
+    node "$ROOT_DIR/scripts/self-host/verify-runtime-token.mjs"
+
   echo "[self-host] deploying ingest worker"
   local deploy_output ingest_url
   deploy_output="$(wrangler deploy -c "$ingest_config" 2>&1 | tee /dev/stderr)"
@@ -416,14 +431,20 @@ command_edge() {
 
 command_up() {
   need_command docker
+  need_command node
   load_env
-  for name in DELIVERY_QUEUE_ID RAW_PAYLOAD_BUCKET NEXT_PUBLIC_AXEL_INGEST_URL POSTGRES_PASSWORD CREDENTIALS_MASTER_KEY CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN AXEL_PUBLIC_URL AXEL_DELIVERY_PUBLIC_URL; do
+  for name in DELIVERY_QUEUE_ID RAW_PAYLOAD_BUCKET NEXT_PUBLIC_AXEL_INGEST_URL POSTGRES_PASSWORD CREDENTIALS_MASTER_KEY CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN CLOUDFLARE_RUNTIME_API_TOKEN AXEL_PUBLIC_URL AXEL_DELIVERY_PUBLIC_URL; do
     require_value "$name"
   done
+  if [ "$CLOUDFLARE_API_TOKEN" = "$CLOUDFLARE_RUNTIME_API_TOKEN" ]; then
+    echo "[self-host] CLOUDFLARE_RUNTIME_API_TOKEN must differ from the provisioning token" >&2
+    exit 1
+  fi
   require_strong_secret DELIVERY_SHARED_SECRET
   require_strong_secret SOURCE_LOOKUP_SHARED_SECRET
   require_strong_secret INGEST_ADMIN_TOKEN
   require_strong_secret CRON_SECRET
+  node "$ROOT_DIR/scripts/self-host/verify-runtime-token.mjs"
   compose up -d --build
   echo "[self-host] Axel is starting at $AXEL_PUBLIC_URL"
   echo "[self-host] run './scripts/axel-self-host status' to check health"

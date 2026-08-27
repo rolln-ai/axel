@@ -10,86 +10,33 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
 
 concurrency:
-  group: preview-deploy-smoke-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  group: preview-deploy-smoke-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   preview:
+    # This is the fork-safe required check. It deliberately has no secrets and
+    # does not deploy. Hosted PR previews are currently disabled; an operator
+    # can stage an exact commit through the protected deployment workflow.
     name: Preview deploy smoke
+    if: ${{ github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 9.12.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: .node-version
-      # Node 22.12.0 ships a corepack whose npm signing keys cannot verify
-      # current pnpm releases (`Cannot find matching keyid`). `vercel build`
-      # then runs vercel.json's `corepack enable && pnpm install` and dies
-      # before the preview even starts. Refresh corepack first so the
-      # installCommand sees current keys. Same reason render.yaml skips
-      # corepack entirely.
-      - name: Refresh corepack signing keys
-        run: npm install -g corepack@latest && corepack enable && corepack prepare pnpm@9.12.0 --activate
-
-      - name: Skip draft PRs
-        if: ${{ github.event.pull_request.draft }}
-        run: echo "Draft PR; preview deploy smoke skipped until ready for review."
-
-      - name: Deploy dashboard preview
-        if: ${{ github.event.pull_request.draft == false }}
-        id: dashboard
-        run: |
-          set -euo pipefail
-          output="$(bash scripts/vercel-preview-deploy.sh dashboard)"
-          printf '%s\n' "$output"
-          url="$(printf '%s\n' "$output" | tail -n 1)"
-          echo "url=$url" >> "$GITHUB_OUTPUT"
-        env:
-          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID_DASHBOARD: ${{ secrets.VERCEL_PROJECT_ID_DASHBOARD }}
-
-      - name: Deploy marketing preview
-        if: ${{ github.event.pull_request.draft == false }}
-        id: marketing
-        run: |
-          set -euo pipefail
-          output="$(bash scripts/vercel-preview-deploy.sh marketing)"
-          printf '%s\n' "$output"
-          url="$(printf '%s\n' "$output" | tail -n 1)"
-          echo "url=$url" >> "$GITHUB_OUTPUT"
-        env:
-          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID_MARKETING: ${{ secrets.VERCEL_PROJECT_ID_MARKETING }}
-
-      - name: Smoke preview deploys
-        if: ${{ github.event.pull_request.draft == false }}
-        run: bash scripts/smoke.sh
-        env:
-          AXEL_MARKETING_URL: ${{ steps.marketing.outputs.url }}
-          AXEL_APP_URL: ${{ steps.dashboard.outputs.url }}
-          AXEL_INGEST_URL: ${{ vars.AXEL_INGEST_URL || 'https://ingest.axelapp.ai' }}
-          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
-          VERCEL_AUTOMATION_BYPASS_SECRET_DASHBOARD: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET_DASHBOARD }}
-          VERCEL_AUTOMATION_BYPASS_SECRET_MARKETING: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET_MARKETING }}
-
-      - name: Comment preview URLs
-        if: ${{ github.event.pull_request.draft == false }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          DASHBOARD_URL: ${{ steps.dashboard.outputs.url }}
-          MARKETING_URL: ${{ steps.marketing.outputs.url }}
-        run: |
-          cat > /tmp/preview-smoke-comment.md <<EOF
-          Preview smoke passed.
-
-          Dashboard: ${DASHBOARD_URL}
-          Marketing: ${MARKETING_URL}
-          EOF
-
-          gh pr comment "$PR_URL" --body-file /tmp/preview-smoke-comment.md
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build dashboard and marketing without deployment credentials
+        # The ellipsis includes workspace dependencies whose package exports
+        # point at generated dist files. A clean fork checkout has no such
+        # artifacts until these builds run.
+        run: pnpm --filter @axel/dashboard... --filter @axel/marketing... build

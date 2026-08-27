@@ -8,6 +8,7 @@ import { RETENTION_BOUNDS } from "./retention-bounds";
 import { withWorkspaceMutation } from "./with-mutation";
 import { formValue } from "./form";
 import type { ActionState } from "./action-data";
+import { deploymentCapabilities } from "./deployment-capabilities";
 
 /**
  * AXE-35 — workspace-level retention. Operator-tunable caps on how
@@ -26,6 +27,14 @@ export async function updateWorkspaceRetentionAction(
   formData: FormData,
 ): Promise<ActionState> {
   return withWorkspaceMutation({}, async ({ workspaceId, audit }) => {
+    if (
+      !deploymentCapabilities().configurableRawPayloadRetention
+      && formData.has("raw_payload_retention_days")
+    ) {
+      return {
+        error: "Raw payload retention is fixed at 30 days in the small self-host profile.",
+      };
+    }
     const fields = [
       { key: "raw_payload_retention_days", label: "Raw payload" },
       { key: "dead_letter_retention_days", label: "Dead letter" },

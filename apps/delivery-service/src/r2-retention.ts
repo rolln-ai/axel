@@ -15,7 +15,7 @@
  *   - ClickHouse is the key source — its `events` table carries
  *     (workspace_id, source_id, received_at, r2_key) and has a 30-day TTL, which
  *     is exactly the window we operate in, so it always has the keys we need.
- *     (R2 keys embed only the workspace + date, not the source, so we can't get
+ *     (R2 keys always embed the workspace but not the source, so we can't get
  *     per-source granularity from an R2 prefix list alone.)
  *   - A MINIMUM-AGE floor (`minAgeMs`, default 7d) protects in-flight delivery:
  *     a delivery still retrying must be able to fetch its body from R2, and a

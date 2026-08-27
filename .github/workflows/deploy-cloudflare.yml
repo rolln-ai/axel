@@ -3,6 +3,10 @@ name: Deploy Cloudflare Workers
 on:
   workflow_dispatch:
     inputs:
+      reason:
+        description: Reviewed release or incident change being deployed
+        required: true
+        type: string
       service:
         description: Worker to deploy
         required: true
@@ -13,20 +17,9 @@ on:
           - ingest-worker
           - router-edge
           - delivery-edge
-  push:
-    branches: [main]
-    paths:
-      - apps/ingest-worker/**
-      - apps/router-edge/**
-      - apps/delivery-edge/**
-      - packages/connectors/**
-      - packages/observability/**
-      - packages/shared/**
-      - pnpm-lock.yaml
-      - .github/workflows/deploy-cloudflare.yml
 
 concurrency:
-  group: deploy-cloudflare-${{ github.ref }}
+  group: production-deploy
   cancel-in-progress: false
 
 jobs:
@@ -34,6 +27,7 @@ jobs:
     name: Deploy workers
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     environment: Production
     permissions:
       contents: read
@@ -51,6 +45,22 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
 
+      - name: Harden and verify the native delivery queue
+        run: node scripts/harden-cloudflare-native-queue.mjs
+        env:
+          CLOUDFLARE_QUEUE_API_TOKEN: ${{ secrets.CLOUDFLARE_QUEUE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      # Expand-compatible schema changes must land before code that may read or
+      # write them. Production environment protection reviews this job once,
+      # then the migration and deploy run as one ordered operation.
+      - name: Install Postgres client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Apply pending Postgres migrations
+        run: ./scripts/run-migrations.sh
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
       - name: Prepare commit release in Sentry
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
@@ -62,7 +72,7 @@ jobs:
             "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
 
       - name: Verify ingest source-lookup control plane
-        if: ${{ github.event_name == 'push' || inputs.service == 'all' || inputs.service == 'ingest-worker' }}
+        if: ${{ inputs.service == 'all' || inputs.service == 'ingest-worker' }}
         env:
           DELIVERY_SERVICE_URL: ${{ vars.DELIVERY_SERVICE_URL || 'https://axel-delivery-native.onrender.com' }}
           SOURCE_LOOKUP_SHARED_SECRET: ${{ secrets.SOURCE_LOOKUP_SHARED_SECRET }}
@@ -70,7 +80,7 @@ jobs:
         run: |
           source_lookup_secret="${SOURCE_LOOKUP_SHARED_SECRET:-${DELIVERY_SHARED_SECRET:-}}"
           test -n "$source_lookup_secret"
-          response="$(curl -fsS --max-time 15 -X POST \
+          response="$(curl -fsS --connect-timeout 10 --max-time 15 -X POST \
             "${DELIVERY_SERVICE_URL%/}/internal/source" \
             -H 'content-type: application/json' \
             -H "x-axel-shared-secret: $source_lookup_secret" \
@@ -83,14 +93,14 @@ jobs:
           '
 
       - name: Deploy ingest worker
-        if: ${{ github.event_name == 'push' || inputs.service == 'all' || inputs.service == 'ingest-worker' }}
+        if: ${{ inputs.service == 'all' || inputs.service == 'ingest-worker' }}
         run: pnpm --filter @axel/ingest-worker exec wrangler deploy --tag "$GITHUB_SHA" --message "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}" --upload-source-maps
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
       - name: Record ingest worker deploy in Sentry
-        if: ${{ github.event_name == 'push' || inputs.service == 'all' || inputs.service == 'ingest-worker' }}
+        if: ${{ inputs.service == 'all' || inputs.service == 'ingest-worker' }}
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: rolln
@@ -102,14 +112,14 @@ jobs:
             "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
       - name: Deploy router edge
-        if: ${{ github.event_name == 'push' || inputs.service == 'all' || inputs.service == 'router-edge' }}
+        if: ${{ inputs.service == 'all' || inputs.service == 'router-edge' }}
         run: pnpm --filter @axel/router-edge exec wrangler deploy --tag "$GITHUB_SHA" --message "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}" --upload-source-maps
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
       - name: Record router edge deploy in Sentry
-        if: ${{ github.event_name == 'push' || inputs.service == 'all' || inputs.service == 'router-edge' }}
+        if: ${{ inputs.service == 'all' || inputs.service == 'router-edge' }}
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: rolln
@@ -121,14 +131,14 @@ jobs:
             "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
       - name: Deploy delivery edge
-        if: ${{ github.event_name == 'push' || inputs.service == 'all' || inputs.service == 'delivery-edge' }}
+        if: ${{ inputs.service == 'all' || inputs.service == 'delivery-edge' }}
         run: pnpm --filter @axel/delivery-edge exec wrangler deploy --tag "$GITHUB_SHA" --message "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}" --upload-source-maps
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
       - name: Record delivery edge deploy in Sentry
-        if: ${{ github.event_name == 'push' || inputs.service == 'all' || inputs.service == 'delivery-edge' }}
+        if: ${{ inputs.service == 'all' || inputs.service == 'delivery-edge' }}
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: rolln
@@ -138,3 +148,20 @@ jobs:
           bash scripts/sentry-release-deploy.sh record \
             cloudflare/axel-delivery-edge \
             "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+      - name: Run post-deploy smoke
+        run: bash scripts/smoke.sh
+        env:
+          AXEL_MARKETING_URL: ${{ vars.AXEL_MARKETING_URL || 'https://axelapp.ai' }}
+          AXEL_APP_URL: ${{ vars.AXEL_APP_URL || 'https://app.axelapp.ai' }}
+          AXEL_INGEST_URL: ${{ vars.AXEL_INGEST_URL || 'https://ingest.axelapp.ai' }}
+          AXEL_DELIVERY_URL: ${{ vars.AXEL_DELIVERY_URL || 'https://axel-delivery-native.onrender.com' }}
+          AXEL_REQUIRE_OPERATIONAL_STATUS: "1"
+          AXEL_OPS_TEST_TOKEN: ${{ secrets.OPS_TEST_TOKEN }}
+          AXEL_REQUIRE_DELIVERY_CANARY: "1"
+          AXEL_CANARY_INGEST_URL: ${{ secrets.AXEL_CANARY_INGEST_URL }}
+          AXEL_CANARY_INGEST_AUTH_HEADER: ${{ secrets.AXEL_CANARY_INGEST_AUTH_HEADER }}
+          AXEL_CANARY_INGEST_AUTH_VALUE: ${{ secrets.AXEL_CANARY_INGEST_AUTH_VALUE }}
+          AXEL_CANARY_RECEIPT_URL: ${{ secrets.AXEL_CANARY_RECEIPT_URL }}
+          AXEL_CANARY_RECEIPT_AUTH_HEADER: ${{ secrets.AXEL_CANARY_RECEIPT_AUTH_HEADER }}
+          AXEL_CANARY_RECEIPT_AUTH_VALUE: ${{ secrets.AXEL_CANARY_RECEIPT_AUTH_VALUE }}

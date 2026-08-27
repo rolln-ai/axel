@@ -212,6 +212,9 @@ function parseBigQueryTarget(
 
 export interface SaveMappingDeps {
   versionAppender?: typeof appendDataContractVersion;
+  destinationFetcher?: ProposeMappingDeps["destinationFetcher"];
+  mapGetter?: typeof getDataContract;
+  versionGetter?: typeof getDataContractVersion;
 }
 
 export async function saveDestinationMappingImpl(
@@ -222,13 +225,31 @@ export async function saveDestinationMappingImpl(
   const roleError = requireWritableRole(session.activeWorkspace.role);
   if (roleError) return { error: roleError };
   const workspaceId = session.activeWorkspace.workspace_id;
-  const map = await getDataContract(input.dataContractId, workspaceId);
+  const map = await (deps.mapGetter ?? getDataContract)(
+    input.dataContractId,
+    workspaceId,
+  );
   if (!map) return { error: "Data Contract not found." };
   if (!map.current_version_id) {
     return { error: "Data Contract has no version yet." };
   }
-  const current = await getDataContractVersion(map.current_version_id, workspaceId);
+  const current = await (deps.versionGetter ?? getDataContractVersion)(
+    map.current_version_id,
+    workspaceId,
+  );
   if (!current) return { error: "Current Data Contract version not found." };
+
+  const destinationFetcher = deps.destinationFetcher ?? defaultDestinationFetcher;
+  const destination = await destinationFetcher(
+    workspaceId,
+    input.mapping.destination_id,
+  );
+  if (!destination) {
+    return { error: "Destination not found in this workspace." };
+  }
+  if (!mappingMatchesDestinationType(input.mapping, destination.type)) {
+    return { error: "Mapping type does not match the selected destination." };
+  }
 
   const versionAppender = deps.versionAppender ?? appendDataContractVersion;
   const version = await versionAppender({
@@ -252,6 +273,16 @@ export async function saveDestinationMappingImpl(
     notice: "Destination mapping saved on a new version.",
     version_id: version.id,
   };
+}
+
+function mappingMatchesDestinationType(
+  mapping: DestinationMapping,
+  destinationType: string,
+): boolean {
+  if (mapping.kind === "webhook") {
+    return destinationType === "webhook" || destinationType === "http";
+  }
+  return mapping.kind === destinationType;
 }
 
 export async function proposeDestinationMappingAction(input: {
@@ -320,6 +351,7 @@ async function defaultDestinationFetcher(
     `SELECT id, type, config, name
        FROM destinations
       WHERE id = $1 AND workspace_id = $2
+        AND status = 'active'
       LIMIT 1`,
     [destinationId, workspaceId],
   );

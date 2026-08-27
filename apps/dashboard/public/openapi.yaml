@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Axel API
-  version: "1.0.0"
+  version: "0.1.0"
   summary: Webhook ingest plus workspace control plane.
   description: |
     The Axel API has two surfaces:
@@ -43,7 +43,8 @@ info:
     name: Axel support
     url: https://app.axelapp.ai
   license:
-    name: Proprietary
+    name: MIT
+    identifier: MIT
 
 servers:
   - url: https://app.axelapp.ai

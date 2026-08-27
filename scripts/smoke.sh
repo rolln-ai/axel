@@ -8,6 +8,7 @@ delivery_url="${AXEL_DELIVERY_URL:-https://axel-delivery-native.onrender.com}"
 
 marketing_bypass_secret="${VERCEL_AUTOMATION_BYPASS_SECRET_MARKETING:-${VERCEL_AUTOMATION_BYPASS_SECRET:-}}"
 dashboard_bypass_secret="${VERCEL_AUTOMATION_BYPASS_SECRET_DASHBOARD:-${VERCEL_AUTOMATION_BYPASS_SECRET:-}}"
+readonly -a curl_network_args=(--connect-timeout 10 --max-time 30)
 
 check_status() {
   local name="$1"
@@ -16,9 +17,9 @@ check_status() {
   local bypass_secret="${4:-}"
   local status
   if [[ -n "$bypass_secret" ]]; then
-    status="$(curl -fsS -H "x-vercel-protection-bypass: ${bypass_secret}" -o /tmp/axel-smoke-body -w "%{http_code}" "$url")"
+    status="$(curl "${curl_network_args[@]}" -fsS -H "x-vercel-protection-bypass: ${bypass_secret}" -o /tmp/axel-smoke-body -w "%{http_code}" "$url")"
   else
-    status="$(curl -fsS -o /tmp/axel-smoke-body -w "%{http_code}" "$url")"
+    status="$(curl "${curl_network_args[@]}" -fsS -o /tmp/axel-smoke-body -w "%{http_code}" "$url")"
   fi
   if [[ ! "$status" =~ $expected_regex ]]; then
     echo "Smoke check failed for ${name}: ${url} returned ${status}" >&2
@@ -44,12 +45,12 @@ check_status "delivery-health" "${delivery_url%/}/health" "^2[0-9][0-9]$"
 if [[ -n "${AXEL_OPS_TEST_TOKEN:-}" ]]; then
   if [[ -n "$dashboard_bypass_secret" ]]; then
     ops_curl_args=(-H "x-vercel-protection-bypass: ${dashboard_bypass_secret}")
-    ops_status="$(curl -sS -o /tmp/axel-smoke-sentry -w "%{http_code}" -X POST \
+    ops_status="$(curl "${curl_network_args[@]}" -sS -o /tmp/axel-smoke-sentry -w "%{http_code}" -X POST \
       "${ops_curl_args[@]}" \
       -H "x-axel-ops-token: ${AXEL_OPS_TEST_TOKEN}" \
       "${app_url%/}/api/ops/sentry-test")"
   else
-    ops_status="$(curl -sS -o /tmp/axel-smoke-sentry -w "%{http_code}" -X POST \
+    ops_status="$(curl "${curl_network_args[@]}" -sS -o /tmp/axel-smoke-sentry -w "%{http_code}" -X POST \
       -H "x-axel-ops-token: ${AXEL_OPS_TEST_TOKEN}" \
       "${app_url%/}/api/ops/sentry-test")"
   fi
@@ -61,10 +62,22 @@ if [[ -n "${AXEL_OPS_TEST_TOKEN:-}" ]]; then
   echo "ok sentry-test: ${ops_status}"
 fi
 
-ingest_status="$(curl -sS -o /tmp/axel-smoke-ingest -w "%{http_code}" -X POST "${ingest_url%/}/in/__smoke__")"
+ingest_status="$(curl "${curl_network_args[@]}" -sS -o /tmp/axel-smoke-ingest -w "%{http_code}" -X POST "${ingest_url%/}/in/__smoke__")"
 if [[ "$ingest_status" != "401" ]]; then
   echo "Smoke check failed for ingest auth gate: expected 401, got ${ingest_status}" >&2
   head -c 500 /tmp/axel-smoke-ingest >&2 || true
   exit 1
 fi
 echo "ok ingest-auth-gate: ${ingest_status}"
+
+if [[ -n "${AXEL_CANARY_INGEST_URL:-}" || -n "${AXEL_CANARY_RECEIPT_URL:-}" ]]; then
+  if [[ -z "${AXEL_CANARY_INGEST_URL:-}" || -z "${AXEL_CANARY_RECEIPT_URL:-}" ]]; then
+    echo "Smoke check failed: both AXEL_CANARY_INGEST_URL and AXEL_CANARY_RECEIPT_URL are required" >&2
+    exit 1
+  fi
+  node scripts/delivery-canary.mjs
+  echo "ok production-delivery-canary"
+elif [[ "${AXEL_REQUIRE_DELIVERY_CANARY:-0}" == "1" ]]; then
+  echo "Smoke check failed: delivery canary is required but not configured" >&2
+  exit 1
+fi

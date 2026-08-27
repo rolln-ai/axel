@@ -64,6 +64,24 @@ export function isQueueSpillObjectMissingError(err: unknown): err is QueueSpillO
 }
 
 /**
+ * The wire message referenced a spill object that does not belong to that
+ * exact delivery attempt. Reject this before touching R2: queue messages are
+ * data, not authority to read another workspace's object key.
+ */
+export class QueueSpillKeyMismatchError extends Error {
+  readonly spillKey: string;
+  readonly expectedSpillKey: string;
+
+  constructor(spillKey: string, expectedSpillKey: string) {
+    // Keep attacker-controlled key material out of logs and Sentry titles.
+    super("spill_r2_key_mismatch");
+    this.name = "QueueSpillKeyMismatchError";
+    this.spillKey = spillKey;
+    this.expectedSpillKey = expectedSpillKey;
+  }
+}
+
+/**
  * The spill object came back but didn't parse as JSON.
  *
  * Raised instead of the bare `SyntaxError` from `JSON.parse` so the error
@@ -105,12 +123,24 @@ export function buildSpillKey(message: DestinationQueueMessage): string {
 }
 
 /**
+ * Return true only when the referenced spill key belongs to this exact
+ * delivery attempt. This predicate performs no I/O and is suitable for
+ * guarding reads and best-effort deletes alike.
+ */
+export function hasCanonicalSpillKey(message: DestinationQueueMessage): boolean {
+  return typeof message.spill_r2_key === "string"
+    && message.spill_r2_key === buildSpillKey(message);
+}
+
+/**
  * Prepare a message for enqueue:
  *
- *  - If `spill_r2_key` is already set, the message has been through a
- *    spill round-trip (consumer hydrated, then re-enqueued for retry).
- *    The R2 object is still authoritative — strip the inline copies
- *    and return the wire form.
+ *  - If `spill_r2_key` is already set and canonical, the message has been
+ *    through a spill round-trip without changing attempts. The R2 object is
+ *    still authoritative — strip the inline copies and return the wire form.
+ *  - If the attempt changed, write the hydrated fields under the new attempt's
+ *    canonical key before stripping them. This keeps retries compatible with
+ *    exact key binding instead of carrying `/1.json` into attempt 2.
  *  - Otherwise, measure the message's JSON byte size. If it exceeds
  *    the spill threshold, write `{ payload, headers, query }` to R2
  *    and return a stripped copy with `spill_r2_key` set. Small
@@ -123,12 +153,28 @@ export async function spillIfOversized(
   message: DestinationQueueMessage,
   writer: QueueSpillWriter,
 ): Promise<DestinationQueueMessage> {
-  if (message.spill_r2_key) {
+  if (hasCanonicalSpillKey(message)) {
     return {
       ...message,
       payload: null,
       headers: {},
       query: {},
+    };
+  }
+  if (message.spill_r2_key) {
+    const spillKey = buildSpillKey(message);
+    const spillBody: QueueSpillBody = {
+      payload: message.payload,
+      headers: message.headers,
+      query: message.query,
+    };
+    await writer.put(spillKey, JSON.stringify(spillBody));
+    return {
+      ...message,
+      payload: null,
+      headers: {},
+      query: {},
+      spill_r2_key: spillKey,
     };
   }
   const serialised = JSON.stringify(message);
@@ -160,27 +206,40 @@ export async function spillIfOversized(
  * Callers should surface that as a terminal delivery failure rather than
  * retrying forever or delivering an empty payload.
  *
+ * Throws QueueSpillKeyMismatchError before any storage read if the supplied
+ * key is not the canonical key for this exact workspace, event, destination,
+ * and attempt.
+ *
  * Throws QueueSpillBodyCorruptError if the object is present but unparseable
- * (most often a truncated read). That one is worth a retry — the reader
- * rejects short bodies before we get here, so a corrupt body that survives
- * the retries is a real problem and should reach Sentry.
+ * or does not match the `{ payload, headers, query }` contract. That one is
+ * worth a retry — the reader rejects short bodies before we get here, so a
+ * corrupt body that survives the retries is a real problem and should reach
+ * Sentry.
  */
 export async function hydrateIfSpilled(
   message: DestinationQueueMessage,
   reader: QueueSpillReader,
 ): Promise<DestinationQueueMessage> {
   if (!message.spill_r2_key) return message;
-  const buf = await reader.get(message.spill_r2_key);
-  if (!buf) {
-    throw new QueueSpillObjectMissingError(message.spill_r2_key);
+  const spillKey = message.spill_r2_key;
+  const expectedSpillKey = buildSpillKey(message);
+  if (!hasCanonicalSpillKey(message)) {
+    throw new QueueSpillKeyMismatchError(spillKey, expectedSpillKey);
   }
-  let parsed: QueueSpillBody;
+  const buf = await reader.get(spillKey);
+  if (!buf) {
+    throw new QueueSpillObjectMissingError(spillKey);
+  }
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(new TextDecoder().decode(buf)) as QueueSpillBody;
+    parsed = JSON.parse(new TextDecoder().decode(buf)) as unknown;
   } catch {
     // JSON.parse may quote the malformed input in its SyntaxError. Spill bodies
     // contain webhook payloads, so keep only non-sensitive key/size context.
-    throw new QueueSpillBodyCorruptError(message.spill_r2_key, buf.byteLength);
+    throw new QueueSpillBodyCorruptError(spillKey, buf.byteLength);
+  }
+  if (!isQueueSpillBody(parsed)) {
+    throw new QueueSpillBodyCorruptError(spillKey, buf.byteLength);
   }
   return {
     ...message,
@@ -191,15 +250,17 @@ export async function hydrateIfSpilled(
 }
 
 /**
- * Best-effort cleanup. Errors are swallowed — a stuck delete shouldn't
- * fail an otherwise-successful delivery. Lifecycle rules on the R2
- * bucket should sweep stragglers.
+ * Best-effort cleanup. Non-canonical keys are ignored before storage access,
+ * and errors are swallowed — a stuck delete shouldn't fail an otherwise-
+ * successful delivery. Lifecycle rules on the R2 bucket should sweep
+ * stragglers.
  */
 export async function deleteSpillIfPresent(
   message: DestinationQueueMessage,
   reader: Pick<QueueSpillReader, "delete">,
 ): Promise<void> {
   if (!message.spill_r2_key) return;
+  if (!hasCanonicalSpillKey(message)) return;
   try {
     await reader.delete(message.spill_r2_key);
   } catch {
@@ -226,4 +287,18 @@ function byteLength(s: string): number {
     } else n += 3;
   }
   return n;
+}
+
+function isQueueSpillBody(value: unknown): value is QueueSpillBody {
+  if (!isRecord(value) || !Object.hasOwn(value, "payload")) return false;
+  return isStringRecord(value.headers) && isStringRecord(value.query);
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  if (!isRecord(value)) return false;
+  return Object.values(value).every((entry) => typeof entry === "string");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }

@@ -2,6 +2,10 @@ name: axel-selfhost
 
 x-control-plane-env: &control-plane-env
   AXEL_DEPLOYMENT_MODE: self-hosted
+  # The small profile omits ClickHouse and the subject-to-event index. The
+  # dashboard uses this capability marker to disable controls that would only
+  # change configuration without deleting the corresponding R2 bytes.
+  AXEL_SELF_HOST_PROFILE: small
   DATABASE_URL: postgres://axel:${POSTGRES_PASSWORD}@postgres:5432/axel?sslmode=disable
   DATABASE_POOL_MAX: "10"
   CREDENTIALS_MASTER_KEY: ${CREDENTIALS_MASTER_KEY}
@@ -13,10 +17,9 @@ x-control-plane-env: &control-plane-env
   NEXT_PUBLIC_AXEL_APP_URL: ${AXEL_PUBLIC_URL}
   NEXT_PUBLIC_AXEL_DELIVERY_URL: ${AXEL_DELIVERY_PUBLIC_URL}
   CLOUDFLARE_ACCOUNT_ID: ${CLOUDFLARE_ACCOUNT_ID}
-  # Operators can keep the provisioning-capable token out of runtime
-  # containers by supplying a narrower Queue/R2 token. The single-token
-  # fallback preserves the easy-button install.
-  CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_RUNTIME_API_TOKEN:-${CLOUDFLARE_API_TOKEN}}
+  # Never place the provisioning/Worker-deployment token in an application
+  # container. The helper requires a separate Queue/R2 runtime token.
+  CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_RUNTIME_API_TOKEN:?CLOUDFLARE_RUNTIME_API_TOKEN is required}
   RAW_PAYLOAD_BUCKET: ${RAW_PAYLOAD_BUCKET}
 
 services:

@@ -3,9 +3,11 @@ import {
   QUEUE_MESSAGE_SPILL_THRESHOLD_BYTES,
   QUEUE_SPILL_KEY_PREFIX,
   QueueSpillBodyCorruptError,
+  QueueSpillKeyMismatchError,
   QueueSpillObjectMissingError,
   buildSpillKey,
   deleteSpillIfPresent,
+  hasCanonicalSpillKey,
   hydrateIfSpilled,
   isQueueSpillBodyCorruptError,
   isQueueSpillObjectMissingError,
@@ -17,6 +19,7 @@ import {
 
 function baseMessage(overrides: Partial<DestinationQueueMessage> = {}): DestinationQueueMessage {
   return {
+    queue_message_version: 1,
     event_id: "evt-1",
     workspace_id: "ws-1",
     source_id: "src-1",
@@ -144,6 +147,31 @@ describe("queue-spill (producer)", () => {
     expect(out.headers).toEqual({});
     expect(out.query).toEqual({});
   });
+
+  it("re-spills a hydrated retry under the incremented attempt's canonical key", async () => {
+    const writer = fakeWriter();
+    const msg = baseMessage({
+      attempt_no: 2,
+      spill_r2_key: "queue-spill/ws-1/evt-1/dst-1/1.json",
+      payload: { hydrated: true },
+      headers: { "x-retry": "yes" },
+      query: { retry: "2" },
+    });
+
+    const out = await spillIfOversized(msg, writer);
+
+    expect(writer.calls).toEqual([{
+      key: "queue-spill/ws-1/evt-1/dst-1/2.json",
+      body: JSON.stringify({
+        payload: { hydrated: true },
+        headers: { "x-retry": "yes" },
+        query: { retry: "2" },
+      }),
+    }]);
+    expect(out.spill_r2_key).toBe("queue-spill/ws-1/evt-1/dst-1/2.json");
+    expect(out.payload).toBeNull();
+    expect(hasCanonicalSpillKey(out)).toBe(true);
+  });
 });
 
 describe("queue-spill (consumer)", () => {
@@ -176,6 +204,22 @@ describe("queue-spill (consumer)", () => {
     expect(out.query).toEqual({ q: "v" });
     expect(out.spill_r2_key).toBe(key);
     expect(reader.reads).toEqual([key]);
+  });
+
+  it.each([
+    ["workspace", "queue-spill/ws-other/evt-1/dst-1/1.json"],
+    ["event", "queue-spill/ws-1/evt-other/dst-1/1.json"],
+    ["destination", "queue-spill/ws-1/evt-1/dst-other/1.json"],
+  ])("rejects a cross-%s spill key before reading R2", async (_dimension, spillKey) => {
+    const reader = fakeReader({
+      [spillKey]: JSON.stringify({ payload: { secret: true }, headers: {}, query: {} }),
+    });
+    const msg = baseMessage({ spill_r2_key: spillKey, payload: null, headers: {}, query: {} });
+
+    const err = await hydrateIfSpilled(msg, reader).catch((cause: unknown) => cause);
+
+    expect(err).toBeInstanceOf(QueueSpillKeyMismatchError);
+    expect(reader.reads).toEqual([]);
   });
 
   it("throws spill_r2_key_missing when the R2 object is gone", async () => {
@@ -222,6 +266,23 @@ describe("queue-spill (consumer)", () => {
     expect(isQueueSpillBodyCorruptError(new QueueSpillObjectMissingError("k"))).toBe(false);
   });
 
+  it.each([
+    ["null", null],
+    ["array", []],
+    ["missing payload", { headers: {}, query: {} }],
+    ["non-object headers", { payload: {}, headers: [], query: {} }],
+    ["non-string header", { payload: {}, headers: { authorization: 42 }, query: {} }],
+    ["non-object query", { payload: {}, headers: {}, query: null }],
+    ["non-string query", { payload: {}, headers: {}, query: { page: 2 } }],
+  ])("rejects a structurally invalid spill body (%s)", async (_case, body) => {
+    const key = "queue-spill/ws-1/evt-1/dst-1/1.json";
+    const reader = fakeReader({ [key]: JSON.stringify(body) });
+    const msg = baseMessage({ spill_r2_key: key, payload: null, headers: {}, query: {} });
+
+    await expect(hydrateIfSpilled(msg, reader)).rejects.toThrow(QueueSpillBodyCorruptError);
+    expect(reader.reads).toEqual([key]);
+  });
+
   it("deleteSpillIfPresent skips when there is no key", async () => {
     const reader = fakeReader();
     await deleteSpillIfPresent(baseMessage(), reader);
@@ -230,8 +291,20 @@ describe("queue-spill (consumer)", () => {
 
   it("deleteSpillIfPresent deletes the referenced key", async () => {
     const reader = fakeReader();
-    await deleteSpillIfPresent(baseMessage({ spill_r2_key: "queue-spill/a/b/c/1.json" }), reader);
-    expect(reader.deletes).toEqual(["queue-spill/a/b/c/1.json"]);
+    await deleteSpillIfPresent(
+      baseMessage({ spill_r2_key: "queue-spill/ws-1/evt-1/dst-1/1.json" }),
+      reader,
+    );
+    expect(reader.deletes).toEqual(["queue-spill/ws-1/evt-1/dst-1/1.json"]);
+  });
+
+  it("deleteSpillIfPresent refuses a non-canonical key", async () => {
+    const reader = fakeReader();
+    await deleteSpillIfPresent(
+      baseMessage({ spill_r2_key: "queue-spill/ws-other/evt-1/dst-1/1.json" }),
+      reader,
+    );
+    expect(reader.deletes).toEqual([]);
   });
 
   it("deleteSpillIfPresent swallows delete errors", async () => {
@@ -242,7 +315,10 @@ describe("queue-spill (consumer)", () => {
       },
     };
     await expect(
-      deleteSpillIfPresent(baseMessage({ spill_r2_key: "queue-spill/a/b/c/1.json" }), reader),
+      deleteSpillIfPresent(
+        baseMessage({ spill_r2_key: "queue-spill/ws-1/evt-1/dst-1/1.json" }),
+        reader,
+      ),
     ).resolves.toBeUndefined();
   });
 });
@@ -269,5 +345,36 @@ describe("queue-spill (round-trip)", () => {
     expect(hydrated.payload).toEqual(original.payload);
     expect(hydrated.headers).toEqual(original.headers);
     expect(hydrated.query).toEqual(original.query);
+  });
+
+  it("spill → hydrate → retry spill → hydrate preserves data with canonical keys", async () => {
+    const firstWriter = fakeWriter();
+    const huge = "z".repeat(QUEUE_MESSAGE_SPILL_THRESHOLD_BYTES + 5_000);
+    const original = baseMessage({
+      payload: { large: huge },
+      headers: { "x-trace": "retry" },
+      query: { page: "1" },
+    });
+    const firstWire = await spillIfOversized(original, firstWriter);
+    const firstReader = fakeReader({
+      [firstWriter.calls[0]!.key]: firstWriter.calls[0]!.body,
+    });
+    const firstHydrated = await hydrateIfSpilled(firstWire, firstReader);
+
+    const retryWriter = fakeWriter();
+    const retryWire = await spillIfOversized(
+      { ...firstHydrated, attempt_no: 2 },
+      retryWriter,
+    );
+    const retryReader = fakeReader({
+      [retryWriter.calls[0]!.key]: retryWriter.calls[0]!.body,
+    });
+    const retryHydrated = await hydrateIfSpilled(retryWire, retryReader);
+
+    expect(retryWire.spill_r2_key).toBe("queue-spill/ws-1/evt-1/dst-1/2.json");
+    expect(retryReader.reads).toEqual(["queue-spill/ws-1/evt-1/dst-1/2.json"]);
+    expect(retryHydrated.payload).toEqual(original.payload);
+    expect(retryHydrated.headers).toEqual(original.headers);
+    expect(retryHydrated.query).toEqual(original.query);
   });
 });

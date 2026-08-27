@@ -17,7 +17,7 @@ services:
     plan: pro
     region: oregon
     branch: main
-    autoDeploy: false
+    autoDeployTrigger: off
     # Render routes external HTTPS to the container port set by $PORT. The
     # official ClickHouse image listens on 8123 by default (see its bundled
     # /etc/clickhouse-server/config.d/docker_related_config.xml), so we tell
@@ -67,11 +67,10 @@ services:
       targetCPUPercent: 70
     region: oregon
     branch: main
-    # Deploys are triggered explicitly by .github/workflows/deploy-render.yml
+    # The first guarded rollout applies and reads back this desired state.
+    # Subsequent deploys are triggered by .github/workflows/deploy-render.yml
     # through the Render API at an exact Git SHA.
-    # Keeping Render's git auto-deploy enabled as well starts two builds for the
-    # same commit whenever the release workflow runs.
-    autoDeploy: false
+    autoDeployTrigger: off
     # Skip corepack — Node 22+ ships with stale signing keys that can't verify
     # the latest pnpm release manifest from npm. Install via npm directly to a
     # user-writable global prefix (Render's default is /opt/render/..., not /usr).
@@ -144,10 +143,10 @@ services:
     plan: starter
     region: oregon
     branch: main
-    # Render git auto-deploy starts this singleton. The exact-SHA GitHub release
-    # workflow reuses that deployment (or starts it if needed) and waits until
-    # it is live, so a green release can no longer leave this worker unverified.
-    autoDeploy: true
+    # The first guarded rollout applies and reads back this desired state.
+    # Subsequent production changes are promoted by the reviewed GitHub
+    # workflow at an exact SHA.
+    autoDeployTrigger: off
     buildCommand: npm install -g pnpm@9.12.0 && pnpm install --frozen-lockfile && pnpm --filter @axel/delivery-service build
     startCommand: pnpm --filter @axel/delivery-service start
     envVars:
@@ -210,9 +209,10 @@ services:
     plan: starter
     region: oregon
     branch: main
-    # This service is covered by the exact-SHA Render API deploy workflow; use
-    # the verified GitHub workflow as the single deployment authority.
-    autoDeploy: false
+    # The first guarded rollout applies and reads back this desired state.
+    # Subsequent changes use the exact-SHA Render API deploy workflow as the
+    # single deployment authority.
+    autoDeployTrigger: off
     buildCommand: npm install -g pnpm@9.12.0 && pnpm install --frozen-lockfile && pnpm --filter @axel/pull-worker build
     startCommand: pnpm --filter @axel/pull-worker start
     envVars:

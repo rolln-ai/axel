@@ -479,6 +479,7 @@ function destination(): Destination<{ ok: true }> {
 
 function message(eventId = "evt-1"): DestinationQueueMessage {
   return {
+    queue_message_version: 1,
     event_id: eventId,
     workspace_id: "ws-1",
     source_id: "src-1",

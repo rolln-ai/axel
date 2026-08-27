@@ -14,16 +14,24 @@ function tokenHash(plaintext: string): string {
 
 class FakeR2 {
   store = new Map<string, { body: ArrayBuffer; meta: Record<string, string> }>();
+  async head(key: string): Promise<R2Object | null> {
+    const entry = this.store.get(key);
+    return entry
+      ? ({ key, customMetadata: entry.meta } as unknown as R2Object)
+      : null;
+  }
   async put(
     key: string,
-    value: ArrayBuffer,
+    value: ArrayBuffer | null,
     options?: R2PutOptions,
-  ): Promise<R2Object> {
+  ): Promise<R2Object | null> {
+    const condition = options?.onlyIf as R2Conditional | undefined;
+    if (condition?.etagDoesNotMatch === "*" && this.store.has(key)) return null;
     this.store.set(key, {
-      body: value,
+      body: value ?? new ArrayBuffer(0),
       meta: options?.customMetadata ?? {},
     });
-    return { key } as unknown as R2Object;
+    return { key, customMetadata: options?.customMetadata ?? {} } as unknown as R2Object;
   }
 }
 
@@ -405,6 +413,7 @@ describe("ingest worker", () => {
     expect(res.status).toBe(202);
     const r2 = env.EVENTS_RAW as unknown as FakeR2;
     expect(r2.store.size).toBe(1);
+    expect([...r2.store.keys()][0]).toMatch(/^events\/ws_1\/provider\//);
     const queued = Array.from({ length: 16 }, (_, i) => {
       const key = `QUEUE_EVENTS_${i.toString().padStart(2, "0")}` as keyof Env;
       return (env[key] as unknown as FakeQueue<QueueMessage>).sent;
@@ -444,6 +453,156 @@ describe("ingest worker", () => {
     expect(queued).toHaveLength(1);
     expect(queued[0]!.headers.authorization).toBeUndefined();
     expect(queued[0]!.headers["x-api-key"]).toBeUndefined();
+  });
+
+  it("deduplicates GitHub retries durably by X-GitHub-Delivery", async () => {
+    const signingSecret = "github-webhook-secret";
+    env = makeEnv({
+      src_test: {
+        workspace_id: "ws_1",
+        secret_token: tokenHash("secret-abc"),
+        status: "active",
+        provider: "github",
+        signing_secret: signingSecret,
+      },
+    });
+    const body = JSON.stringify({ action: "opened", issue: { number: 42 } });
+    const { createHmac } = await import("node:crypto");
+    const signature = createHmac("sha256", signingSecret).update(body).digest("hex");
+    const makeRequest = () => new Request("https://axel.app/in/src_test?token=secret-abc", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-github-delivery": "72d3162e-cc78-11e3-81ab-4c9367dc0958",
+        "x-github-event": "issues",
+        "x-hub-signature-256": `sha256=${signature}`,
+      },
+      body,
+    });
+
+    const first = await worker.fetch(makeRequest(), env, ctx);
+    const firstBody = (await first.json()) as { event_id: string; received_at: string };
+    const second = await worker.fetch(makeRequest(), env, ctx);
+    const secondBody = (await second.json()) as { event_id: string; received_at: string };
+
+    expect(first.status).toBe(202);
+    expect(second.status).toBe(202);
+    expect(secondBody).toEqual(firstBody);
+    const queued = Array.from({ length: 16 }, (_, i) => {
+      const key = `QUEUE_EVENTS_${i.toString().padStart(2, "0")}` as keyof Env;
+      return (env[key] as unknown as FakeQueue<QueueMessage>).sent;
+    }).flat();
+    expect(queued).toHaveLength(2);
+    expect(new Set(queued.map((message) => message.event_id))).toEqual(new Set([firstBody.event_id]));
+    expect(new Set(queued.map((message) => message.r2_key)).size).toBe(1);
+    const rawKeys = [...(env.EVENTS_RAW as unknown as FakeR2).store.keys()];
+    expect(rawKeys).toHaveLength(1);
+    expect(rawKeys[0]).toMatch(/^events\/ws_1\/provider\//);
+  });
+
+  it("gives concurrent copies one deterministic event id", async () => {
+    const signingSecret = "github-webhook-secret";
+    env = makeEnv({
+      src_test: {
+        workspace_id: "ws_1",
+        secret_token: tokenHash("secret-abc"),
+        status: "active",
+        provider: "github",
+        signing_secret: signingSecret,
+      },
+    });
+    const body = JSON.stringify({ action: "reopened", issue: { number: 42 } });
+    const { createHmac } = await import("node:crypto");
+    const signature = createHmac("sha256", signingSecret).update(body).digest("hex");
+    const makeRequest = () => new Request("https://axel.app/in/src_test?token=secret-abc", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-github-delivery": "4c4e9b4b-c678-4675-8b76-72b21be850b9",
+        "x-hub-signature-256": `sha256=${signature}`,
+      },
+      body,
+    });
+    const sent: QueueMessage[] = [];
+    let release!: () => void;
+    const bothAtQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queue = {
+      async send(message: QueueMessage): Promise<void> {
+        sent.push(message);
+        if (sent.length === 2) release();
+        await bothAtQueue;
+      },
+    };
+    for (let i = 0; i < 16; i++) {
+      const key = `QUEUE_EVENTS_${i.toString().padStart(2, "0")}` as keyof Env;
+      (env as unknown as Record<string, unknown>)[key as string] = queue;
+    }
+
+    const responses = await Promise.all([
+      worker.fetch(makeRequest(), env, ctx),
+      worker.fetch(makeRequest(), env, ctx),
+    ]);
+    const responseBodies = await Promise.all(
+      responses.map(async (response) => await response.json() as { event_id: string }),
+    );
+
+    expect(responses.map((response) => response.status)).toEqual([202, 202]);
+    expect(sent).toHaveLength(2);
+    expect(new Set(sent.map((message) => message.event_id)).size).toBe(1);
+    expect(new Set(responseBodies.map((message) => message.event_id)).size).toBe(1);
+    const rawKeys = [...(env.EVENTS_RAW as unknown as FakeR2).store.keys()];
+    expect(rawKeys).toHaveLength(1);
+    expect(rawKeys[0]).toMatch(/^events\/ws_1\/provider\//);
+  });
+
+  it("does not record a replay marker until the queue accepts the event", async () => {
+    const signingSecret = "github-webhook-secret";
+    env = makeEnv({
+      src_test: {
+        workspace_id: "ws_1",
+        secret_token: tokenHash("secret-abc"),
+        status: "active",
+        provider: "github",
+        signing_secret: signingSecret,
+      },
+    });
+    const body = JSON.stringify({ action: "closed", issue: { number: 42 } });
+    const { createHmac } = await import("node:crypto");
+    const signature = createHmac("sha256", signingSecret).update(body).digest("hex");
+    const makeRequest = () => new Request("https://axel.app/in/src_test?token=secret-abc", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-github-delivery": "c4e4a570-04f4-4c44-b6c0-5af704dc51f4",
+        "x-hub-signature-256": `sha256=${signature}`,
+      },
+      body,
+    });
+    for (let i = 0; i < 16; i++) {
+      const key = `QUEUE_EVENTS_${i.toString().padStart(2, "0")}` as keyof Env;
+      (env as unknown as Record<string, unknown>)[key as string] = {
+        async send(): Promise<void> {
+          throw new Error("queue unavailable");
+        },
+      };
+    }
+
+    await expect(worker.fetch(makeRequest(), env, ctx)).rejects.toThrow("queue unavailable");
+    const firstAttemptKeys = [...(env.EVENTS_RAW as unknown as FakeR2).store.keys()];
+    expect(firstAttemptKeys).toHaveLength(1);
+    expect(firstAttemptKeys[0]).toMatch(/^events\/ws_1\/provider\//);
+
+    const queues = Array.from({ length: 16 }, () => new FakeQueue<QueueMessage>());
+    for (let i = 0; i < 16; i++) {
+      const key = `QUEUE_EVENTS_${i.toString().padStart(2, "0")}` as keyof Env;
+      (env as unknown as Record<string, unknown>)[key as string] = queues[i];
+    }
+    const retry = await worker.fetch(makeRequest(), env, ctx);
+    expect(retry.status).toBe(202);
+    expect(queues.flatMap((queue) => queue.sent)).toHaveLength(1);
+    expect([...(env.EVENTS_RAW as unknown as FakeR2).store.keys()]).toEqual(firstAttemptKeys);
   });
 });
 

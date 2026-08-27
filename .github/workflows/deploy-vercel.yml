@@ -1,0 +1,153 @@
+name: Deploy Vercel Applications
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: Reviewed release or incident change being deployed
+        required: true
+        type: string
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify before deploy
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 9.12.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm --filter @axel/dashboard build && pnpm --filter @axel/marketing build
+
+  deploy:
+    name: Migrate and deploy Vercel applications
+    needs: verify
+    if: ${{ needs.verify.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: Production
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: .node-version
+
+      - name: Install Postgres client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Apply pending Postgres migrations
+        run: ./scripts/run-migrations.sh
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      - name: Stage dashboard at the reviewed commit
+        id: dashboard
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID_DASHBOARD: ${{ secrets.VERCEL_PROJECT_ID_DASHBOARD }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: rolln
+          SENTRY_PROJECT: javascript
+          SENTRY_RELEASE: ${{ github.sha }}
+        run: |
+          output="$(bash scripts/vercel-preview-deploy.sh dashboard production)"
+          printf '%s\n' "$output"
+          url="$(printf '%s\n' "$output" | tail -n 1)"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Stage marketing at the reviewed commit
+        id: marketing
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID_MARKETING: ${{ secrets.VERCEL_PROJECT_ID_MARKETING }}
+          SENTRY_RELEASE: ${{ github.sha }}
+        run: |
+          output="$(bash scripts/vercel-preview-deploy.sh marketing production)"
+          printf '%s\n' "$output"
+          url="$(printf '%s\n' "$output" | tail -n 1)"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke exact deployment URLs
+        run: bash scripts/smoke.sh
+        env:
+          AXEL_MARKETING_URL: ${{ steps.marketing.outputs.url }}
+          AXEL_APP_URL: ${{ steps.dashboard.outputs.url }}
+          AXEL_INGEST_URL: ${{ vars.AXEL_INGEST_URL || 'https://ingest.axelapp.ai' }}
+          AXEL_DELIVERY_URL: ${{ vars.AXEL_DELIVERY_URL || 'https://axel-delivery-native.onrender.com' }}
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+          VERCEL_AUTOMATION_BYPASS_SECRET_DASHBOARD: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET_DASHBOARD }}
+          VERCEL_AUTOMATION_BYPASS_SECRET_MARKETING: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET_MARKETING }}
+          AXEL_REQUIRE_DELIVERY_CANARY: "1"
+          AXEL_CANARY_INGEST_URL: ${{ secrets.AXEL_CANARY_INGEST_URL }}
+          AXEL_CANARY_INGEST_AUTH_HEADER: ${{ secrets.AXEL_CANARY_INGEST_AUTH_HEADER }}
+          AXEL_CANARY_INGEST_AUTH_VALUE: ${{ secrets.AXEL_CANARY_INGEST_AUTH_VALUE }}
+          # Query the staged dashboard itself. On the first rollout, the old
+          # production alias does not have the receipt endpoint yet.
+          AXEL_CANARY_RECEIPT_URL: ${{ steps.dashboard.outputs.url }}/api/ops/delivery-canary/receipt?probe={probe_id}
+          AXEL_CANARY_RECEIPT_AUTH_HEADER: ${{ secrets.AXEL_CANARY_RECEIPT_AUTH_HEADER }}
+          AXEL_CANARY_RECEIPT_AUTH_VALUE: ${{ secrets.AXEL_CANARY_RECEIPT_AUTH_VALUE }}
+          AXEL_CANARY_RECEIPT_PROTECTION_BYPASS_HEADER: x-vercel-protection-bypass
+          AXEL_CANARY_RECEIPT_PROTECTION_BYPASS_VALUE: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET_DASHBOARD }}
+
+      - name: Promote staged dashboard
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID_DASHBOARD: ${{ secrets.VERCEL_PROJECT_ID_DASHBOARD }}
+          STAGED_URL: ${{ steps.dashboard.outputs.url }}
+        run: |
+          mkdir -p .vercel
+          jq -n --arg org "$VERCEL_ORG_ID" --arg project "$VERCEL_PROJECT_ID_DASHBOARD" \
+            '{orgId:$org,projectId:$project}' > .vercel/project.json
+          npx --yes vercel@58.4.0 promote "$STAGED_URL" --yes --token "$VERCEL_TOKEN"
+
+      - name: Promote staged marketing
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID_MARKETING: ${{ secrets.VERCEL_PROJECT_ID_MARKETING }}
+          STAGED_URL: ${{ steps.marketing.outputs.url }}
+        run: |
+          mkdir -p .vercel
+          jq -n --arg org "$VERCEL_ORG_ID" --arg project "$VERCEL_PROJECT_ID_MARKETING" \
+            '{orgId:$org,projectId:$project}' > .vercel/project.json
+          npx --yes vercel@58.4.0 promote "$STAGED_URL" --yes --token "$VERCEL_TOKEN"
+
+      - name: Smoke production domains
+        run: bash scripts/smoke.sh
+        env:
+          AXEL_MARKETING_URL: ${{ vars.AXEL_MARKETING_URL || 'https://axelapp.ai' }}
+          AXEL_APP_URL: ${{ vars.AXEL_APP_URL || 'https://app.axelapp.ai' }}
+          AXEL_INGEST_URL: ${{ vars.AXEL_INGEST_URL || 'https://ingest.axelapp.ai' }}
+          AXEL_DELIVERY_URL: ${{ vars.AXEL_DELIVERY_URL || 'https://axel-delivery-native.onrender.com' }}
+          AXEL_REQUIRE_OPERATIONAL_STATUS: "1"
+          AXEL_OPS_TEST_TOKEN: ${{ secrets.OPS_TEST_TOKEN }}
+          AXEL_REQUIRE_DELIVERY_CANARY: "1"
+          AXEL_CANARY_INGEST_URL: ${{ secrets.AXEL_CANARY_INGEST_URL }}
+          AXEL_CANARY_INGEST_AUTH_HEADER: ${{ secrets.AXEL_CANARY_INGEST_AUTH_HEADER }}
+          AXEL_CANARY_INGEST_AUTH_VALUE: ${{ secrets.AXEL_CANARY_INGEST_AUTH_VALUE }}
+          AXEL_CANARY_RECEIPT_URL: ${{ secrets.AXEL_CANARY_RECEIPT_URL }}
+          AXEL_CANARY_RECEIPT_AUTH_HEADER: ${{ secrets.AXEL_CANARY_RECEIPT_AUTH_HEADER }}
+          AXEL_CANARY_RECEIPT_AUTH_VALUE: ${{ secrets.AXEL_CANARY_RECEIPT_AUTH_VALUE }}

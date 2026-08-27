@@ -25,7 +25,15 @@ const MAX_RETURN_TO_LENGTH = 2048;
  * is excluded because the login page already routes zero-workspace users
  * there itself.
  */
-const BLOCKED_PATH_PREFIXES = ["/login", "/signup", "/forgot", "/reset", "/verify", "/welcome"];
+const BLOCKED_PATH_PREFIXES = [
+  "/login",
+  "/signup",
+  "/forgot",
+  "/reset",
+  "/verify",
+  "/welcome",
+  "/admin-mfa",
+];
 
 /**
  * Validate an untrusted returnTo candidate down to a same-origin relative

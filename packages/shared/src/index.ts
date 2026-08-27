@@ -23,6 +23,7 @@ export * from "./event-type.js";
 export * from "./pull-source-lock.js";
 export * from "./db-ssl.js";
 export * from "./delivery-idempotency.js";
+export * from "./destination-queue-message.js";
 export * from "./deployment-url.js";
 export * from "./r2-object-url.js";
 export * from "./pii-mask.js";

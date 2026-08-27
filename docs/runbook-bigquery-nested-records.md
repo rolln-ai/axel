@@ -11,7 +11,7 @@ are retained losslessly in a sibling `__json` field. Legacy `columns` and
 A BigQuery destination owns one GCP `project_id`, one service-account
 credential, and a required default dataset for legacy compatibility. New and
 edited route bindings snapshot both `dataset` and `table`, so the same
-destination can write to `demo_newsletter.events`,
+destination can write to `marketing_analytics.events`,
 `billing_analytics.events`, or any other dataset in that project that the service
 account can access. Bare table names continue to resolve against the default
 dataset, and legacy bindings without `dataset` keep their existing behavior.

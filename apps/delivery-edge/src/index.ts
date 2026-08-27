@@ -27,6 +27,7 @@ import {
   decideDeliveryClaim,
   deleteSpillIfPresent,
   hydrateIfSpilled,
+  validateDestinationQueueMessage,
   sanitizeConnectorDiagnosticForStorage,
   sanitizeConnectorResponseForStorage,
   type DestinationQueueMessage,
@@ -215,30 +216,63 @@ export default {
       return drainDeadLetterQueue(batch as MessageBatch<unknown>, env);
     }
 
+    const validatedMessages: Array<{
+      queueMessage: Message<unknown>;
+      body: DestinationQueueMessage;
+    }> = [];
+    for (const queueMessage of batch.messages) {
+      const parsed = validateDestinationQueueMessage(queueMessage.body);
+      if (!parsed.ok) {
+        const finalAttempt = queueMessage.attempts >= DELIVERY_CONSUMER_MAX_ATTEMPTS;
+        console.error(
+          `[delivery] queue contract rejected id=${queueMessage.id} code=${parsed.code}`
+            + `${parsed.field ? ` field=${parsed.field}` : ""}`,
+        );
+        if (finalAttempt) {
+          ctx.waitUntil(captureException(sentry, new Error("destination_queue_message_invalid"), {
+            tags: {
+              component: "queue_contract",
+              queue: batch.queue,
+              reason: parsed.code,
+              field: parsed.field,
+              final_attempt: true,
+            },
+          }));
+        }
+        // Never ACK an invalid body. Cloudflare's configured retry budget moves
+        // the original message to axel-dead-letter, where only metadata is
+        // retained. No untrusted message field is used for R2 or database I/O.
+        queueMessage.retry();
+        continue;
+      }
+      validatedMessages.push({ queueMessage, body: parsed.message });
+    }
+    if (validatedMessages.length === 0) return;
+
     const client = createSql(env);
     const spillReader = spillReaderFromR2(env.EVENTS_RAW);
     try {
-      for (const msg of batch.messages as Message<DestinationQueueMessage>[]) {
+      for (const { queueMessage: msg, body } of validatedMessages) {
         const startedAt = Date.now();
         try {
           // Hydrate spilled messages first — router-edge writes the
           // payload/headers/query to R2 when the inline form would
           // exceed Cloudflare's 128KB queue cap. Small messages pass
           // through unchanged.
-          const hydrated = await hydrateIfSpilled(msg.body, spillReader);
+          const hydrated = await hydrateIfSpilled(body, spillReader);
           const outcome = await deliverOne(hydrated, env, client);
           // Fire-and-forget ClickHouse log. We never block the ack/retry on it
           // — analytics rows missing for a single event is acceptable, queue
           // back-pressure is not.
           ctx.waitUntil(
             logDeliveryAttempt(env, {
-              workspace_id: msg.body.workspace_id,
-              event_id: msg.body.event_id,
-              route_id: msg.body.route_id,
-              destination_id: msg.body.destination_id,
-              attempt_id: buildAttemptId(msg.body),
-              attempt_no: msg.body.attempt_no,
-              is_test: msg.body.is_test,
+              workspace_id: body.workspace_id,
+              event_id: body.event_id,
+              route_id: body.route_id,
+              destination_id: body.destination_id,
+              attempt_id: buildAttemptId(body),
+              attempt_no: body.attempt_no,
+              is_test: body.is_test,
               // "rescheduled" is an edge-internal disposal signal; log the true
               // delivery outcome (a retry) so the dashboard view stays accurate.
               status: outcome.result === "rescheduled" ? "retry" : outcome.result,
@@ -252,18 +286,30 @@ export default {
               // Terminal failure — record a dead_letters row so it's visible in
               // the inbox and replayable. Previously the edge ACKed a "dead"
               // outcome with no dead_letters row → silently lost + un-replayable
-              // (audit). Awaited (it's a rare path) so the row is durable before
-              // ack; a failed insert is logged but still acks (retrying a
-              // permanently-dead delivery would loop forever).
-              await insertEdgeDeadLetter(client, hydrated, outcome).catch((err) => {
+              // (audit). The row must be durable before ACK. A database failure
+              // retries the queue message so it can never become invisible and
+              // unreplayable merely because Postgres was unavailable.
+              try {
+                await insertEdgeDeadLetter(client, hydrated, outcome);
+              } catch (err) {
                 console.error(
                   `[delivery] dead_letters insert failed for ${hydrated.event_id}: ${safeDeliveryDiagnostic(err)}`,
                 );
-              });
+                ctx.waitUntil(captureException(sentry, err, {
+                  tags: {
+                    component: "dead_letter_persistence",
+                    queue: batch.queue,
+                    event_id: hydrated.event_id,
+                    destination_id: hydrated.destination_id,
+                  },
+                }));
+                msg.retry();
+                continue;
+              }
             }
             // ACK. For success/dead, delete the spill object so it doesn't linger
-            // in R2. For "rescheduled", KEEP it — delivery-service already
-            // re-enqueued an attempt_no+1 message that must hydrate the same spill.
+            // in R2. For "rescheduled", delivery-service has already re-spilled
+            // under the next attempt's canonical key and removed the old copy.
             if (outcome.result !== "rescheduled") {
               ctx.waitUntil(deleteSpillIfPresent(hydrated, spillReader));
             }
@@ -277,7 +323,7 @@ export default {
           }
         } catch (err) {
           console.error(`[delivery] dispatch failed: ${safeDeliveryDiagnostic(err)}`);
-          const finalAttempt = msg.attempts >= DELIVERY_CONSUMER_MAX_RETRIES;
+          const finalAttempt = msg.attempts >= DELIVERY_CONSUMER_MAX_ATTEMPTS;
           const transientPlatform =
             isTransientPostgresError(err) ||
             isTransientFetchError(err) ||
@@ -288,9 +334,9 @@ export default {
               tags: {
                 component: "queue_dispatch",
                 queue: batch.queue,
-                event_id: msg.body.event_id,
-                route_id: msg.body.route_id,
-                destination_id: msg.body.destination_id,
+                event_id: body.event_id,
+                route_id: body.route_id,
+                destination_id: body.destination_id,
                 final_attempt: finalAttempt,
                 ...(transientPlatform ? { category: "transient_platform" } : {}),
               },
@@ -298,13 +344,13 @@ export default {
           }
           ctx.waitUntil(
             logDeliveryAttempt(env, {
-              workspace_id: msg.body.workspace_id,
-              event_id: msg.body.event_id,
-              route_id: msg.body.route_id,
-              destination_id: msg.body.destination_id,
-              attempt_id: buildAttemptId(msg.body),
-              attempt_no: msg.body.attempt_no,
-              is_test: msg.body.is_test,
+              workspace_id: body.workspace_id,
+              event_id: body.event_id,
+              route_id: body.route_id,
+              destination_id: body.destination_id,
+              attempt_id: buildAttemptId(body),
+              attempt_no: body.attempt_no,
+              is_test: body.is_test,
               status: "retry",
               latency_ms: Date.now() - startedAt,
               response: { error: err instanceof Error ? err.message : String(err) },
@@ -320,7 +366,7 @@ export default {
   },
 };
 
-const DELIVERY_CONSUMER_MAX_RETRIES = 4;
+const DELIVERY_CONSUMER_MAX_ATTEMPTS = 12;
 
 // "rescheduled" = a forwarded native delivery whose retry the delivery-service
 // already re-enqueued (attempt_no+1, backoff). The edge must ACK its inbound
@@ -1650,9 +1696,9 @@ async function drainDeadLetterQueue(
         // normal "dead" path already deletes it; auto-DLQ'd messages that
         // exhausted max_retries reached here without cleanup and leaked the
         // object into R2 forever.
-        const spillKey = (body as { spill_r2_key?: unknown }).spill_r2_key;
-        if (typeof spillKey === "string" && spillKey.length > 0) {
-          await spillReader.delete(spillKey).catch(() => undefined);
+        const validated = validateDestinationQueueMessage(body);
+        if (validated.ok && validated.message.spill_r2_key) {
+          await deleteSpillIfPresent(validated.message, spillReader);
         }
         msg.ack();
       } catch (err) {

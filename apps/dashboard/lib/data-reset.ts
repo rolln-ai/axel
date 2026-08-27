@@ -32,6 +32,10 @@ const R2_PURGE_PACE_MS = 100;
 const POSTGRES_DELETE_BATCH_SIZE = 10_000;
 const POSTGRES_DELETE_MAX_ROWS_PER_RUN = 100_000;
 const OPERATIONAL_TABLES = [
+  // Derived from sampled events. Contracts and versions are configuration and
+  // stay, but event-linked fixture/drift rows are part of an event-data wipe.
+  "data_contract_fixtures",
+  "data_contract_drift_events",
   "replay_requests",
   "dead_letters",
   "delivery_idempotency",

@@ -20,7 +20,7 @@ while (( $# > 0 )); do
       payload="$2"
       shift 2
       ;;
-    -H|--retry|--retry-delay|--write-out)
+    -H|--retry|--retry-delay|--write-out|--connect-timeout|--max-time)
       shift 2
       ;;
     --fail-with-body|--silent|--show-error|--retry-all-errors)
@@ -41,7 +41,25 @@ printf '%s\t%s\n' "$method" "$url" >>"${MOCK_RENDER_DIR}/calls.tsv"
 
 case "${method} ${url}" in
   "GET https://api.render.com/v1/services?limit=100")
-    printf '[{"service":{"id":"srv-test","name":"axel-delivery-native"}}]\n'
+    if [[ "$MOCK_RENDER_SCENARIO" == "harden" ]]; then
+      printf '%s\n' '[
+        {"service":{"id":"srv-clickhouse","name":"axel-clickhouse"}},
+        {"service":{"id":"srv-delivery-native","name":"axel-delivery-native"}},
+        {"service":{"id":"srv-delivery-workers","name":"axel-delivery-workers"}},
+        {"service":{"id":"srv-pull-worker","name":"axel-pull-worker"}}
+      ]'
+    else
+      printf '[{"service":{"id":"srv-test","name":"axel-delivery-native"}}]\n'
+    fi
+    ;;
+  "PATCH "*/services/srv-*)
+    if [[ "$MOCK_RENDER_SCENARIO" != "harden" ]]; then
+      echo "unexpected Render hardening request" >&2
+      exit 2
+    fi
+    service_id="${url##*/srv-}"
+    printf '%s\n' "$payload" >"${MOCK_RENDER_DIR}/patch-${service_id}.json"
+    jq -cn '{service:{autoDeploy:"no"}}'
     ;;
   "GET "*/services/srv-test/deploys\?limit=100)
     if [[ "$MOCK_RENDER_SCENARIO" == "existing-live" ]]; then
@@ -101,6 +119,13 @@ case "${method} ${url}" in
     ;;
   "GET "*/services/srv-test/deploys/dep-failed)
     printf '{"id":"dep-failed","status":"build_failed"}\n'
+    ;;
+  "GET "*/services/srv-*)
+    if [[ "$MOCK_RENDER_SCENARIO" != "harden" ]]; then
+      echo "unexpected Render service readback" >&2
+      exit 2
+    fi
+    jq -cn '{service:{autoDeploy:"no"}}'
     ;;
   *)
     echo "unexpected mock curl request: ${method} ${url}" >&2

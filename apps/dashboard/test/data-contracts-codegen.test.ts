@@ -8,6 +8,7 @@ import {
   runFilter,
   runFixtures,
   runTransform,
+  withTransientStatusFields,
   type GeneratedFilter,
   type GeneratedTransform,
 } from "../lib/data-contracts/codegen";
@@ -182,6 +183,39 @@ describe("generateRouteArtifacts", () => {
       { selected_event_type_names: ["invoice.paid"] },
     );
     expect(filter).toEqual({ kind: "always" });
+  });
+
+  it("rebuilds status values transiently when the durable schema has scrubbed them", () => {
+    const durable = inferred({
+      event_types: [
+        { cluster_id: "h1", name: "invoice.paid", example_event_ids: [], sample_count: 1 },
+      ],
+      status_fields: [{ path: "type", values: [] }],
+    });
+    const transient = withTransientStatusFields(
+      durable,
+      [sample({ type: "invoice.paid", id: "evt_1" }, "e1", "h1")],
+    );
+    const mapping: DestinationMapping = {
+      kind: "webhook",
+      destination_id: "d1",
+      body_strategy: "passthrough",
+      headers: {},
+      preview: [],
+      rationale: "",
+    };
+
+    expect(durable.status_fields[0]!.values).toEqual([]);
+    expect(transient.status_fields[0]!.values).toEqual(["invoice.paid"]);
+    expect(
+      generateRouteArtifacts(transient, mapping, {
+        selected_event_type_names: ["invoice.paid"],
+      }).filter,
+    ).toEqual({
+      kind: "event_type_in",
+      path: "type",
+      values: ["invoice.paid"],
+    });
   });
 });
 

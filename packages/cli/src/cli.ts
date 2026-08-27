@@ -12,8 +12,8 @@ import { listenCommand } from "./commands/listen.js";
  *   axel listen --source <id> --forward-to <url> [...]
  *   axel replay <event_id> --forward-to <url> [...]
  *
- * Hand-rolled (no commander/yargs dep) to keep the install footprint
- * tiny — operators install `npm i -g @axel/cli`.
+ * Hand-rolled (no commander/yargs dependency) to keep the install footprint
+ * small. The package is installed from source until its first npm release.
  */
 export async function run(argv: string[]): Promise<void> {
   const [command, ...rest] = argv;

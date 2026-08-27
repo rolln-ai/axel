@@ -14,9 +14,10 @@
  *   - All HMAC comparisons go through a constant-time byte compare.
  *   - Stripe / Custom HMAC: timestamp is checked against a tolerance
  *     window to prevent indefinite replay of an intercepted request.
- *   - GitHub / Shopify don't sign a timestamp — only the body — so we
- *     can't reject stale events the way Stripe does. That's the
- *     provider's design choice; we still verify the body integrity.
+ *   - GitHub / Shopify don't sign a timestamp — only the body — so this
+ *     primitive cannot reject stale events the way Stripe does. The ingest
+ *     worker separately persists their stable delivery IDs for replay
+ *     suppression after signature verification.
  *   - Header lookups are case-insensitive (HTTP normalises but defense
  *     in depth never hurts).
  */

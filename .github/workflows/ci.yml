@@ -103,6 +103,11 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: .node-version
+      - name: Validate migration names and schema parity
+        run: node scripts/check-postgres-migrations.mjs
       - run: >-
           docker run --rm --network host
           -v "$PWD:/repo:ro"
@@ -144,7 +149,10 @@ jobs:
 
   dependency-review:
     name: Dependency review
-    if: ${{ github.event_name == 'pull_request' }}
+    # GitHub's dependency-review API is unavailable for this private repo
+    # without GHAS. pnpm audit still runs in CI Security; this native diff gate
+    # automatically activates when the repository becomes public.
+    if: ${{ github.event_name == 'pull_request' && github.event.repository.private == false }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

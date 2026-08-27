@@ -6,7 +6,7 @@ import {
 } from "@axel/shared";
 import type { DestinationMapping } from "./destination-mapping";
 import { redactFixturePayload } from "./fixture-redaction";
-import type { InferredDataContract } from "./inference";
+import { inferDeterministic, type InferredDataContract } from "./inference";
 import type { SampledEvent } from "./sampler";
 
 export type { GeneratedFilter, GeneratedTransform };
@@ -15,6 +15,21 @@ export { runFilter, runTransform } from "@axel/shared";
 export interface CodegenOptions {
   /** When set, restrict to a specific subset of event types by cluster name. */
   selected_event_type_names?: string[];
+}
+
+/**
+ * Rebuild the observed status-value slice from an in-memory sample. Durable
+ * schemas intentionally store an empty values array, but selected-event filters
+ * still need exact values while a proposal is being built.
+ */
+export function withTransientStatusFields(
+  inferred: InferredDataContract,
+  samples: SampledEvent[],
+): InferredDataContract {
+  return {
+    ...inferred,
+    status_fields: inferDeterministic(samples).status_fields,
+  };
 }
 
 /**

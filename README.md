@@ -3,12 +3,15 @@
 Open-source webhook ingestion and event delivery platform. Capture webhooks
 from any source, filter and transform them with declarative routes, and
 deliver them to HTTP endpoints, Postgres, MongoDB, BigQuery, Databricks, or
-object storage — with retries, dead-lettering, replay, and full delivery
-history.
+object storage — with retries, dead-lettering, replay, and delivery tracking.
+Axel Cloud includes full searchable delivery history; self-hosters
+can add ClickHouse when they need it.
 
 Axel is the code behind [**Axel Cloud**](https://axelapp.ai) — the hosted
-version, if you'd rather not run it yourself. This repo is the real production
-source, not a mirror: the cloud deploys from `main`.
+version, if you'd rather not run it yourself. Its release workflows promote a
+reviewed `main` commit through the protected Production environment and apply
+pending migrations before application code. The initial guarded rollout also
+disables provider-side Git deployment before subsequent releases.
 
 ![Axel dashboard — workspace overview](docs/assets/axel-dashboard.png)
 
@@ -43,7 +46,7 @@ and [`docs/production-scale.md`](docs/production-scale.md).
 | `packages/shared`        | Shared types, contracts, credential crypto                 |
 | `packages/connectors`    | Destination connectors                                     |
 | `packages/pull-connectors` | Pull-source connectors                                   |
-| `packages/cli`           | `@axel/cli`                                                |
+| `packages/cli`           | Axel CLI source; the npm package is not published yet      |
 | `infra/`                 | Postgres migrations, ClickHouse schema, lifecycle rules    |
 | `docs/`                  | ADRs and operational runbooks                              |
 
@@ -75,9 +78,12 @@ pnpm --filter @axel/marketing dev       # marketing site on :3001
 pnpm --filter @axel/ingest-worker dev   # wrangler dev
 ```
 
-Copy `.env.example` to `.env.local` and fill in what you need — every feature
-degrades gracefully when its variable is unset (no Stripe → no billing, no
-caps; no Resend → no emails; no Sentry/PostHog → no telemetry).
+Use `.env.example` as the configuration inventory. Put Next.js values in the
+relevant app's `.env.local` (for example, `apps/dashboard/.env.local`), put
+local Worker values in that app's `.dev.vars`, and export variables before
+running root shell scripts. The optional integrations degrade gracefully when
+unset (no Stripe → no billing or caps; no Resend → no emails; no
+Sentry/PostHog → no telemetry).
 
 ## Self-hosting
 
@@ -92,8 +98,8 @@ AXEL_PUBLIC_URL=https://axel.example.com \
 AXEL_SITE_ADDRESS=axel.example.com \
   ./scripts/axel-self-host init
 
-# Add CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN to .env.selfhost.
-# A separate, narrower CLOUDFLARE_RUNTIME_API_TOKEN is optional.
+# Add CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, and the narrower
+# CLOUDFLARE_RUNTIME_API_TOKEN to .env.selfhost.
 ./scripts/axel-self-host edge
 ./scripts/axel-self-host up
 ```

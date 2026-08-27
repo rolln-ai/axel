@@ -15,7 +15,9 @@ jobs:
     name: Backup ClickHouse
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
-    environment: Production
+    # Backups are unattended and use a separate least-privilege environment so
+    # Production deployment approvals cannot pause the daily schedule.
+    environment: Backup
     timeout-minutes: 30
     permissions:
       contents: read

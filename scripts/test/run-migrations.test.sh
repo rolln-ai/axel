@@ -37,6 +37,8 @@ ALTER TABLE pull_sources
 DROP INDEX pull_source_credentials_binding_idx;
 ALTER TABLE replay_requests
   DROP CONSTRAINT replay_requests_workspace_r2_key_check;
+ALTER TABLE dead_letters
+  DROP COLUMN is_test;
 TRUNCATE schema_migrations;
 
 INSERT INTO workspaces (id, name) VALUES ('ws_migration_adoption', 'Migration adoption');
@@ -86,6 +88,7 @@ printf '%s\n' "$upgrade_output" | grep -q "applying 0065_personal_access_tokens_
 printf '%s\n' "$upgrade_output" | grep -q "applying 0066_destination_credential_binding.sql"
 printf '%s\n' "$upgrade_output" | grep -q "applying 0067_pull_source_credential_binding.sql"
 printf '%s\n' "$upgrade_output" | grep -q "applying 0068_replay_payload_workspace_binding.sql"
+printf '%s\n' "$upgrade_output" | grep -q "applying 0071_dead_letters_is_test.sql"
 
 # The circular destination/current-credential relationship must be creatable in
 # one transaction, while a reference to another destination remains rejected.
@@ -209,9 +212,17 @@ SELECT count(*) = 1
 SELECT sha256 ~ '^[0-9a-f]{64}$'
   FROM schema_migrations
  WHERE filename = '0068_replay_payload_workspace_binding.sql';
+SELECT is_nullable = 'NO' AND column_default = 'false'
+  FROM information_schema.columns
+ WHERE table_schema = 'public'
+   AND table_name = 'dead_letters'
+   AND column_name = 'is_test';
+SELECT sha256 ~ '^[0-9a-f]{64}$'
+  FROM schema_migrations
+ WHERE filename = '0071_dead_letters_is_test.sql';
 SQL
 )"
-if [ "$assertions" != $'t\nt\nt\nt\nt\nt\nt\nt\nt\nt\nt\nt\nt' ]; then
+if [ "$assertions" != $'t\nt\nt\nt\nt\nt\nt\nt\nt\nt\nt\nt\nt\nt\nt' ]; then
   echo "migration adoption assertions failed:" >&2
   printf '%s\n' "$assertions" >&2
   exit 1
@@ -219,5 +230,18 @@ fi
 
 idempotent_output="$("$ROOT_DIR/scripts/run-migrations.sh")"
 printf '%s\n' "$idempotent_output" | grep -q "applied 0"
+
+# Once the runner records a real checksum, changing that migration must stop a
+# deploy rather than silently replacing the ledger hash.
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "
+  UPDATE schema_migrations
+     SET sha256 = repeat('0', 64)
+   WHERE filename = '0071_dead_letters_is_test.sql';
+"
+if checksum_output="$("$ROOT_DIR/scripts/run-migrations.sh" 2>&1)"; then
+  echo "migration runner accepted an applied checksum mismatch" >&2
+  exit 1
+fi
+printf '%s\n' "$checksum_output" | grep -q "checksum mismatch for applied migration 0071_dead_letters_is_test.sql"
 
 echo "run-migrations tests passed"

@@ -6,7 +6,8 @@ export function quoteShellArgument(value: string): string {
 /** Copy-ready login instructions for this dashboard deployment. */
 export function buildCliAuthLoginHint(apiBaseUrl: string): string {
   return [
-    "npm i -g @axel/cli",
+    "# From an Axel source checkout; the npm package is not published yet:",
+    "pnpm --filter @axel/cli build && npm install -g ./packages/cli",
     `axel auth login --api-base ${quoteShellArgument(apiBaseUrl)}   # paste the token above when prompted`,
   ].join("\n");
 }

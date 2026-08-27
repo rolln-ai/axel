@@ -41,7 +41,7 @@ guard refuses likely shared-value mass erasures without explicit confirmation.
    (above a match-count threshold)?
 
 3. **Out-of-scope PII tables are disclosed, not auto-erased (§9.4)**
-   (`event_map_fixtures.input_payload`, `billing_events.payload`,
+   (`billing_events.payload`,
    `notifications`, `dead_letter_mutes`, ClickHouse `events_daily`). They have
    no `event_id` linkage. → decision: manual operator process, or add event_id
    linkage?

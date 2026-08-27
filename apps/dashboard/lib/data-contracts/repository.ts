@@ -11,6 +11,14 @@ import {
 import type { Queryable } from "../db";
 import { db, withTransaction } from "../db";
 import { prefixedId } from "../ids";
+import {
+  generalizeFixturePayload,
+  sanitizeDestinationMappingForPersistence,
+  sanitizeDriftDetailForPersistence,
+  sanitizeFixtureResultsForPersistence,
+  sanitizeInferredSchemaForPersistence,
+  sanitizeModelMetadataForPersistence,
+} from "./persistence-sanitizer";
 
 /**
  * Run inside an existing transaction
@@ -384,14 +392,34 @@ export async function appendDataContractVersion(
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
       input.dataContractId,
     ]);
-    const next = await client.query<{ next_number: number }>(
-      `SELECT COALESCE(MAX(version_number), 0) + 1 AS next_number
-         FROM data_contract_versions
-        WHERE data_contract_id = $1`,
-      [input.dataContractId],
+    const next = await client.query<{ next_number: number | null }>(
+      `SELECT CASE WHEN COUNT(em.id) = 0 THEN NULL
+                   ELSE COALESCE(MAX(emv.version_number), 0) + 1
+              END AS next_number
+         FROM data_contracts em
+         LEFT JOIN data_contract_versions emv
+           ON emv.data_contract_id = em.id
+          AND emv.workspace_id = em.workspace_id
+        WHERE em.id = $1 AND em.workspace_id = $2`,
+      [input.dataContractId, input.workspaceId],
     );
-    const versionNumber = next.rows[0]?.next_number ?? 1;
+    const versionNumber = next.rows[0]?.next_number;
+    if (versionNumber == null) {
+      throw new Error("appendDataContractVersion: data contract not found in workspace");
+    }
     const id = prefixedId("emv");
+    const persistedSchema = sanitizeInferredSchemaForPersistence(
+      input.inferredSchema,
+    );
+    const persistedMapping = sanitizeDestinationMappingForPersistence(
+      input.destinationMapping,
+    );
+    const persistedFixtureResults = sanitizeFixtureResultsForPersistence(
+      input.fixtureResults,
+    );
+    const persistedModelMetadata = sanitizeModelMetadataForPersistence(
+      input.modelMetadata,
+    );
     const inserted = await client.query<DataContractVersionRow>(
       `INSERT INTO data_contract_versions (
          id, data_contract_id, workspace_id, version_number, inferred_schema,
@@ -408,22 +436,22 @@ export async function appendDataContractVersion(
         input.dataContractId,
         input.workspaceId,
         versionNumber,
-        JSON.stringify(input.inferredSchema),
+        JSON.stringify(persistedSchema),
         input.fieldAnnotations === undefined
           ? null
           : JSON.stringify(input.fieldAnnotations),
         input.generatedFilter ?? null,
         input.generatedTransform ?? null,
         input.transformLanguage ?? null,
-        input.destinationMapping === undefined
+        input.destinationMapping == null
           ? null
-          : JSON.stringify(input.destinationMapping),
+          : JSON.stringify(persistedMapping),
         input.modelMetadata === undefined
           ? null
-          : JSON.stringify(input.modelMetadata),
-        input.fixtureResults === undefined
+          : JSON.stringify(persistedModelMetadata),
+        input.fixtureResults == null
           ? null
-          : JSON.stringify(input.fixtureResults),
+          : JSON.stringify(persistedFixtureResults),
         input.createdByUserId ?? null,
       ],
     );
@@ -736,20 +764,23 @@ export async function insertDataContractFixture(
   client: Queryable = db(),
 ): Promise<DataContractFixtureRow> {
   const id = prefixedId("emf");
+  const inputPayload = generalizeFixturePayload(input.inputPayload);
+  const expectedOutput = generalizeFixturePayload(input.expectedOutput);
   const result = await client.query<DataContractFixtureRow>(
     `INSERT INTO data_contract_fixtures (
        id, data_contract_version_id, workspace_id, source_event_id,
        event_type, input_payload, expected_output
-     ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+     )
+     SELECT $1, $2, $3, NULL, NULL, $4::jsonb, $5::jsonb
+       FROM data_contract_versions
+      WHERE id = $2 AND workspace_id = $3
      RETURNING ${FIXTURE_COLUMNS}`,
     [
       id,
       input.dataContractVersionId,
       input.workspaceId,
-      input.sourceEventId ?? null,
-      input.eventType ?? null,
-      JSON.stringify(input.inputPayload),
-      JSON.stringify(input.expectedOutput),
+      JSON.stringify(inputPayload),
+      JSON.stringify(expectedOutput),
     ],
   );
   const row = result.rows[0];
@@ -776,11 +807,20 @@ export async function insertDriftEvent(
   input: InsertDriftInput,
   client: Queryable = db(),
 ): Promise<DataContractDriftRow> {
+  const persistedDetail = sanitizeDriftDetailForPersistence(
+    input.category,
+    input.detail,
+  );
   const result = await client.query<DataContractDriftRow>(
     `INSERT INTO data_contract_drift_events (
        data_contract_id, data_contract_version_id, workspace_id, category,
        field_path, detail, sample_event_id
-     ) VALUES ($1, $2, $3, $4, $5, COALESCE($6::jsonb, '{}'::jsonb), $7)
+     )
+     SELECT $1, $2, $3, $4, $5, $6::jsonb, NULL
+       FROM data_contract_versions v
+      WHERE v.id = $2
+        AND v.data_contract_id = $1
+        AND v.workspace_id = $3
      RETURNING ${DRIFT_COLUMNS}`,
     [
       input.dataContractId,
@@ -788,8 +828,7 @@ export async function insertDriftEvent(
       input.workspaceId,
       input.category,
       input.fieldPath ?? null,
-      input.detail === undefined ? null : JSON.stringify(input.detail),
-      input.sampleEventId ?? null,
+      JSON.stringify(persistedDetail),
     ],
   );
   const row = result.rows[0];

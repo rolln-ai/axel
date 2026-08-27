@@ -492,6 +492,7 @@ describe("replay-worker — CF delivery queue sink", () => {
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
     await sink.enqueue({
+      queue_message_version: 1,
       event_id: "evt_1",
       workspace_id: "ws_1",
       source_id: "src_1",
@@ -527,6 +528,7 @@ describe("replay-worker — CF delivery queue sink", () => {
     });
     await expect(
       sink.enqueue({
+        queue_message_version: 1,
         event_id: "evt_1",
         workspace_id: "ws_1",
         source_id: "src_1",
@@ -563,6 +565,7 @@ describe("replay-worker — processor wiring", () => {
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
     const message = {
+      queue_message_version: 1 as const,
       event_id: "evt_1",
       workspace_id: "ws_1",
       source_id: "src_1",

@@ -21,7 +21,9 @@ on:
         required: true
 
 concurrency:
-  group: migrate-postgres-run-${{ inputs.target }}
+  # Share the production deployment lock so an operator-triggered migration
+  # cannot overlap a deploy workflow that is also applying migrations.
+  group: production-deploy
   cancel-in-progress: false
 
 jobs:
@@ -29,6 +31,7 @@ jobs:
     name: Apply pending migrations
     if: ${{ github.ref == 'refs/heads/main' && inputs.confirm == 'apply' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: Production
     permissions:
       contents: read

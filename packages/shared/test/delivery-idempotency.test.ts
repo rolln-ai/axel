@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  DELIVERY_CLAIM_RETENTION_DAYS,
   DELIVERY_CLAIM_RENEW_SQL,
   DELIVERY_CLAIM_SETTLE_SQL,
   DELIVERY_CLAIM_SQL,
@@ -18,6 +19,11 @@ describe("shared delivery claim protocol", () => {
     expect(DELIVERY_CLAIM_RENEW_SQL).toContain("AND attempt_id = $2");
     expect(DELIVERY_CLAIM_SETTLE_SQL).toContain("AND state = 'in_flight'");
     expect(DELIVERY_CLAIM_SETTLE_SQL).toContain("AND attempt_id = $2");
+  });
+
+  it("keeps settled claims for the 30-day raw-event retention window", () => {
+    expect(DELIVERY_CLAIM_RETENTION_DAYS).toBe(30);
+    expect(DELIVERY_CLAIM_SETTLE_SQL).toContain("interval '30 days'");
   });
 
   it("distinguishes an indeterminate retry from another live owner", () => {

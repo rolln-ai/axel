@@ -18,13 +18,17 @@
  */
 
 import type pg from "pg";
+import type { QueueConsumerMetrics } from "./queue-consumer-metrics.js";
 
 export interface MetricsSnapshot {
   text: string;
   generatedAt: string;
 }
 
-export async function renderMetrics(pool: pg.Pool): Promise<MetricsSnapshot> {
+export async function renderMetrics(
+  pool: pg.Pool,
+  queueMetrics?: QueueConsumerMetrics,
+): Promise<MetricsSnapshot> {
   const lines: string[] = [];
   const now = new Date().toISOString();
 
@@ -75,6 +79,26 @@ export async function renderMetrics(pool: pg.Pool): Promise<MetricsSnapshot> {
     console.error("[metrics] dlq query failed", err);
   }
 
+  lines.push(`# HELP axel_queue_quarantine_24h Malformed queue messages seen in the last 24 hours, grouped by validation reason.`);
+  lines.push(`# TYPE axel_queue_quarantine_24h gauge`);
+  try {
+    const quarantine = await pool.query<{ failure_code: string; n: number }>(
+      `SELECT failure_code, count(*)::int AS n
+         FROM queue_quarantine
+        WHERE last_seen_at > now() - interval '24 hours'
+        GROUP BY failure_code
+        ORDER BY n DESC
+        LIMIT 20`,
+    );
+    for (const row of quarantine.rows) {
+      lines.push(`axel_queue_quarantine_24h{reason="${labelValue(row.failure_code)}"} ${row.n}`);
+    }
+  } catch (err) {
+    // During a rolling deploy the service may start before migration 0070.
+    // Runtime counters below still expose parser failures until the table lands.
+    console.error("[metrics] queue quarantine query failed", err);
+  }
+
   // ---- pull-sync runs in flight ---- //
   lines.push(`# HELP axel_pull_sync_runs_in_flight Count of pull sync runs currently running.`);
   lines.push(`# TYPE axel_pull_sync_runs_in_flight gauge`);
@@ -98,6 +122,8 @@ export async function renderMetrics(pool: pg.Pool): Promise<MetricsSnapshot> {
   } catch (err) {
     console.error("[metrics] replays query failed", err);
   }
+
+  if (queueMetrics) lines.push(...queueMetrics.renderPrometheus());
 
   lines.push(`# Generated at ${now}`);
   return { text: lines.join("\n") + "\n", generatedAt: now };

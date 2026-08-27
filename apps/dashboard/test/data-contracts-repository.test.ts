@@ -148,7 +148,7 @@ function makeVersionRaceEngine(): {
         }
         // Yield so concurrent transactions interleave unless serialized.
         await new Promise((resolve) => setTimeout(resolve, 0));
-        if (text.includes("COALESCE(MAX(version_number), 0) + 1")) {
+        if (text.includes("COALESCE(MAX(emv.version_number), 0) + 1")) {
           const contractId = String(values[0]);
           const max = versions
             .filter((v) => v.data_contract_id === contractId)
@@ -375,9 +375,10 @@ describe("data-contracts repository", () => {
 
       // 2) Compute next version number.
       expect(captured[1]!.sql).toMatch(
-        /COALESCE\(MAX\(version_number\), 0\) \+ 1 AS next_number/,
+        /COALESCE\(MAX\(emv\.version_number\), 0\) \+ 1/,
       );
-      expect(captured[1]!.params).toEqual(["em_1"]);
+      expect(captured[1]!.sql).toMatch(/em\.workspace_id = \$2/);
+      expect(captured[1]!.params).toEqual(["em_1", "ws_1"]);
 
       // 3) Insert the new version.
       expect(captured[2]!.sql).toMatch(/INSERT INTO data_contract_versions/);
@@ -385,7 +386,10 @@ describe("data-contracts repository", () => {
       expect(insertParams[1]).toBe("em_1");
       expect(insertParams[2]).toBe("ws_1");
       expect(insertParams[3]).toBe(3);
-      expect(JSON.parse(String(insertParams[4]))).toEqual({ event_types: [] });
+      expect(JSON.parse(String(insertParams[4]))).toEqual({
+        event_types: [],
+        summary: "Observed 0 events across 0 event types and 0 fields. Stored values removed.",
+      });
       // model_metadata JSON-stringified into params[10]
       expect(JSON.parse(String(insertParams[10]))).toEqual({
         model: "claude-haiku-4-5",
@@ -427,11 +431,29 @@ describe("data-contracts repository", () => {
           dataContractId: "em_1",
           workspaceId: "ws_1",
           inferredSchema: {},
+          destinationMapping: null,
         },
         client,
       );
       expect(row.version_number).toBe(1);
       expect(captured[2]!.params[3]).toBe(1);
+      expect(captured[2]!.params[9]).toBeNull();
+    });
+
+    it("refuses to append a version through a different workspace", async () => {
+      const { client, captured } = fakePoolClient([[], [{ next_number: null }]]);
+      await expect(
+        appendDataContractVersion(
+          {
+            dataContractId: "em_foreign",
+            workspaceId: "ws_attacker",
+            inferredSchema: {},
+          },
+          client,
+        ),
+      ).rejects.toThrow(/not found in workspace/);
+      expect(captured).toHaveLength(2);
+      expect(captured[1]!.params).toEqual(["em_foreign", "ws_attacker"]);
     });
 
     it("serializes concurrent appends: sequential version numbers, no unique violation", async () => {
@@ -493,7 +515,7 @@ describe("data-contracts repository", () => {
   });
 
   describe("fixtures", () => {
-    it("insertDataContractFixture serializes payloads as jsonb", async () => {
+    it("insertDataContractFixture stores shape-only payloads without event references", async () => {
       const { db, captured } = fakeDb([
         [
           {
@@ -520,8 +542,9 @@ describe("data-contracts repository", () => {
       );
       const params = captured[0]!.params;
       expect(captured[0]!.sql).toMatch(/INSERT INTO data_contract_fixtures/);
-      expect(JSON.parse(String(params[5]))).toEqual({ id: "in_1" });
-      expect(JSON.parse(String(params[6]))).toEqual({ customer: "c_1" });
+      expect(captured[0]!.sql).toMatch(/SELECT \$1, \$2, \$3, NULL, NULL/);
+      expect(JSON.parse(String(params[3]))).toEqual({ id: "[STRING]" });
+      expect(JSON.parse(String(params[4]))).toEqual({ customer: "[STRING]" });
     });
 
     it("listDataContractFixtures scopes by version + workspace", async () => {
@@ -564,9 +587,8 @@ describe("data-contracts repository", () => {
         /INSERT INTO data_contract_drift_events/,
       );
       expect(captured[0]!.params[3]).toBe("new_event_type");
-      expect(JSON.parse(String(captured[0]!.params[5]))).toEqual({
-        example: "invoice.refunded",
-      });
+      expect(JSON.parse(String(captured[0]!.params[5]))).toEqual({});
+      expect(captured[0]!.sql).toMatch(/SELECT \$1, \$2, \$3, \$4, \$5, \$6::jsonb, NULL/);
     });
 
     it("listUnresolvedDriftEvents filters on resolved_at IS NULL", async () => {

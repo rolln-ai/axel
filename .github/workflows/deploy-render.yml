@@ -1,57 +1,47 @@
 name: Deploy Render Services
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      # Keep the control plane and native delivery runtime from drifting. A
-      # dashboard change can start emitting a new route binding shape, while
-      # the corresponding connector/shared-type change teaches Render how to
-      # consume it. The July 2026 BigQuery incident happened because only the
-      # dashboard auto-deployed and this workflow remained manual-only.
-      - apps/dashboard/**
-      - apps/delivery-service/**
-      - apps/delivery-worker/**
-      - apps/pull-worker/**
-      - apps/router/**
-      - packages/connectors/**
-      - packages/observability/**
-      - packages/pull-connectors/**
-      - packages/shared/**
-      - package.json
-      - pnpm-lock.yaml
-      - pnpm-workspace.yaml
-      - render.yaml
-      - scripts/deploy-render-service.sh
-      - scripts/sentry-release-deploy.sh
-      - .github/workflows/deploy-render.yml
   workflow_dispatch:
     inputs:
+      reason:
+        description: Reviewed release or incident change being deployed
+        required: true
+        type: string
       service:
         description: Render service to deploy
         required: true
-        default: axel-delivery-native
+        default: all
         type: choice
         options:
+          - axel-clickhouse
           - axel-delivery-native
           - axel-delivery-workers
           - axel-pull-worker
           - all
+      confirm_clickhouse:
+        description: For axel-clickhouse only, type deploy-stateful-clickhouse after verifying the latest backup
+        required: false
+        type: string
 
 concurrency:
-  group: deploy-render-production
+  group: production-deploy
   cancel-in-progress: false
 
 jobs:
   verify:
     name: Verify before deploy
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read
     steps:
       - name: Require the protected main branch
         run: test "$GITHUB_REF" = "refs/heads/main"
+      - name: Require explicit confirmation for the stateful ClickHouse deploy
+        if: ${{ inputs.service == 'axel-clickhouse' }}
+        env:
+          CLICKHOUSE_CONFIRMATION: ${{ inputs.confirm_clickhouse }}
+        run: test "$CLICKHOUSE_CONFIRMATION" = "deploy-stateful-clickhouse"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
@@ -71,11 +61,23 @@ jobs:
     runs-on: ubuntu-latest
     needs: verify
     environment: Production
-    timeout-minutes: 270
+    timeout-minutes: 150
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Disable and verify Render git auto-deploys
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+        run: bash scripts/harden-render-auto-deploy.sh
+
+      - name: Install Postgres client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Apply pending Postgres migrations
+        run: ./scripts/run-migrations.sh
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
       - name: Prepare commit release in Sentry
         env:
@@ -87,14 +89,35 @@ jobs:
           bash scripts/sentry-release-deploy.sh prepare \
             "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
 
+      # ClickHouse owns a persistent disk and a deploy restarts the database
+      # container. Keep it outside `all`; operators must select it explicitly
+      # and acknowledge the backup check above.
+      - name: Deploy axel-clickhouse
+        if: ${{ inputs.service == 'axel-clickhouse' }}
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+        run: bash scripts/deploy-render-service.sh axel-clickhouse "$GITHUB_SHA"
+
+      - name: Record axel-clickhouse deploy in Sentry
+        if: ${{ inputs.service == 'axel-clickhouse' }}
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: rolln
+          SENTRY_PROJECT: javascript
+          SENTRY_RELEASE: ${{ github.sha }}
+        run: |
+          bash scripts/sentry-release-deploy.sh record \
+            render/axel-clickhouse \
+            "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
       - name: Deploy axel-delivery-native
-        if: ${{ github.event_name == 'push' || inputs.service == 'axel-delivery-native' || inputs.service == 'all' }}
+        if: ${{ inputs.service == 'axel-delivery-native' || inputs.service == 'all' }}
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
         run: bash scripts/deploy-render-service.sh axel-delivery-native "$GITHUB_SHA"
 
       - name: Record axel-delivery-native deploy in Sentry
-        if: ${{ github.event_name == 'push' || inputs.service == 'axel-delivery-native' || inputs.service == 'all' }}
+        if: ${{ inputs.service == 'axel-delivery-native' || inputs.service == 'all' }}
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: rolln
@@ -106,13 +129,13 @@ jobs:
             "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
       - name: Deploy axel-delivery-workers
-        if: ${{ github.event_name == 'push' || inputs.service == 'axel-delivery-workers' || inputs.service == 'all' }}
+        if: ${{ inputs.service == 'axel-delivery-workers' || inputs.service == 'all' }}
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
         run: bash scripts/deploy-render-service.sh axel-delivery-workers "$GITHUB_SHA"
 
       - name: Record axel-delivery-workers deploy in Sentry
-        if: ${{ github.event_name == 'push' || inputs.service == 'axel-delivery-workers' || inputs.service == 'all' }}
+        if: ${{ inputs.service == 'axel-delivery-workers' || inputs.service == 'all' }}
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: rolln
@@ -124,13 +147,13 @@ jobs:
             "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
       - name: Deploy axel-pull-worker
-        if: ${{ github.event_name == 'push' || inputs.service == 'axel-pull-worker' || inputs.service == 'all' }}
+        if: ${{ inputs.service == 'axel-pull-worker' || inputs.service == 'all' }}
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
         run: bash scripts/deploy-render-service.sh axel-pull-worker "$GITHUB_SHA"
 
       - name: Record axel-pull-worker deploy in Sentry
-        if: ${{ github.event_name == 'push' || inputs.service == 'axel-pull-worker' || inputs.service == 'all' }}
+        if: ${{ inputs.service == 'axel-pull-worker' || inputs.service == 'all' }}
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: rolln
@@ -140,3 +163,20 @@ jobs:
           bash scripts/sentry-release-deploy.sh record \
             render/axel-pull-worker \
             "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+      - name: Run post-deploy smoke
+        run: bash scripts/smoke.sh
+        env:
+          AXEL_MARKETING_URL: ${{ vars.AXEL_MARKETING_URL || 'https://axelapp.ai' }}
+          AXEL_APP_URL: ${{ vars.AXEL_APP_URL || 'https://app.axelapp.ai' }}
+          AXEL_INGEST_URL: ${{ vars.AXEL_INGEST_URL || 'https://ingest.axelapp.ai' }}
+          AXEL_DELIVERY_URL: ${{ vars.AXEL_DELIVERY_URL || 'https://axel-delivery-native.onrender.com' }}
+          AXEL_REQUIRE_OPERATIONAL_STATUS: "1"
+          AXEL_OPS_TEST_TOKEN: ${{ secrets.OPS_TEST_TOKEN }}
+          AXEL_REQUIRE_DELIVERY_CANARY: "1"
+          AXEL_CANARY_INGEST_URL: ${{ secrets.AXEL_CANARY_INGEST_URL }}
+          AXEL_CANARY_INGEST_AUTH_HEADER: ${{ secrets.AXEL_CANARY_INGEST_AUTH_HEADER }}
+          AXEL_CANARY_INGEST_AUTH_VALUE: ${{ secrets.AXEL_CANARY_INGEST_AUTH_VALUE }}
+          AXEL_CANARY_RECEIPT_URL: ${{ secrets.AXEL_CANARY_RECEIPT_URL }}
+          AXEL_CANARY_RECEIPT_AUTH_HEADER: ${{ secrets.AXEL_CANARY_RECEIPT_AUTH_HEADER }}
+          AXEL_CANARY_RECEIPT_AUTH_VALUE: ${{ secrets.AXEL_CANARY_RECEIPT_AUTH_VALUE }}

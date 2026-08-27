@@ -1,8 +1,12 @@
-name: Smoke Tests
+name: Production Smoke
 
 on:
   workflow_dispatch:
     inputs:
+      reason:
+        description: Release, incident, or operational check being verified
+        required: true
+        type: string
       target:
         description: Environment to smoke test
         required: true
@@ -12,11 +16,16 @@ on:
           - production
   workflow_call:
 
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
 jobs:
   smoke:
     name: Smoke
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     environment: Production
     permissions:
       contents: read
@@ -31,3 +40,10 @@ jobs:
           AXEL_DELIVERY_URL: ${{ vars.AXEL_DELIVERY_URL || 'https://axel-delivery-native.onrender.com' }}
           AXEL_REQUIRE_OPERATIONAL_STATUS: "1"
           AXEL_OPS_TEST_TOKEN: ${{ secrets.OPS_TEST_TOKEN }}
+          AXEL_REQUIRE_DELIVERY_CANARY: "1"
+          AXEL_CANARY_INGEST_URL: ${{ secrets.AXEL_CANARY_INGEST_URL }}
+          AXEL_CANARY_INGEST_AUTH_HEADER: ${{ secrets.AXEL_CANARY_INGEST_AUTH_HEADER }}
+          AXEL_CANARY_INGEST_AUTH_VALUE: ${{ secrets.AXEL_CANARY_INGEST_AUTH_VALUE }}
+          AXEL_CANARY_RECEIPT_URL: ${{ secrets.AXEL_CANARY_RECEIPT_URL }}
+          AXEL_CANARY_RECEIPT_AUTH_HEADER: ${{ secrets.AXEL_CANARY_RECEIPT_AUTH_HEADER }}
+          AXEL_CANARY_RECEIPT_AUTH_VALUE: ${{ secrets.AXEL_CANARY_RECEIPT_AUTH_VALUE }}

@@ -5,6 +5,7 @@
 import { db, withTransaction, type Queryable } from "./db";
 import { generateSourceToken } from "./source-tokens";
 import { RETENTION_BOUNDS } from "./retention-bounds";
+import { deploymentCapabilities } from "./deployment-capabilities";
 import {
   invalidateEdgeSourceCache,
   requireEdgeSourceCacheInvalidation,
@@ -594,6 +595,11 @@ export async function updateSourceTransientModeAction(
   formData: FormData,
 ): Promise<ActionState> {
   return withWorkspaceMutation({}, async ({ workspaceId, audit, tags }) => {
+    if (!deploymentCapabilities().configurableRawPayloadRetention) {
+      return {
+        error: "Transient mode and per-source raw retention are unavailable in the small self-host profile.",
+      };
+    }
     const sourceId = formValue(formData, "source_id");
     if (!sourceId) return { error: "Missing source_id." };
     const transientMode = formValue(formData, "transient_mode") === "on";

@@ -10,7 +10,8 @@
 
 export const DEFAULT_DELIVERY_CLAIM_LEASE_MS = 360_000;
 export const MAX_DELIVERY_CLAIM_LEASE_MS = 11 * 60 * 60 * 1_000;
-export const DELIVERY_CLAIM_RETENTION_DAYS = 14;
+/** Keep completed claims for the full raw-event R2 retention window. */
+export const DELIVERY_CLAIM_RETENTION_DAYS = 30;
 
 export type DeliveryClaimState = "in_flight" | "completed" | "failed";
 
@@ -30,8 +31,9 @@ export type DeliveryClaimDecision =
  * Parameters: key, workspace, event, route, destination, lease ms, token.
  *
  * The `attempt_id IS NULL` branch is a rolling-upgrade bridge for claims made
- * by releases that stored a 14-day retention deadline in `expires_at` and no
- * owner token. New tokenized claims use their persisted `expires_at` deadline.
+ * by older releases that stored a 14-day retention deadline in `expires_at`
+ * and no owner token. New tokenized claims use their persisted lease deadline,
+ * then keep terminal claims for 30 days.
  */
 export const DELIVERY_CLAIM_SQL = `WITH claimed AS (
   INSERT INTO delivery_idempotency
@@ -101,8 +103,9 @@ export function decideDeliveryClaim(
     // This is the second statement after an indeterminate first result when the
     // token matches. A different token always belongs to another live owner.
     if (row.claim_token === candidateToken) return { status: "started", token: candidateToken };
-    // Legacy untokenized rows carry a 14-day retention deadline rather than a
-    // lease deadline. Let the caller use its normal lease-sized retry delay.
+    // Older untokenized rows carry their original 14-day retention deadline
+    // rather than a lease deadline. Let the caller use its normal lease-sized
+    // retry delay. New terminal rows remain for 30 days.
     if (row.claim_token === null) return { status: "duplicate" };
     const expiresAt = row.claim_expires_at instanceof Date
       ? row.claim_expires_at.getTime()

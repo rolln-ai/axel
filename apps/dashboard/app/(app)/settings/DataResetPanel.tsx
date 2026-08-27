@@ -146,6 +146,7 @@ export function DataResetPanel({
         <form action={wipeAction} className="space-y-4 p-5">
           <p className="text-sm text-muted-foreground">
             Removes event analytics, delivery attempts, failed-delivery rows, replay requests, and idempotency rows for this workspace. Sources, routes, destinations, credentials, and members are preserved.
+            Data Contract fixtures and drift records are removed; value-free structural schemas stay as configuration.
           </p>
           <label className="flex items-start gap-2 text-sm text-foreground">
             <input

@@ -2,9 +2,14 @@
 
 ## Reporting
 
-Report security issues privately to `security@axelapp.ai` or directly to the
-maintainer if that mailbox is not yet active. Do not open public GitHub issues
-for vulnerabilities.
+Use the repository Security tab's **Report a vulnerability** action when it is
+available. Otherwise email `security@axelapp.ai`. Do not open public GitHub
+issues for vulnerabilities.
+
+Before making this repository public, maintainers must verify the security
+mailbox end to end and enable GitHub private vulnerability reporting so both
+paths are actionable. The repository remains private until that publication
+gate is complete.
 
 Include:
 
@@ -15,7 +20,9 @@ Include:
 
 ## Supported Branches
 
-`main` is the only supported branch until versioned releases are introduced.
+`main` is the only supported branch until the first public `v0.x` release is
+tagged. After that, the latest tagged `v0.x` release and `main` receive security
+fixes.
 
 ## Handling
 

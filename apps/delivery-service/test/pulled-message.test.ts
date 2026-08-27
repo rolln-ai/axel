@@ -1,121 +1,186 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { DestinationQueueMessage } from "@axel/shared";
 import {
+  parsePulledMessage,
+  parsePulledBatchResponse,
   parsePulledMessageBody,
   type PulledMessage,
+  validateDestinationQueueMessage,
 } from "../src/pulled-message.ts";
 
 const MESSAGE: DestinationQueueMessage = {
-  event_id: "evt_1",
-  workspace_id: "ws_1",
-  source_id: "src_1",
-  route_id: "route_1",
-  destination_id: "dest_1",
-  r2_key: "events/ws_1/evt_1.json",
+  queue_message_version: 1,
+  event_id: "evt_contract_1",
+  workspace_id: "ws_contract",
+  source_id: "src_contract",
+  route_id: "route_contract",
+  destination_id: "dest_contract",
+  r2_key: "events/ws_contract/evt_contract_1.json",
   received_at: "2026-08-26T12:00:00.000Z",
   enqueued_at: "2026-08-26T12:00:01.000Z",
   attempt_no: 1,
-  max_attempts: 5,
-  idempotency_key: "idem_1",
+  max_attempts: 12,
+  idempotency_key: "ws_contract:evt_contract_1:route_contract:dest_contract",
   content_type: "application/json",
   size_bytes: 17,
-  payload: { private: "value" },
+  payload: { canary: true },
   headers: { "content-type": "application/json" },
   query: {},
-  is_test: false,
+  is_test: true,
 };
 
-function encode(message: DestinationQueueMessage): string {
+function fixture(name: "plain" | "base64"): PulledMessage {
+  const path = new URL(`./fixtures/cloudflare-http-pull-${name}.json`, import.meta.url);
+  const parsed = JSON.parse(readFileSync(path, "utf8")) as {
+    result: { messages: PulledMessage[] };
+  };
+  return parsed.result.messages[0]!;
+}
+
+function encode(message: unknown): string {
   return Buffer.from(JSON.stringify(message), "utf8").toString("base64");
 }
 
-describe("parsePulledMessageBody", () => {
-  it("decodes the base64 JSON format returned by Cloudflare HTTP Pull", () => {
-    expect(
-      parsePulledMessageBody({
-        body: encode(MESSAGE),
-        metadata: { "CF-Content-Type": "json" },
-      }),
-    ).toEqual(MESSAGE);
+describe("parsePulledMessage", () => {
+  it("accepts the captured base64 Cloudflare HTTP Pull shape", () => {
+    expect(parsePulledMessageBody(fixture("base64"))).toEqual(MESSAGE);
   });
 
-  it("parses the plain JSON string observed in Cloudflare HTTP Pull responses", () => {
-    const productionResponse: PulledMessage = {
-      body: JSON.stringify(MESSAGE),
-      lease_id: "lease_1",
-      id: "message_1",
-      metadata: {
-        CF_QUEUE_NAME: "axel-delivery-native",
-        "CF-Content-Type": "json",
-      },
-    };
-
-    expect(parsePulledMessageBody(productionResponse)).toEqual(MESSAGE);
+  it("accepts the plain JSON string observed in production", () => {
+    expect(parsePulledMessageBody(fixture("plain"))).toEqual(MESSAGE);
   });
 
-  it("decodes a bytes message containing Axel JSON", () => {
+  it("normalizes an unversioned queued message during a rolling deploy", () => {
+    const { queue_message_version: _, ...legacy } = MESSAGE;
+    const parsed = parsePulledMessage({
+      body: JSON.stringify(legacy),
+      metadata: { "CF-Content-Type": "json" },
+    });
+
+    expect(parsed).toEqual({ ok: true, message: MESSAGE, wireVersion: 0 });
+  });
+
+  it("rejects an unknown future contract version", () => {
+    const parsed = parsePulledMessage({
+      body: JSON.stringify({ ...MESSAGE, queue_message_version: 2 }),
+      metadata: { "CF-Content-Type": "json" },
+    });
+
+    expect(parsed).toEqual({ ok: false, code: "unsupported_version" });
+  });
+
+  it("decodes bytes and legacy text only through the same validator", () => {
     expect(
       parsePulledMessageBody({
         body: encode(MESSAGE),
         metadata: { "CF-Content-Type": "bytes" },
       }),
     ).toEqual(MESSAGE);
-  });
-
-  it("parses text and legacy unlabelled JSON without base64 decoding", () => {
-    const body = JSON.stringify(MESSAGE);
-    expect(
-      parsePulledMessageBody({ body, metadata: { "CF-Content-Type": "text" } }),
-    ).toEqual(MESSAGE);
-    expect(parsePulledMessageBody({ body })).toEqual(MESSAGE);
-    expect(parsePulledMessageBody({ body: MESSAGE })).toEqual(MESSAGE);
-  });
-
-  it("rejects malformed and non-object JSON bodies", () => {
-    expect(
-      parsePulledMessageBody({
-        body: "not base64!",
-        metadata: { "CF-Content-Type": "json" },
-      }),
-    ).toBeNull();
-    expect(
-      parsePulledMessageBody({
-        body: Buffer.from('"not an object"').toString("base64"),
-        metadata: { "CF-Content-Type": "json" },
-      }),
-    ).toBeNull();
-    expect(
-      parsePulledMessageBody({
-        body: "{not json}",
-        metadata: { "CF-Content-Type": "json" },
-      }),
-    ).toBeNull();
-    expect(
-      parsePulledMessageBody({
-        body: JSON.stringify([MESSAGE]),
-        metadata: { "CF-Content-Type": "json" },
-      }),
-    ).toBeNull();
-    expect(
-      parsePulledMessageBody({
-        body: MESSAGE,
-        metadata: { "CF-Content-Type": "json" },
-      }),
-    ).toBeNull();
-  });
-
-  it("keeps bytes and v8 bodies fail-closed", () => {
     expect(
       parsePulledMessageBody({
         body: JSON.stringify(MESSAGE),
+        metadata: { "CF-Content-Type": "text" },
+      }),
+    ).toEqual(MESSAGE);
+    expect(parsePulledMessageBody({ body: MESSAGE })).toEqual(MESSAGE);
+  });
+
+  it("keeps malformed encodings and unsupported v8 messages fail-closed", () => {
+    expect(
+      parsePulledMessage({
+        body: "not base64!",
         metadata: { "CF-Content-Type": "bytes" },
       }),
-    ).toBeNull();
+    ).toEqual({ ok: false, code: "invalid_base64" });
     expect(
-      parsePulledMessageBody({
+      parsePulledMessage({
         body: "opaque",
         metadata: { "CF-Content-Type": "v8" },
       }),
-    ).toBeNull();
+    ).toEqual({ ok: false, code: "unsupported_content_type" });
+    expect(
+      parsePulledMessage({
+        body: Buffer.from('"not an object"').toString("base64"),
+        metadata: { "CF-Content-Type": "json" },
+      }),
+    ).toEqual({ ok: false, code: "body_not_object" });
+  });
+});
+
+describe("parsePulledBatchResponse", () => {
+  it("validates captured Cloudflare envelopes before their leases are used", () => {
+    const source = JSON.parse(
+      readFileSync(new URL("./fixtures/cloudflare-http-pull-plain.json", import.meta.url), "utf8"),
+    ) as unknown;
+    expect(parsePulledBatchResponse(source)).toEqual([fixture("plain")]);
+  });
+
+  it.each([
+    null,
+    { success: false, errors: [{ message: "credential must never reach logs" }] },
+    { errors: [{ message: "payload must never reach logs" }], result: { messages: [] } },
+    { result: { messages: "not-an-array" } },
+    { result: { messages: [{ id: "message", body: "{}" }] } },
+    { result: { messages: [{ id: "message", lease_id: "lease", attempts: 0, body: "{}" }] } },
+  ])("rejects an invalid pull response without exposing its body", (candidate) => {
+    expect(() => parsePulledBatchResponse(candidate)).toThrow("cloudflare_pull_response_contract_invalid");
+  });
+});
+
+describe("validateDestinationQueueMessage", () => {
+  const requiredFields: Array<keyof DestinationQueueMessage> = [
+    "event_id",
+    "workspace_id",
+    "source_id",
+    "route_id",
+    "destination_id",
+    "r2_key",
+    "received_at",
+    "enqueued_at",
+    "attempt_no",
+    "max_attempts",
+    "idempotency_key",
+    "content_type",
+    "size_bytes",
+    "payload",
+    "headers",
+    "query",
+    "is_test",
+  ];
+
+  it.each(requiredFields)("rejects a message missing %s", (field) => {
+    const candidate = { ...MESSAGE } as Record<string, unknown>;
+    delete candidate[field];
+    const parsed = validateDestinationQueueMessage(candidate);
+
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.field).toBe(field);
+  });
+
+  it.each([
+    ["attempt_no", 0],
+    ["attempt_no", 13],
+    ["max_attempts", 0],
+    ["size_bytes", -1],
+    ["headers", { authorization: 123 }],
+    ["query", []],
+    ["received_at", "not-a-date"],
+    ["binding", "not-an-object"],
+  ] as const)("rejects invalid %s without returning the value", (field, value) => {
+    const parsed = validateDestinationQueueMessage({ ...MESSAGE, [field]: value });
+
+    expect(parsed).toEqual({ ok: false, code: "invalid_field", field });
+    expect(Object.keys(parsed).sort()).toEqual(["code", "field", "ok"]);
+  });
+
+  it("strips unknown top-level fields before delivery", () => {
+    const parsed = validateDestinationQueueMessage({
+      ...MESSAGE,
+      unexpected_secret: "must-not-reach-a-connector",
+    });
+
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.message).not.toHaveProperty("unexpected_secret");
   });
 });

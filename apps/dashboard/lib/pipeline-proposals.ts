@@ -31,6 +31,7 @@ import {
   canActivate,
   generateRouteArtifacts,
   runFixtures,
+  withTransientStatusFields,
   type FixtureRunResult,
   type SyntheticFixture,
 } from "./data-contracts/codegen";
@@ -395,6 +396,13 @@ async function buildPipelineProposal(
     : "new_from_samples";
 
   const selectedEventTypes = selectEventTypesFromGoal(input.goal, inferred);
+  // Durable contracts no longer retain observed status values. Recompute that
+  // small value-bearing slice from the fresh in-memory sample so a goal such as
+  // "only invoice.paid" still produces an exact filter without storing the
+  // values in Postgres.
+  const codegenInferred = existingContract
+    ? withTransientStatusFields(inferred, samples)
+    : inferred;
   const mapping = await proposeMapping({
     workspaceId,
     destination,
@@ -402,7 +410,7 @@ async function buildPipelineProposal(
     samples,
     target: input.target,
   });
-  const { filter, transform } = generateRouteArtifacts(inferred, mapping, {
+  const { filter, transform } = generateRouteArtifacts(codegenInferred, mapping, {
     selected_event_type_names: selectedEventTypes,
   });
   const fixtures = buildFixturesFromSamples(samples, inferred, transform);

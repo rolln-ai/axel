@@ -20,9 +20,11 @@ import { db } from "../../../lib/db";
 import { getNotificationPreferences } from "../../../lib/notifications";
 import { listApiKeys } from "../../../lib/api-keys";
 import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { reconcileCompletedCheckout } from "../../../lib/billing/checkout";
 import { captureDashboardException } from "../../../lib/sentry-capture";
 import { appBaseUrl } from "../../../lib/app-url";
+import { deploymentCapabilities } from "../../../lib/deployment-capabilities";
 
 export const dynamic = "force-dynamic";
 
@@ -332,7 +334,11 @@ async function RetentionSection({
         </p>
       </div>
       <div className="space-y-4 p-5">
-        <RetentionSettingsPanel current={retentionRow} canEdit={canEdit} />
+        <RetentionSettingsPanel
+          current={retentionRow}
+          canEdit={canEdit}
+          rawPayloadControlAvailable={deploymentCapabilities().configurableRawPayloadRetention}
+        />
       </div>
     </section>
   );
@@ -385,6 +391,7 @@ async function DataSection({
   isLastWorkspace: boolean;
 }) {
   const destinations = await listFlushableDestinations(workspaceId);
+  const erasureAvailable = deploymentCapabilities().indexedSubjectErasure;
   return (
     <div className="space-y-8">
       <DataResetPanel
@@ -395,7 +402,17 @@ async function DataSection({
         destinations={destinations}
       />
       <div className="border-t border-border pt-6">
-        <ErasureRequestPanel role={role} />
+        {erasureAvailable ? (
+          <ErasureRequestPanel role={role} />
+        ) : (
+          <Alert>
+            <AlertDescription>
+              Indexed subject erasure is unavailable in the small self-host
+              profile. Add ClickHouse and the subject-to-event indexing path
+              before making this control available.
+            </AlertDescription>
+          </Alert>
+        )}
       </div>
     </div>
   );

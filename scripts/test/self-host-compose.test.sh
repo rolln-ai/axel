@@ -104,6 +104,9 @@ for (const service of ["dashboard", "delivery"]) {
   if (local.services[service].environment.CLOUDFLARE_API_TOKEN !== "runtime-token") {
     throw new Error(`${service} did not receive the narrower runtime Cloudflare token`);
   }
+  if (local.services[service].environment.AXEL_SELF_HOST_PROFILE !== "small") {
+    throw new Error(`${service} does not advertise the small-profile capability limits`);
+  }
 }
 for (const service of ["migrate", "dashboard", "delivery", "cron", "caddy"]) {
   const config = local.services[service];

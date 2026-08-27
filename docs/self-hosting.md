@@ -24,6 +24,11 @@ account, and waking from idle lower that number. An event arriving after a
 long idle period can wait up to 60 seconds for the next pull; finding work
 resets polling to one second.
 
+Workers Free Queue messages have a non-configurable 24-hour retention limit.
+If the Docker host or its delivery service stays offline for that long, pending
+delivery and dead-letter messages can expire. Use a paid Queue plan or another
+durable broker when the host cannot reliably recover inside 24 hours.
+
 The Docker services have no license fee. A $0 deployment therefore means you
 already have a machine and network connection. There is no credible option for
 an always-on, fully managed app, database, domain, and backups with a permanent
@@ -62,23 +67,31 @@ features matter; the production schema is in `infra/clickhouse`.
 The small profile's R2 lifecycle is a fixed 30-day ceiling. Shorter workspace
 or source retention settings, transient-mode early deletion, and the
 subject-to-event index used by data-subject erasure are not automated without
-the full analytics/indexing path. Do not enable those controls in the small
-profile and assume the raw bytes disappeared early. Add ClickHouse and the
-production retention path when those privacy guarantees are required.
+the full analytics/indexing path. The dashboard disables those controls when
+`AXEL_SELF_HOST_PROFILE=small`; the server actions reject direct submissions
+too. Postgres-only dead-letter, replay-request, and audit-log retention remain
+available. Add ClickHouse and the production retention path when shorter raw
+retention or indexed erasure is required.
 
 ## Requirements
 
 - Docker with the Compose plugin
 - Node 20 or newer and pnpm 9 for the pinned Cloudflare provisioning command
 - A Cloudflare account with a Workers subdomain enabled
-- A Cloudflare API token that can edit Workers scripts, Queues, and R2 storage
+- A provisioning-only Cloudflare API token that can edit Workers scripts,
+  Queues, and R2 storage
+- A separate, account-restricted runtime Cloudflare token that can pull,
+  acknowledge, and enqueue Queue messages and read, write, and delete R2
+  objects
 - A public HTTPS URL that reaches this host
 - A domain whose DNS points at the host if Caddy will obtain the certificate
 
-Use the narrowest Cloudflare token possible and restrict it to the account that
-will hold this installation. The delivery service needs the token at runtime to
-pull Queue messages and read R2 objects, so protect `.env.selfhost` and back it
-up as a secret.
+Use the narrowest Cloudflare tokens possible and restrict both to the account
+that will hold this installation. The delivery service needs the separate
+runtime token for Queue pull, acknowledge, enqueue, and consumer-edit operations
+plus R2 object read, write, and delete. Protect `.env.selfhost` and back it up as
+a secret. The broader provisioning token does not enter an application
+container.
 
 ## Install
 
@@ -98,27 +111,22 @@ up as a secret.
    resource-name suffix and an installation ID so two installs do not silently
    claim the same Cloudflare resources. It will not overwrite an existing file.
 
-2. At minimum, add the operator-supplied Cloudflare values in `.env.selfhost`:
+2. Add the operator-supplied Cloudflare values in `.env.selfhost`:
 
    ```dotenv
    CLOUDFLARE_ACCOUNT_ID=your-account-id
-   CLOUDFLARE_API_TOKEN=your-restricted-token
+   CLOUDFLARE_API_TOKEN=your-provisioning-token
+   CLOUDFLARE_RUNTIME_API_TOKEN=your-runtime-token
    ```
 
-   For the shortest setup, that one token also reaches the dashboard and
-   delivery containers. To keep Worker-deployment permission out of the
-   application runtime, create a second account-restricted token with only the
-   Queue and R2 object access those services need and set:
-
-   ```dotenv
-   CLOUDFLARE_RUNTIME_API_TOKEN=your-narrower-runtime-token
-   ```
-
-   Compose maps the narrower value to the services as
-   `CLOUDFLARE_API_TOKEN`; when it is blank, it falls back to the provisioning
-   token. The runtime token must be able to pull, acknowledge, and enqueue on
-   the installation's Queue and read, write, and delete objects in its R2
-   bucket. It does not need Workers Scripts edit permission.
+   The provisioning token deploys Workers and creates the installation's
+   Queue and R2 bucket. It never enters an application container. The separate
+   account-restricted runtime token must be able to pull, acknowledge, and
+   enqueue on that Queue and read, write, and delete objects in that R2 bucket.
+   It does not need Workers Scripts edit or resource-creation permission.
+   The helper rejects reuse of the provisioning token and verifies Queue edit
+   plus an isolated R2 write/read/delete round trip before starting the stack;
+   it never leases a customer message for this check.
 
    If the delivery service uses a different public origin, set
    `AXEL_DELIVERY_PUBLIC_URL` too. It must be reachable from Cloudflare and must
@@ -187,9 +195,13 @@ up as a secret.
    ```
 
 When signing the CLI into this installation, keep the PAT on your self-hosted
-origin by passing the dashboard URL explicitly:
+origin by passing the dashboard URL explicitly. The npm package is not
+published yet, so build and install the CLI from the same source checkout
+first:
 
 ```sh
+pnpm --filter @axel/cli build
+npm install -g ./packages/cli
 axel auth login --api-base 'https://axel.example.com'
 ```
 
@@ -228,8 +240,9 @@ connection explicitly uses `sslmode=disable` inside the host network.
   requires inspecting and explicitly adopting existing Cloudflare resources.
 - Rotate the Cloudflare token and internal shared secrets after suspected
   exposure.
-- Prefer `CLOUDFLARE_RUNTIME_API_TOKEN` so a dashboard or delivery compromise
-  does not also expose the Worker-deployment credential.
+- Keep the required `CLOUDFLARE_RUNTIME_API_TOKEN` limited to Queue and R2
+  runtime operations so a dashboard or delivery compromise does not also
+  expose the Worker-deployment credential.
 - Monitor Queue backlog and the `/health` endpoint.
 - Confirm the R2 lifecycle rule after manual bucket changes.
 - Add ClickHouse if searchable delivery history is required.

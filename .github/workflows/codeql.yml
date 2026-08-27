@@ -10,6 +10,10 @@ on:
 jobs:
   analyze:
     name: Analyze JavaScript and TypeScript
+    # Private repositories without GitHub Advanced Security cannot upload
+    # CodeQL results. Keep the workflow ready for the public transition while
+    # the always-on CI Security job runs audit + Gitleaks in private mode.
+    if: ${{ github.event.repository.private == false }}
     runs-on: ubuntu-latest
     permissions:
       security-events: write

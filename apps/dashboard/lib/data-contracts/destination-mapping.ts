@@ -16,6 +16,7 @@ export type DestinationMapping =
 
 export interface BaseMapping {
   destination_id: string;
+  /** Repository writes strip this transient proposal field before storage. */
   preview: PreviewRow[];
   rationale: string;
 }

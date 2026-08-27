@@ -13,6 +13,7 @@ AXEL_RESOURCE_PREFIX=axel-test
 AXEL_INSTALLATION_ID=0123456789abcdef0123456789abcdef
 CLOUDFLARE_ACCOUNT_ID=account
 CLOUDFLARE_API_TOKEN=token
+CLOUDFLARE_RUNTIME_API_TOKEN=runtime-token
 DELIVERY_SHARED_SECRET=delivery
 SOURCE_LOOKUP_SHARED_SECRET=lookup
 INGEST_ADMIN_TOKEN=admin
@@ -112,10 +113,20 @@ AXEL_RESOURCE_PREFIX=axel-secure-test
 AXEL_INSTALLATION_ID=0123456789abcdef0123456789abcdef
 CLOUDFLARE_ACCOUNT_ID=account
 CLOUDFLARE_API_TOKEN=token
+CLOUDFLARE_RUNTIME_API_TOKEN=runtime-token
 DELIVERY_SHARED_SECRET=dddddddddddddddddddddddddddddddd
 SOURCE_LOOKUP_SHARED_SECRET=ssssssssssssssssssssssssssssssss
 INGEST_ADMIN_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
+
+sed 's/^CLOUDFLARE_RUNTIME_API_TOKEN=runtime-token$/CLOUDFLARE_RUNTIME_API_TOKEN=token/' \
+  "$STRONG_ENV" > "$TEST_DIR/reused-token.env"
+if AXEL_SELF_HOST_ENV="$TEST_DIR/reused-token.env" \
+  "$ROOT_DIR/scripts/axel-self-host" edge >"$TEST_DIR/reused-stdout" 2>"$TEST_DIR/reused-stderr"; then
+  echo "expected reuse of the provisioning token at runtime to be rejected" >&2
+  exit 1
+fi
+grep -q "must differ from the provisioning token" "$TEST_DIR/reused-stderr"
 
 run_edge_failure() {
   local scenario="$1"

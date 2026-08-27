@@ -21,6 +21,10 @@ concurrency:
 jobs:
   sync:
     name: Linear PR sync
+    # pull_request_target can read repository secrets. Never let a fork PR
+    # cause writes to the private Linear workspace, even though this job checks
+    # out the protected default branch rather than the proposed branch.
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

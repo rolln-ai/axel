@@ -23,7 +23,8 @@ interface FixtureRow {
 }
 
 /**
- * Mask-in-place backfill for existing `data_contract_fixtures`. For each row we
+ * Legacy mask-in-place backfill for installations that have not applied
+ * migration 0069 yet. For each row we
  * reconstruct the version's (purely structural) transform from its stored
  * `destination_mapping`, redact the stored input, and recompute `expected_output`
  * from the redacted input — so the fixture pair stays consistent with what the

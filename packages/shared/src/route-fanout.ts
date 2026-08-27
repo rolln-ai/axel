@@ -164,6 +164,7 @@ export function evaluateRouteFanout(
     const binding = route.destination_bindings?.[destinationId] ?? null;
     return {
       message: {
+        queue_message_version: 1,
         event_id: message.event_id,
         workspace_id: message.workspace_id,
         source_id: message.source_id,

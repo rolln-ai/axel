@@ -417,6 +417,15 @@ export interface QueueMessage {
 }
 
 export interface DestinationQueueMessage {
+  /**
+   * Runtime-validated wire contract version.
+   *
+   * Version 1 is the first explicit version. The delivery-service accepts the
+   * otherwise-identical unversioned shape as legacy version 0 during rolling
+   * upgrades, then normalizes it to version 1 before any delivery code sees
+   * it. Producers must always stamp the current version.
+   */
+  queue_message_version: 1;
   event_id: string;
   workspace_id: string;
   source_id: string;

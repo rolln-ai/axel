@@ -9,11 +9,10 @@ import { isSensitivePath } from "./inference";
 /**
  * Redact PII from a Data Contract fixture payload before it is stored.
  *
- * `data_contract_fixtures` keep verbatim sampled payloads (`input_payload`) and
- * their transformed output (`expected_output`) as the contract's regression
- * test set. Fixtures are long-lived (they gate activation), so they can't be
- * age-purged — instead we mask PII at capture and recompute the expected output
- * from the masked input.
+ * The activation gate first builds fixtures in memory from sampled payloads.
+ * This pass masks recognizable PII before those fixtures leave codegen. The
+ * repository then replaces every remaining scalar with a type placeholder
+ * before storage, so arbitrary free text cannot become durable fixture data.
  *
  * Two layers:
  *   - path-based: a leaf whose field path is flagged sensitive (isSensitivePath —
@@ -26,7 +25,7 @@ import { isSensitivePath } from "./inference";
  * structural (pick-by-path / wrap / passthrough — never value-deriving), so
  * `runTransform(redact(input))` equals the redacted transform output. Storing
  * `input = redact(payload)` and `expected = runTransform(redact(payload))` keeps
- * the fixture pair valid while removing PII from both sides.
+ * the transient fixture pair valid for the activation check.
  */
 export function redactFixturePayload(value: unknown): unknown {
   return redactAt(value, "", false);

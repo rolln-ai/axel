@@ -174,6 +174,8 @@ export function buildErasurePlan(workspaceId: string, matches: ErasureMatch[]): 
   }
 
   const pg: ErasurePlanStatement[] = eventIds.length === 0 ? [] : [
+    { table: "data_contract_fixtures", statement: "DELETE FROM data_contract_fixtures WHERE workspace_id = $1 AND source_event_id = ANY($2)" },
+    { table: "data_contract_drift_events", statement: "DELETE FROM data_contract_drift_events WHERE workspace_id = $1 AND sample_event_id = ANY($2)" },
     { table: "dead_letters", statement: "DELETE FROM dead_letters WHERE workspace_id = $1 AND event_id = ANY($2)" },
     // replay_requests.event_id stores the ORIGINAL (non-suffixed) event id — the
     // `rpy_` token is the row id, never appended to event_id — so a plain event_id
@@ -208,7 +210,7 @@ export function buildErasurePlan(workspaceId: string, matches: ErasureMatch[]): 
       ],
     },
     outOfScope: [
-      { store: "postgres:event_map_fixtures / billing_events / notifications / dead_letter_mutes", reason: "no event_id linkage — out of automated scope" },
+      { store: "postgres:billing_events / notifications / dead_letter_mutes", reason: "no event_id linkage — out of automated scope" },
       { store: "clickhouse:events_daily", reason: "uniqExact aggregate — cannot surgically retract; expires at 30-day TTL" },
     ],
   };

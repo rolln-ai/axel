@@ -29,7 +29,7 @@ The most sensitive boundaries are the source lookup service, R2 read
 credentials, personal access tokens, destination egress, and any optional AI
 feature that receives event examples.
 
-## Findings fixed in this sweep
+## Findings and remediations in this sweep
 
 | Severity | Finding | Resolution |
 | --- | --- | --- |
@@ -44,6 +44,13 @@ feature that receives event examples.
 | Critical | The self-host provisioner silently reused a same-named R2 bucket without checking whether its r2.dev URL or a custom domain exposed objects publicly. Ingest would then write retained webhook bodies into that bucket. | New installs use a random resource suffix and installation ID. Provisioning requires matching local ownership proof for existing resources, verifies that r2.dev is disabled and no custom domain exists, and offers only a one-shot explicit adoption path after operator inspection. |
 | Critical | An older installation with an empty migration ledger could be labeled current without executing the PAT-membership migration. Fresh self-host databases also needed the schema snapshot available inside the migration container. | Legacy adoption now requires a schema-proven baseline, leaves newer migrations pending, and fails closed for unknown schemas. The Compose migration job mounts the runner, schema snapshot, and migration directory read-only; empty databases bootstrap from that snapshot. A real Postgres upgrade test proves the orphan cleanup and membership foreign key are applied. |
 | High | Stripe, GitHub, Shopify, or Chargebee sources could silently fall back to token-only authentication if the decrypted provider signing secret was missing at the edge. | Named providers now fail closed with a retryable service error before any R2 or Queue write. Custom sources retain their documented token-only mode. |
+| High | A captured valid provider request could be submitted repeatedly. GitHub, Shopify, and Chargebee do not all provide a signed timestamp, and each retry previously received a new Axel event ID. | Signed requests now derive a source-bound deterministic event ID and stable raw-object key from the provider delivery or event identity. The raw body uses an atomic create condition, so concurrent copies cannot overwrite or create another retained payload. Retries remain safe to enqueue after a partial failure because the 30-day delivery claim sees the same event ID and suppresses duplicate external effects. Regression tests cover sequential duplicates, concurrent copies, and queue-failure recovery. |
+| Critical | Oversized delivery messages trusted an embedded R2 spill key. A malformed or cross-tenant message could point a privileged consumer at another workspace's object, and retry cleanup could delete that object. | Hydration and deletion now require the exact canonical key derived from workspace, event, destination, and attempt before any R2 access. Parsed spill bodies are shape-validated, and retries write a new canonical attempt key before removing the prior object. |
+| High | Delivery-edge performed R2 and Postgres work before validating the queue contract, and a failed terminal dead-letter insert could still acknowledge the last durable message and delete its spill. | Both delivery runtimes now accept only the versioned contract plus the explicit legacy-v0 rolling-upgrade shape. Malformed or future versions fail before storage access, and failed dead-letter persistence retries without ACKing or deleting spill data. Metadata-only quarantine records hashes and sizes, never queue bodies. |
+| High privacy | Durable Data Contract rows retained inferred values, example identifiers, fixture payloads, mapping previews, and drift detail beyond the raw-payload lifecycle. | Migration 0069 scrubs existing rows. Database triggers and application sanitizers now retain structural schema and generalized type/shape fixtures only, clear event references and drift detail, bind mappings to the same workspace, and allowlist model metadata. Reset and erasure paths cover the remaining records. |
+| High | Platform super-admin access relied on password sessions alone, and an initial pending TOTP enrollment could be viewed or completed from another authenticated session for the same administrator. | Super-admin routes now require encrypted TOTP enrollment and a fresh 15-minute step-up. Pending seeds are bound to the password-confirmed session for ten minutes, successful counters cannot replay, verification is rate-limited and audited, and seeds are AES-GCM encrypted under the credential master key. |
+| Critical | Vercel's default Preview environment included production database, storage, signing, and observability credentials while Git-triggered builds were available. A malicious branch build could execute install or build code with production access. | Production credentials are now Production-only. Stripe test records moved to an isolated manual environment. Live deployment policies deny every Git source for Production, Preview, and the isolated environment; provider Git status deployments are disabled, fork CI receives no secrets, and production is built only by the reviewed CLI workflow. Automation-bypass credentials exposed during the audit were rotated immediately. |
+| High | Provider-side Git deploys could race database migrations or bypass the reviewed Production environment, and the native HTTP-pull queue had only three retries with no dead-letter queue. | Vercel Git deployment policies are disabled and verified live. The first protected Render rollout disables and reads back Git auto-deploy before any service deploy; the initial merge must include Render's `[skip render]` guard so it cannot race that enforcement. Manual workflows serialize migration-first releases, stage and smoke Vercel deployments before promotion, and fail closed on provider-state drift. The native queue has been configured and verified in place for eleven retries and `axel-dead-letter`. |
 | High | A configured custom-HMAC source could become token-only after a signing-secret decrypt failure, and a partial rotation could publish only one valid secret. | Edge payload creation and direct Postgres mapping now reject corrupt or empty current and previous secret slots. A cache schema bump discards older positive entries that may contain the downgraded shape. Only an intentionally unsigned custom source remains token-only. |
 | High | HTTP and webhook destination validation covered only the first URL. Redirects and the gap between DNS validation and socket connection could reach private, link-local, loopback, or cloud metadata addresses with webhook bytes. | Redirects are manual and validated on every hop. Node checks the connected socket address before sending HTTP data. Generated and production Workers enable Cloudflare's strict-public global fetch behavior. IPv4-mapped IPv6, non-global and transition IPv6 space, special-use IPv4, and absolute `localhost.` names are blocked. |
 | High | Postgres, MongoDB, S3-compatible, and Databricks clients could resolve a validated hostname again when opening their data socket. Mongo SRV targets and Postgres `host` query overrides expanded that gap. | Native clients now use a safe DNS hook that rejects any non-public answer and gives the checked IP directly to the socket. Postgres local-socket and query-host overrides are blocked. Databricks uses the same connected-socket guard as HTTP delivery. |
@@ -85,7 +92,10 @@ feature that receives event examples.
 Regression tests cover removed-member tokens, role-derived PAT permissions,
 foreign-workspace patch-approval selectors, replay enqueue validation, database
 replay-key binding, and consumer-side rejection before any R2 or hint lookup,
-provider-secret failure, Chargebee verification, retained metadata, redirect
+provider-secret failure, provider replay suppression, canonical spill ownership,
+queue-contract rejection before storage access, durable dead-letter failure,
+Data Contract persistence scrubbing, administrator MFA enrollment ownership,
+Chargebee verification, retained metadata, redirect
 SSRF, IPv6 edge cases, connected-socket blocking, unsigned webhook failure,
 Cloudflare HTTP Pull decoding, literal-slash R2 object paths, database TLS
 selection, required cache invalidation, workspace/source lock ordering,
@@ -102,18 +112,6 @@ adoption, and self-host URL fail-closed behavior.
 ## Residual risks
 
 These items remain open and should be treated as the next hardening backlog.
-
-### High: inbound provider replay protection
-
-Provider signatures prove authenticity, but the ingest path does not yet keep
-an atomic replay ledger. Stripe timestamps limit the replay window; GitHub,
-Shopify, and Chargebee retries have no equivalent freshness check here. A valid
-captured request can therefore become multiple Axel events.
-
-Add an atomic, expiring `(source_id, provider_delivery_id)` record before the R2
-write. Use provider event or delivery IDs, return a successful duplicate
-response without enqueueing twice, and test concurrent duplicates plus partial
-failures.
 
 ### High: edge revocation is bounded, not instantaneous
 
@@ -163,11 +161,12 @@ writes or transaction keys when available.
 
 ### Medium: broad infrastructure credentials
 
-Dashboard and delivery-service use a Cloudflare account token that can read raw
-objects, source configuration contains decrypted signing material at the edge,
-and internal edge APIs use deployment-wide shared secrets. A runtime credential
-compromise therefore has a wider tenant blast radius than the application
-authorization model.
+Dashboard and delivery-service use a Cloudflare account token that can read,
+overwrite, and delete raw objects and mutate Queue consumers. Source
+configuration contains decrypted signing material at the edge, and internal
+edge APIs use deployment-wide shared secrets. A runtime credential compromise
+therefore has a wider tenant blast radius than the application authorization
+model.
 
 The self-host profile supports a separate `CLOUDFLARE_RUNTIME_API_TOKEN`, so the
 dashboard and delivery service do not need the Worker Scripts edit permission
@@ -178,6 +177,18 @@ Prefer narrowly scoped R2 credentials or an authenticated workspace-scoped raw
 payload service, encrypt cached source secrets with a separate runtime key, and
 replace global admin credentials with service bindings or independently scoped
 credentials where the platform permits it.
+
+### Medium: Cloudflare secret rotation is sequential
+
+Wrangler applies Worker secrets one at a time, and each update creates a live
+Worker version. The protected workflow serializes these changes with releases
+and runs the production smoke and delivery canary at the end, but a multi-key
+rotation can briefly expose an intermediate combination of old and new values.
+
+Rotate coupled credentials with an explicit overlap window and previous-key
+support, change one service boundary at a time, and watch the canary throughout.
+Prefer an atomic provider secret-set operation if Cloudflare exposes one that
+preserves Wrangler's encrypted-secret behavior.
 
 ### Medium: query-string source tokens
 
@@ -210,13 +221,19 @@ router or queue-exhaustion failures.
 Add a dead-letter poller and a Postgres-backed minimal event index before using
 the small profile for workloads that require complete audit history.
 
+Workers Free also caps Queue message retention at 24 hours. An offline Docker
+host can therefore lose pending delivery or dead-letter messages after one day,
+even though raw payload objects remain in R2. Use a paid Queue plan or another
+durable broker when a 24-hour recovery window is not acceptable.
+
 ### Medium: small-profile privacy controls need the full index
 
 The small Docker profile has a fixed 30-day R2 lifecycle but no ClickHouse
 event-key index. Shorter workspace or source retention, transient-mode early
 deletion, and the subject-to-event index used for data-subject erasure are not
-automated in this profile. Its UI can still expose those settings, so an
-operator could otherwise mistake configuration for completed deletion.
+automated in this profile. The small-profile UI disables those settings and
+the server rejects direct submissions, so operators cannot accidentally
+configure a guarantee that the profile does not implement.
 
 Add a Postgres-backed event-key and subject index, or enable the full
 ClickHouse retention path, before promising sub-30-day raw retention or indexed

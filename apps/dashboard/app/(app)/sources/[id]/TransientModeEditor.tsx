@@ -23,12 +23,14 @@ export function TransientModeEditor({
   initialRetentionOverride,
   workspaceDefaultDays,
   canMutate,
+  capabilityAvailable,
 }: {
   sourceId: string;
   initialTransientMode: boolean;
   initialRetentionOverride: number | null;
   workspaceDefaultDays: number;
   canMutate: boolean;
+  capabilityAvailable: boolean;
 }) {
   const [state, action, pending] = useActionState<ActionState, FormData>(
     updateSourceTransientModeAction,
@@ -46,7 +48,7 @@ export function TransientModeEditor({
           className="mt-0.5 size-4"
           checked={transient}
           onChange={(e) => setTransient(e.target.checked)}
-          disabled={!canMutate}
+          disabled={!canMutate || !capabilityAvailable}
         />
         <div className="space-y-1">
           <span className="text-sm font-medium text-foreground">Transient mode</span>
@@ -67,20 +69,29 @@ export function TransientModeEditor({
           max={RETENTION_BOUNDS.raw_payload_retention_days.max}
           defaultValue={initialRetentionOverride ?? ""}
           placeholder={`inherit workspace default (${workspaceDefaultDays}d)`}
-          disabled={!canMutate || transient}
+          disabled={!canMutate || !capabilityAvailable || transient}
         />
         <p className="text-[11px] text-muted-foreground">
           Override the workspace default for this source only. Ignored when transient mode
           is on (transient = 0d).
         </p>
       </div>
+      {!capabilityAvailable ? (
+        <Alert>
+          <AlertDescription>
+            The small self-host profile uses a fixed 30-day R2 lifecycle.
+            Transient mode and shorter per-source raw retention require the
+            full retention indexing path.
+          </AlertDescription>
+        </Alert>
+      ) : null}
       {state.error ? (
         <Alert variant="destructive"><AlertDescription>{state.error}</AlertDescription></Alert>
       ) : null}
       {state.notice ? (
         <Alert><AlertDescription>{state.notice}</AlertDescription></Alert>
       ) : null}
-      {canMutate ? (
+      {canMutate && capabilityAvailable ? (
         <div className="flex justify-end">
           <Button type="submit" size="sm" variant="outline" disabled={pending}>
             {pending ? "Saving…" : "Save retention"}

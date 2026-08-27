@@ -40,6 +40,41 @@ fi
 MIGRATIONS_DIR="$(cd "$(dirname "$0")/../infra/postgres/migrations" && pwd)"
 SCHEMA_PATH="$(cd "$(dirname "$0")/../infra/postgres" && pwd)/schema.sql"
 
+# Reject ambiguous ordering before touching the database. Migration 0025 has a
+# known historical collision that was already applied before the ledger
+# existed. It remains immutable; every new number must be unique.
+for fpath in "$MIGRATIONS_DIR"/*.sql; do
+  fname="$(basename "$fpath")"
+  if [[ ! "$fname" =~ ^[0-9]{4}_[a-z0-9_]+\.sql$ ]]; then
+    echo "[run-migrations] invalid migration filename: $fname" >&2
+    exit 1
+  fi
+done
+duplicate_numbers="$(
+  find "$MIGRATIONS_DIR" -maxdepth 1 -type f -name '*.sql' -exec basename {} \; \
+    | cut -c1-4 | sort | uniq -d
+)"
+for number in $duplicate_numbers; do
+  if [ "$number" = "0025" ]; then
+    actual_0025="$(find "$MIGRATIONS_DIR" -maxdepth 1 -type f -name '0025_*.sql' -exec basename {} \; | sort)"
+    expected_0025="$(printf '%s\n' 0025_destinations_strip_route_bound_config.sql 0025_edkg_foundation.sql | sort)"
+    if [ "$actual_0025" = "$expected_0025" ]; then
+      continue
+    fi
+  fi
+  echo "[run-migrations] duplicate migration number: $number" >&2
+  exit 1
+done
+
+migration_sha256() {
+  local path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+  else
+    shasum -a 256 "$path" | awk '{print $1}'
+  fi
+}
+
 # Step 1 — ensure the tracker table exists AND legacy-backfill is in
 # place before the loop attempts any apply. We can't rely on the
 # 0033_schema_migrations.sql migration file to do this on its own: it
@@ -144,19 +179,26 @@ for fpath in $(find "$MIGRATIONS_DIR" -maxdepth 1 -type f -name '*.sql' | sort);
   esac
 
   already_applied="$(psql "$DATABASE_URL" -At -c "
-    SELECT 1 FROM schema_migrations WHERE filename = '$fname' LIMIT 1
+    SELECT sha256 FROM schema_migrations WHERE filename = '$fname' LIMIT 1
   ")"
 
-  if [ "$already_applied" = "1" ]; then
+  if [ -n "$already_applied" ]; then
+    # Baseline markers represent schemas adopted before content hashes were
+    # recorded. Every migration applied by this runner has a real hash and is
+    # immutable after release.
+    if [ "$already_applied" != "legacy" ] && [ "$already_applied" != "schema-bootstrap" ]; then
+      file_sha="$(migration_sha256 "$fpath")"
+      if [ "$already_applied" != "$file_sha" ]; then
+        echo "[run-migrations] checksum mismatch for applied migration $fname" >&2
+        echo "[run-migrations] restore the released file; never edit an applied migration" >&2
+        exit 1
+      fi
+    fi
     skipped_count=$((skipped_count + 1))
     continue
   fi
 
-  if command -v sha256sum >/dev/null 2>&1; then
-    file_sha="$(sha256sum "$fpath" | awk '{print $1}')"
-  else
-    file_sha="$(shasum -a 256 "$fpath" | awk '{print $1}')"
-  fi
+  file_sha="$(migration_sha256 "$fpath")"
 
   echo "[run-migrations] applying $fname (sha256 ${file_sha:0:12}…)"
 

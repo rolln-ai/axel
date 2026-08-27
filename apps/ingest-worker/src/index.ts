@@ -333,16 +333,16 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         `signing secret missing for provider source ${source.source_id} (${provider}) — refusing to skip verification`,
       );
     }
-    if (hasSigningSecret) {
+    const verificationHeaders = hasSigningSecret ? collectVerificationHeaders(request) : null;
+    if (hasSigningSecret && verificationHeaders) {
       // Verification needs the exact inbound auth headers. Chargebee signs via
       // HTTP Basic auth, so using the sanitized persistence map here would
       // strip `authorization` and reject every valid Chargebee webhook.
-      const headerMap = collectVerificationHeaders(request);
       // Verify against the current secret first, then the previous one during a
       // rotation overlap window — a webhook signed with the old secret while the
       // customer rotates still passes until the previous secret is retired.
       const result = await verifyProviderSignatureWithSecrets(
-        { provider, body: new Uint8Array(body), headers: headerMap },
+        { provider, body: new Uint8Array(body), headers: verificationHeaders },
         [source.signing_secret, source.signing_secret_previous],
       );
       if (!result.ok) {
@@ -353,9 +353,25 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       }
     }
 
-    const eventId = uuidv7();
-    const receivedAt = new Date().toISOString();
-    const r2Key = `events/${source.workspace_id}/${receivedAt.slice(0, 10)}/${eventId}`;
+    // Signed providers publish a stable delivery/event identity. Bind it to the
+    // Axel source, hash it, and use the digest for both event_id and the raw R2
+    // key. Provider retries therefore remain one logical Axel event even across
+    // Worker isolates. A retry is still safe to enqueue after a partial failure:
+    // the 30-day delivery-idempotency claim sees the same event id and suppresses
+    // duplicate external effects.
+    const providerEventId = verificationHeaders
+      ? await deterministicProviderEventId(
+          source.source_id,
+          provider,
+          new Uint8Array(body),
+          verificationHeaders,
+        )
+      : null;
+    const eventId = providerEventId ?? uuidv7();
+    let receivedAt = new Date().toISOString();
+    const r2Key = providerEventId
+      ? `events/${source.workspace_id}/provider/${eventId}`
+      : `events/${source.workspace_id}/${receivedAt.slice(0, 10)}/${eventId}`;
 
     const headers = collectHeaders(request);
     const query = collectQuery(url);
@@ -385,7 +401,8 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         ? redactJsonPayload(new Uint8Array(body), source.redact_paths)
         : body;
 
-    await env.EVENTS_RAW.put(r2Key, storedBody, {
+    const stored = await env.EVENTS_RAW.put(r2Key, storedBody, {
+      ...(providerEventId ? { onlyIf: { etagDoesNotMatch: "*" } } : {}),
       httpMetadata: {
         contentType,
       },
@@ -396,6 +413,18 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         received_at: receivedAt,
       },
     });
+    if (providerEventId && stored === null) {
+      // A prior copy won the conditional create. Reuse its original receipt
+      // time so analytics and responses remain stable. Always enqueue below:
+      // the first Worker may have stopped after R2 but before Queue, and the
+      // deterministic downstream idempotency key makes that recovery safe.
+      const prior = await env.EVENTS_RAW.head(r2Key);
+      const priorReceivedAt = prior?.customMetadata?.received_at;
+      if (!isIsoTimestamp(priorReceivedAt)) {
+        throw new Error("provider_replay_object_missing_metadata");
+      }
+      receivedAt = priorReceivedAt;
+    }
 
     // Co-locate same-key events on one shard for ordered sources; unordered
     // events still scatter by random event_id exactly as before.
@@ -638,10 +667,94 @@ function safeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
+async function deterministicProviderEventId(
+  sourceId: string,
+  provider: NonNullable<Source["provider"]>,
+  body: Uint8Array,
+  headers: Record<string, string>,
+): Promise<string | null> {
+  const identity = await providerReplayIdentity(provider, body, headers);
+  if (!identity) return null;
+  const fingerprint = await sha256Hex(`${sourceId}\0${provider}\0${identity}`);
+  return uuidV8FromSha256(fingerprint);
+}
+
+async function providerReplayIdentity(
+  provider: NonNullable<Source["provider"]>,
+  body: Uint8Array,
+  headers: Record<string, string>,
+): Promise<string | null> {
+  switch (provider) {
+    case "github":
+      return boundedHeader(headers, "x-github-delivery")
+        ?? boundedHeader(headers, "x-hub-signature-256");
+    case "shopify":
+      return boundedHeader(headers, "x-shopify-webhook-id")
+        ?? boundedHeader(headers, "x-shopify-hmac-sha256");
+    case "chargebee": {
+      const eventId = topLevelJsonId(body);
+      return eventId ? `event:${eventId}` : `body:${await sha256BytesHex(body)}`;
+    }
+    case "stripe": {
+      const eventId = topLevelJsonId(body);
+      return eventId ? `event:${eventId}` : boundedHeader(headers, "stripe-signature");
+    }
+    case "custom":
+      return boundedHeader(headers, "x-axel-signature");
+    default:
+      return null;
+  }
+}
+
+function boundedHeader(headers: Record<string, string>, name: string): string | null {
+  const value = headers[name]?.trim();
+  return value && value.length <= 2_048 ? `header:${value}` : null;
+}
+
+function topLevelJsonId(body: Uint8Array): string | null {
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(body)) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const value = (parsed as Record<string, unknown>).id;
+    if (typeof value === "string" && value.length > 0 && value.length <= 512) return value;
+    if (typeof value === "number" && Number.isSafeInteger(value)) return String(value);
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function sha256BytesHex(input: Uint8Array): Promise<string> {
+  // Copy into an owned ArrayBuffer. Root TypeScript builds include DOM's
+  // stricter BufferSource generic, which rejects a view backed by
+  // SharedArrayBuffer even though the Workers runtime accepts Uint8Array.
+  const owned = new Uint8Array(input.byteLength);
+  owned.set(input);
+  const buf = await crypto.subtle.digest("SHA-256", owned.buffer);
+  return bytesToHex(new Uint8Array(buf));
+}
+
+function uuidV8FromSha256(hexDigest: string): string {
+  const chars = hexDigest.slice(0, 32).split("");
+  chars[12] = "8";
+  chars[16] = ((Number.parseInt(chars[16]!, 16) & 0x3) | 0x8).toString(16);
+  const hex = chars.join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function isIsoTimestamp(value: unknown): value is string {
+  return typeof value === "string"
+    && /^\d{4}-\d{2}-\d{2}T/.test(value)
+    && Number.isFinite(Date.parse(value));
+}
+
 async function sha256Hex(input: string): Promise<string> {
   const data = new TextEncoder().encode(input);
   const buf = await crypto.subtle.digest("SHA-256", data);
-  const bytes = new Uint8Array(buf);
+  return bytesToHex(new Uint8Array(buf));
+}
+
+function bytesToHex(bytes: Uint8Array): string {
   let out = "";
   for (let i = 0; i < bytes.length; i++) out += bytes[i]!.toString(16).padStart(2, "0");
   return out;

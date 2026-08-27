@@ -5,6 +5,7 @@ import { requireSession } from "./session";
 import { processErasureRequest, type ProcessErasureResult } from "./erasure-lifecycle";
 import type { SubjectIdentifier } from "./erasure-subject-id";
 import type { ActionState } from "./action-data";
+import { deploymentCapabilities } from "./deployment-capabilities";
 
 /** Parse repeated (kind,value) form pairs into subject identifiers. */
 function readIdentifiers(formData: FormData): SubjectIdentifier[] {
@@ -45,6 +46,9 @@ function summarize(res: ProcessErasureResult): ActionState {
  */
 export async function runErasureAction(_state: ActionState, formData: FormData): Promise<ActionState> {
   const auth = await requireSuperAdmin();
+  if (!deploymentCapabilities().indexedSubjectErasure) {
+    return { error: "Indexed subject erasure is unavailable in the small self-host profile." };
+  }
   const workspaceId = String(formData.get("workspace_id") ?? "").trim();
   if (!workspaceId) return { error: "Missing workspace id." };
   const identifiers = readIdentifiers(formData);
@@ -67,6 +71,9 @@ export async function runWorkspaceErasureAction(_state: ActionState, formData: F
   if (!session.activeWorkspace?.workspace_id) return { error: "No active workspace." };
   if (session.activeWorkspace.role !== "owner") {
     return { error: "Only the workspace owner can run an erasure request." };
+  }
+  if (!deploymentCapabilities().indexedSubjectErasure) {
+    return { error: "Indexed subject erasure is unavailable in the small self-host profile." };
   }
   const workspaceId = session.activeWorkspace.workspace_id;
   const identifiers = readIdentifiers(formData);
