@@ -55,11 +55,13 @@ class FakeAdminClient {
     existing = false,
     collision = null,
     ownsObjects = false,
+    forbiddenRoleAttributes = false,
     rolePrivilegeOverrides = {},
   } = {}) {
     this.existing = existing;
     this.collision = collision;
     this.ownsObjects = ownsObjects;
+    this.forbiddenRoleAttributes = forbiddenRoleAttributes;
     this.rolePrivilegeOverrides = rolePrivilegeOverrides;
     this.calls = [];
   }
@@ -150,6 +152,9 @@ class FakeAdminClient {
     if (sql.includes("canary:role-ownership-preflight")) {
       return { rows: [{ owns_nothing: !this.ownsObjects }] };
     }
+    if (sql.includes("canary:role-attributes-preflight")) {
+      return { rows: [{ security_attributes_ok: !this.forbiddenRoleAttributes }] };
+    }
     if (sql.includes("octet_length(") && sql.includes("set_config")) {
       return { rows: [{ configured: true }] };
     }
@@ -175,7 +180,7 @@ class FakeAdminClient {
           {
             ...allTrue([
               "attributes_ok",
-              "no_memberships",
+              "memberships_safe",
               "only_current_direct_database_connect",
               "can_connect",
               "can_use_public",
@@ -334,6 +339,20 @@ test("admin reconciliation is idempotent, parameterizes secrets, and grants only
     assert.match(sql, /GRANT INSERT \(payload\)/);
     assert.match(sql, /NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT/);
     assert.match(sql, /NOREPLICATION NOBYPASSRLS/);
+    assert.match(sql, /canary:role-attributes-preflight/);
+    assert.match(sql, /rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication/);
+    assert.match(sql, /AND m\.grantor = current_user::regrole/);
+    assert.match(sql, /AND NOT m\.inherit_option/);
+    assert.match(sql, /AND NOT m\.set_option/);
+    assert.match(sql, /AND grantor\.rolsuper/);
+    const roleAlter = client.calls.find((call) =>
+      /ALTER ROLE axel_delivery_canary_writer\s+LOGIN/.test(call.sql)
+    );
+    assert(roleAlter);
+    assert.doesNotMatch(
+      roleAlter.sql,
+      /NOSUPERUSER|NOCREATEDB|NOREPLICATION|NOBYPASSRLS/,
+    );
     assert.match(sql, /REVOKE ALL PRIVILEGES ON ALL TABLES/);
     assert.match(sql, /aclexplode/);
     assert.match(
@@ -373,10 +392,19 @@ test("identity collision and unexpected role ownership fail before mutation", as
   );
   assert.equal(owner.calls.some((call) => /CREATE ROLE/.test(call.sql)), false);
   assert.equal(owner.calls.at(-1).sql, "ROLLBACK");
+
+  const privilegedRole = new FakeAdminClient({ forbiddenRoleAttributes: true });
+  await assert.rejects(
+    reconcileCanaryAdminState(privilegedRole, config(), credential()),
+    /canary_role_has_forbidden_security_attributes/,
+  );
+  assert.equal(privilegedRole.calls.some((call) => /CREATE ROLE/.test(call.sql)), false);
+  assert.equal(privilegedRole.calls.at(-1).sql, "ROLLBACK");
 });
 
 test("admin reconciliation rejects cross-database grants and executable definer routines", async () => {
   for (const rolePrivilegeOverrides of [
+    { memberships_safe: false },
     { only_current_direct_database_connect: false },
     { no_security_definer_execute: false },
   ]) {

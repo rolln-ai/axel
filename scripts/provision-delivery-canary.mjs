@@ -398,8 +398,35 @@ async function assertRoleOwnsNoObjects(client) {
   assertBooleanRow(result.rows[0], ["owns_nothing"], "canary_role_owns_database_objects");
 }
 
+async function assertRoleHasSafeSecurityAttributes(client) {
+  const result = await client.query(
+    `/* canary:role-attributes-preflight */
+     SELECT NOT COALESCE(
+       bool_or(
+         rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls
+       ),
+       false
+     ) AS security_attributes_ok
+       FROM pg_roles
+      WHERE rolname = $1`,
+    [CANARY_RESOURCES.roleName],
+  );
+  assertBooleanRow(
+    result.rows[0],
+    ["security_attributes_ok"],
+    "canary_role_has_forbidden_security_attributes",
+  );
+}
+
 async function reconcileRole(client, writerPassword, passwordState) {
   await assertRoleOwnsNoObjects(client);
+  // Managed Postgres operators commonly have CREATEROLE without superuser.
+  // PostgreSQL allows secure attributes on CREATE ROLE, but even a no-op
+  // ALTER ... NOSUPERUSER/NOREPLICATION/NOBYPASSRLS requires superuser, and
+  // ALTER ... NOCREATEDB requires CREATEDB. Fail closed above if an existing
+  // role has any protected attribute, then avoid asking the provider for
+  // privileges the operator should not have.
+  await assertRoleHasSafeSecurityAttributes(client);
   await client.query(
     `DO $canary_role$
      BEGIN
@@ -418,10 +445,11 @@ async function reconcileRole(client, writerPassword, passwordState) {
      BEGIN
        FOR membership IN
          SELECT parent.rolname AS parent_name
-           FROM pg_auth_members m
-           JOIN pg_roles parent ON parent.oid = m.roleid
-           JOIN pg_roles child ON child.oid = m.member
+          FROM pg_auth_members m
+          JOIN pg_roles parent ON parent.oid = m.roleid
+          JOIN pg_roles child ON child.oid = m.member
           WHERE child.rolname = 'axel_delivery_canary_writer'
+            AND m.grantor = current_user::regrole
        LOOP
          EXECUTE format(
            'REVOKE %I FROM axel_delivery_canary_writer',
@@ -431,10 +459,11 @@ async function reconcileRole(client, writerPassword, passwordState) {
 
        FOR membership IN
          SELECT child.rolname AS child_name
-           FROM pg_auth_members m
-           JOIN pg_roles parent ON parent.oid = m.roleid
-           JOIN pg_roles child ON child.oid = m.member
+          FROM pg_auth_members m
+          JOIN pg_roles parent ON parent.oid = m.roleid
+          JOIN pg_roles child ON child.oid = m.member
           WHERE parent.rolname = 'axel_delivery_canary_writer'
+            AND m.grantor = current_user::regrole
        LOOP
          EXECUTE format(
            'REVOKE axel_delivery_canary_writer FROM %I',
@@ -447,8 +476,8 @@ async function reconcileRole(client, writerPassword, passwordState) {
 
   await client.query(
     `ALTER ROLE axel_delivery_canary_writer
-       LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT
-       NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 4 VALID UNTIL 'infinity'`,
+       LOGIN NOCREATEROLE NOINHERIT
+       CONNECTION LIMIT 4 VALID UNTIL 'infinity'`,
   );
   await client.query("ALTER ROLE axel_delivery_canary_writer RESET ALL");
   await client.query(
@@ -855,12 +884,26 @@ async function assertRolePrivileges(client) {
             AND rolconnlimit = 4
        ) AS attributes_ok,
        NOT EXISTS (
+         -- PostgreSQL 16 records an ADMIN-only membership for the non-superuser
+         -- creator. The edge itself does not confer SET/INHERIT access and may
+         -- be granted by the provider superuser, so the operator cannot revoke
+         -- it. The operator remains in the trusted database-admin boundary and
+         -- can administer the role. No other membership edge is accepted.
          SELECT 1
            FROM pg_auth_members m
            JOIN pg_roles parent ON parent.oid = m.roleid
            JOIN pg_roles child ON child.oid = m.member
-          WHERE parent.rolname = $1 OR child.rolname = $1
-       ) AS no_memberships,
+           JOIN pg_roles grantor ON grantor.oid = m.grantor
+          WHERE (parent.rolname = $1 OR child.rolname = $1)
+            AND NOT (
+              parent.rolname = $1
+              AND child.oid = current_user::regrole
+              AND m.admin_option
+              AND NOT m.inherit_option
+              AND NOT m.set_option
+              AND grantor.rolsuper
+            )
+       ) AS memberships_safe,
        NOT EXISTS (
          SELECT 1
            FROM pg_database d
@@ -939,7 +982,7 @@ async function assertRolePrivileges(client) {
     result.rows[0],
     [
       "attributes_ok",
-      "no_memberships",
+      "memberships_safe",
       "only_current_direct_database_connect",
       "can_connect",
       "can_use_public",

@@ -105,8 +105,16 @@ destination using the canonical AAD helper. Plaintext is never written to a
 control-plane column.
 
 The role is reconciled to `LOGIN`, `NOINHERIT`, `NOSUPERUSER`, `NOCREATEDB`,
-`NOCREATEROLE`, `NOREPLICATION`, and `NOBYPASSRLS`, with no role memberships or
-owned database objects. Its explicit grants are equivalent to:
+`NOCREATEROLE`, `NOREPLICATION`, and `NOBYPASSRLS`, with no owned database
+objects. PostgreSQL 16 may record one provider-created membership when a
+non-superuser operator creates the role: the writer is the parent, the current
+operator is the child, `ADMIN` is true, `INHERIT` and `SET` are false, and the
+grantor is a superuser. The provisioner accepts only that edge (or no edge) and
+rejects every other role membership. The edge itself does not directly let the
+operator inherit or assume the writer's privileges, and it grants no privilege
+to the writer. The operator remains inside the trusted database-administrator
+boundary: `ADMIN` permits it to administer the role and delegate membership.
+The role's explicit grants are equivalent to:
 
 ```sql
 GRANT CONNECT ON DATABASE your_database_name TO axel_delivery_canary_writer;
