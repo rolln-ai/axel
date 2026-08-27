@@ -4,6 +4,9 @@ import test from "node:test";
 import {
   dashboardR2PublicErrorCode,
   runDashboardR2TokenCli,
+  runDashboardR2TokenCommand,
+  runDashboardR2TokenForVercelBuild,
+  verifyDashboardR2Configuration,
   verifyDashboardR2Token,
 } from "../verify-dashboard-r2-token.mjs";
 
@@ -67,6 +70,90 @@ test("dashboard token rejects a legacy provisioning variable before network acce
     /legacy_cloudflare_api_token_present_in_dashboard_runtime/,
   );
   assert.equal(called, false);
+});
+
+test("dashboard configuration accepts Vercel's opaque Sensitive marker without network access", async () => {
+  const env = { ...BASE_ENV, CLOUDFLARE_R2_API_TOKEN: "(Sensitive)" };
+  assert.deepEqual(verifyDashboardR2Configuration(env), {
+    account: ACCOUNT_ID,
+    bucket: "axel-events-raw",
+    token: "(Sensitive)",
+  });
+
+  const logs = [];
+  const exitCode = await runDashboardR2TokenCli({
+    envFile: "ignored.env",
+    loadEnvFile: () => {},
+    env,
+    configurationOnly: true,
+    fetchImpl: async () => {
+      throw new Error("configuration-only verification made a network request");
+    },
+    log: (line) => logs.push(line),
+  });
+  assert.equal(exitCode, 0);
+  assert.deepEqual(logs, ["dashboard Cloudflare token configuration verified"]);
+});
+
+test("Vercel build probes only the production trust boundary", async () => {
+  const previewLogs = [];
+  const previewCode = await runDashboardR2TokenForVercelBuild({
+    env: { VERCEL_ENV: "preview" },
+    fetchImpl: async () => {
+      throw new Error("preview build made a network request");
+    },
+    log: (line) => previewLogs.push(line),
+  });
+  assert.equal(previewCode, 0);
+  assert.deepEqual(previewLogs, [
+    "dashboard Cloudflare token verification skipped outside Vercel production",
+  ]);
+
+  const requests = [];
+  const productionLogs = [];
+  const productionCode = await runDashboardR2TokenForVercelBuild({
+    env: { ...BASE_ENV, VERCEL_ENV: "production" },
+    apiBase: "https://cloudflare.example.test/client/v4",
+    fetchImpl: successfulFetch(requests),
+    log: (line) => productionLogs.push(line),
+  });
+  assert.equal(productionCode, 0);
+  assert.deepEqual(requests.map(({ method }) => method), ["PUT", "GET", "GET", "GET", "DELETE"]);
+  assert.deepEqual(productionLogs, [
+    "dashboard Cloudflare token verified for R2 runtime access only",
+  ]);
+});
+
+test("Vercel build fails closed for missing or unknown environment identity", async () => {
+  for (const env of [{}, { VERCEL_ENV: "staging" }]) {
+    const errors = [];
+    const exitCode = await runDashboardR2TokenForVercelBuild({
+      env,
+      errorLog: (line) => errors.push(line),
+    });
+    assert.equal(exitCode, 1);
+    assert.deepEqual(errors, [
+      "dashboard Cloudflare token verification failed: "
+      + "invalid_vercel_environment_for_dashboard_r2_verification",
+    ]);
+  }
+});
+
+test("dashboard verifier command dispatches the hosted production probe", async () => {
+  const requests = [];
+  const logs = [];
+  const exitCode = await runDashboardR2TokenCommand({
+    argv: ["--runtime-if-production"],
+    env: { ...BASE_ENV, VERCEL_ENV: "production" },
+    apiBase: "https://cloudflare.example.test/client/v4",
+    fetchImpl: successfulFetch(requests),
+    log: (line) => logs.push(line),
+  });
+  assert.equal(exitCode, 0);
+  assert.deepEqual(requests.map(({ method }) => method), ["PUT", "GET", "GET", "GET", "DELETE"]);
+  assert.deepEqual(logs, [
+    "dashboard Cloudflare token verified for R2 runtime access only",
+  ]);
 });
 
 test("dashboard token fails closed when Queue access is present and still cleans up", async () => {

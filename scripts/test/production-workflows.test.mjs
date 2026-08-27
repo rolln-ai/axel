@@ -167,13 +167,18 @@ test("Vercel production is staged, smoked, then promoted", () => {
   assert.match(deployHelper, /export VERCEL_ENV="\$environment"/);
   assert.match(deployHelper, /export CI=1/);
   assert.match(deployHelper, /export VERCEL_GIT_COMMIT_SHA="\$SENTRY_RELEASE"/);
-  assert.match(deployHelper, /verify-dashboard-r2-token\.mjs/);
+  assert.match(deployHelper, /verify-dashboard-r2-token\.mjs"[\s\\]+--configuration-only/);
+  assert.match(deployHelper, /deploy --prod --skip-domain --logs/);
+  assert.match(deployHelper, /--build-env "SENTRY_RELEASE=\$SENTRY_RELEASE"/);
+  assert.match(deployHelper, /--env "SENTRY_RELEASE=\$SENTRY_RELEASE"/);
+  const dashboardVercel = read("apps/dashboard/vercel.json");
+  assert.match(dashboardVercel, /verify-dashboard-r2-token\.mjs --runtime-if-production/);
   assert.match(deployHelper, /generatedHost/);
   const dashboardStage = workflow.slice(
     workflow.indexOf("Stage dashboard at the reviewed commit"),
     workflow.indexOf("Stage marketing at the reviewed commit"),
   );
-  assert.match(dashboardStage, /SENTRY_AUTH_TOKEN: \$\{\{ secrets\.SENTRY_AUTH_TOKEN \}\}/);
+  assert.doesNotMatch(dashboardStage, /SENTRY_AUTH_TOKEN|SENTRY_ORG|SENTRY_PROJECT/);
   assert.match(dashboardStage, /SENTRY_RELEASE: \$\{\{ github\.sha \}\}/);
   assert.match(
     workflow,

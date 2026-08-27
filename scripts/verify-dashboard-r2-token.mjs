@@ -10,6 +10,7 @@ const PUBLIC_ERROR_CODE_PATTERNS = [
   /^missing_dashboard_environment_file$/,
   /^missing_required_environment:(?:CLOUDFLARE_ACCOUNT_ID|CLOUDFLARE_R2_API_TOKEN|RAW_PAYLOAD_BUCKET)$/,
   /^invalid_(?:cloudflare_account_id|raw_payload_bucket)$/,
+  /^invalid_vercel_environment_for_dashboard_r2_verification$/,
   /^legacy_cloudflare_api_token_present_in_dashboard_runtime$/,
   /^cloudflare_dashboard_r2_(?:probe_(?:request_failed|read_failed|mismatch)|http_[1-5][0-9]{2}|token_(?:queue|workers_scripts)_permission_present|(?:queue|workers_scripts)_denial_probe_http_[1-5][0-9]{2})$/,
 ];
@@ -92,13 +93,8 @@ export async function verifyDashboardR2Token(options = {}) {
   const apiBase = options.apiBase ?? DEFAULT_API_BASE;
   const requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
 
-  if (env.CLOUDFLARE_API_TOKEN) {
-    throw new Error("legacy_cloudflare_api_token_present_in_dashboard_runtime");
-  }
+  const { account, bucket, token } = verifyDashboardR2Configuration(env);
 
-  const account = accountId(requiredEnv(env, "CLOUDFLARE_ACCOUNT_ID"));
-  const bucket = bucketName(requiredEnv(env, "RAW_PAYLOAD_BUCKET"));
-  const token = requiredEnv(env, "CLOUDFLARE_R2_API_TOKEN");
   const objectKey = `_axel/dashboard-r2-token-probes/${randomUUID()}`;
   const objectUrl = `${apiBase}/accounts/${account}/r2/buckets/${encodeURIComponent(bucket)}/objects/${objectKey}`;
   let objectCleanupRequired = false;
@@ -168,6 +164,23 @@ export async function verifyDashboardR2Token(options = {}) {
   log("dashboard Cloudflare token verified for R2 runtime access only");
 }
 
+/**
+ * Validate the Vercel configuration without trying to use the token value.
+ * Sensitive Vercel variables intentionally materialize as an opaque marker
+ * when pulled into CI; the real value is available only inside Vercel's build
+ * and runtime boundary.
+ */
+export function verifyDashboardR2Configuration(env = process.env) {
+  if (env.CLOUDFLARE_API_TOKEN) {
+    throw new Error("legacy_cloudflare_api_token_present_in_dashboard_runtime");
+  }
+
+  const account = accountId(requiredEnv(env, "CLOUDFLARE_ACCOUNT_ID"));
+  const bucket = bucketName(requiredEnv(env, "RAW_PAYLOAD_BUCKET"));
+  const token = requiredEnv(env, "CLOUDFLARE_R2_API_TOKEN");
+  return { account, bucket, token };
+}
+
 export function dashboardR2PublicErrorCode(error) {
   const candidate = error instanceof Error ? error.message : "";
   return PUBLIC_ERROR_CODE_PATTERNS.some((pattern) => pattern.test(candidate))
@@ -176,16 +189,27 @@ export function dashboardR2PublicErrorCode(error) {
 }
 
 export async function runDashboardR2TokenCli(options = {}) {
-  const envFile = options.envFile ?? process.argv[2];
+  const envFile = Object.hasOwn(options, "envFile") ? options.envFile : process.argv[2];
   const errorLog = options.errorLog ?? console.error;
+  const log = options.log ?? console.log;
   try {
-    if (!envFile) throw new Error("missing_dashboard_environment_file");
-    const loadEnvFile = options.loadEnvFile ?? process.loadEnvFile;
-    loadEnvFile(envFile);
+    if (envFile) {
+      const loadEnvFile = options.loadEnvFile ?? process.loadEnvFile;
+      loadEnvFile(envFile);
+    } else if (!options.useProcessEnv) {
+      throw new Error("missing_dashboard_environment_file");
+    }
+
+    if (options.configurationOnly) {
+      verifyDashboardR2Configuration(options.env ?? process.env);
+      log("dashboard Cloudflare token configuration verified");
+      return 0;
+    }
+
     await verifyDashboardR2Token({
       env: options.env ?? process.env,
       fetchImpl: options.fetchImpl,
-      log: options.log,
+      log,
       apiBase: options.apiBase,
       requestTimeoutMs: options.requestTimeoutMs,
     });
@@ -198,7 +222,36 @@ export async function runDashboardR2TokenCli(options = {}) {
   }
 }
 
+export async function runDashboardR2TokenForVercelBuild(options = {}) {
+  const env = options.env ?? process.env;
+  const log = options.log ?? console.log;
+  if (env.VERCEL_ENV === "preview" || env.VERCEL_ENV === "development") {
+    log("dashboard Cloudflare token verification skipped outside Vercel production");
+    return 0;
+  }
+  if (env.VERCEL_ENV !== "production") {
+    const errorLog = options.errorLog ?? console.error;
+    errorLog(
+      "dashboard Cloudflare token verification failed: "
+      + "invalid_vercel_environment_for_dashboard_r2_verification",
+    );
+    return 1;
+  }
+  return runDashboardR2TokenCli({ ...options, env, log, useProcessEnv: true, envFile: undefined });
+}
+
+export async function runDashboardR2TokenCommand(options = {}) {
+  const [mode, envFile] = options.argv ?? process.argv.slice(2);
+  if (mode === "--configuration-only") {
+    return runDashboardR2TokenCli({ ...options, envFile, configurationOnly: true });
+  }
+  if (mode === "--runtime-if-production") {
+    return runDashboardR2TokenForVercelBuild(options);
+  }
+  return runDashboardR2TokenCli({ ...options, envFile: mode });
+}
+
 const invokedPath = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";
 if (import.meta.url === invokedPath) {
-  process.exitCode = await runDashboardR2TokenCli();
+  process.exitCode = await runDashboardR2TokenCommand();
 }

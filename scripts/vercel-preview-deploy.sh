@@ -60,9 +60,16 @@ cli="vercel@${VERCEL_CLI_VERSION:-58.4.0}"
 
 npx --yes "$cli" pull --yes --environment="$environment" --token "$VERCEL_TOKEN"
 if [ "$app" = "dashboard" ] && [ "$environment" = "production" ]; then
-  node "$ROOT_DIR/scripts/verify-dashboard-r2-token.mjs" ".vercel/.env.production.local"
-fi
-if [ "$environment" = "production" ]; then
+  # Vercel Sensitive values intentionally cannot be pulled back into CI. Prove
+  # the expected configuration names here, then let the remote Vercel build run
+  # the full R2/negative-permission probe inside the provider trust boundary.
+  node "$ROOT_DIR/scripts/verify-dashboard-r2-token.mjs" \
+    --configuration-only ".vercel/.env.production.local"
+  deploy_output="$(npx --yes "$cli" deploy --prod --skip-domain --logs \
+    --build-env "SENTRY_RELEASE=$SENTRY_RELEASE" \
+    --env "SENTRY_RELEASE=$SENTRY_RELEASE" \
+    --token "$VERCEL_TOKEN")"
+elif [ "$environment" = "production" ]; then
   npx --yes "$cli" build --prod --token "$VERCEL_TOKEN"
   # Build with production configuration but leave custom domains untouched.
   # The workflow smokes this exact URL before a separate promote command.

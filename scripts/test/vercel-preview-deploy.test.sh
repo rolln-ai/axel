@@ -66,7 +66,12 @@ fi
 : > "$TEST_DIR/node.log"
 dashboard_production_output="$(run_deploy dashboard production)"
 printf '%s\n' "$dashboard_production_output" | tail -n 1 | grep -Fxq 'https://axel-test-0123456789.vercel.app'
-grep -Fxq "$ROOT_DIR/scripts/verify-dashboard-r2-token.mjs .vercel/.env.production.local" "$TEST_DIR/node.log"
+grep -Fxq "$ROOT_DIR/scripts/verify-dashboard-r2-token.mjs --configuration-only .vercel/.env.production.local" "$TEST_DIR/node.log"
+grep -Eq 'vercel@58\.4\.0 deploy --prod --skip-domain --logs --build-env SENTRY_RELEASE=[0-9a-f]{40} --env SENTRY_RELEASE=[0-9a-f]{40} --token' "$TEST_DIR/npx.log"
+if grep -Eq 'build --prod|deploy --prebuilt' "$TEST_DIR/npx.log"; then
+  echo "dashboard production deployment tried to materialize a Sensitive value in CI" >&2
+  exit 1
+fi
 
 : > "$TEST_DIR/npx.log"
 production_output="$(run_deploy marketing production)"
