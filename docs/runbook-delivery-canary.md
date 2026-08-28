@@ -278,8 +278,9 @@ Replace the placeholder with the run ID printed by the preceding `gh run list`.
 The workflow retrieves the exact service ID, verifies its owner, name,
 background-worker type, connected `rolln-ai/axel` repository, `main` branch,
 Node runtime, singleton count, and disabled auto-deploy state. It also verifies
-the required Blueprint identity, disabled Blueprint auto-sync, `paused` status,
-repository, branch, path, and exact worker membership. Before
+the required Blueprint identity, disabled Blueprint auto-sync, a safe terminal
+status (`paused` or `in_sync`), repository, branch, path, and exact worker
+membership. It rejects `created`, `syncing`, and `error` before any save. Before
 saving, it requires the
 existing direct environment to retain `DELIVERY_ROLE=worker`,
 `SENTRY_ENVIRONMENT=production`, and a nonempty `SENTRY_DSN`. It changes only

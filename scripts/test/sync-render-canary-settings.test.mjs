@@ -299,22 +299,25 @@ test("accepts documented repository encodings but rejects conflicting flattened 
 
 test("Blueprint metadata or membership drift fails before mutation", async () => {
   const blueprints = [
-    { ...structuredClone(BLUEPRINT), id: "exs-dddddddddddddddddddd" },
-    { ...structuredClone(BLUEPRINT), repo: "https://github.com/attacker/axel" },
-    { ...structuredClone(BLUEPRINT), branch: "feature/canary" },
-    { ...structuredClone(BLUEPRINT), path: "infra/render.yaml" },
-    { ...structuredClone(BLUEPRINT), autoSync: true },
-    { ...structuredClone(BLUEPRINT), status: "in_sync" },
-    { ...structuredClone(BLUEPRINT), status: "syncing" },
-    { ...structuredClone(BLUEPRINT), status: "error" },
-    { ...structuredClone(BLUEPRINT), ownerId: "tea-dddddddddddddddddddd" },
-    { ...structuredClone(BLUEPRINT), resources: [] },
-    {
-      ...structuredClone(BLUEPRINT),
-      resources: [{ id: SERVICE_ID, name: "wrong-worker", type: "background_worker" }],
-    },
+    [{ ...structuredClone(BLUEPRINT), id: "exs-dddddddddddddddddddd" }, "identity"],
+    [{ ...structuredClone(BLUEPRINT), repo: "https://github.com/attacker/axel" }, "source"],
+    [{ ...structuredClone(BLUEPRINT), branch: "feature/canary" }, "source"],
+    [{ ...structuredClone(BLUEPRINT), path: "infra/render.yaml" }, "source"],
+    [{ ...structuredClone(BLUEPRINT), autoSync: true }, "autosync_not_disabled"],
+    [{ ...structuredClone(BLUEPRINT), status: "created" }, "status_unsafe"],
+    [{ ...structuredClone(BLUEPRINT), status: "syncing" }, "status_unsafe"],
+    [{ ...structuredClone(BLUEPRINT), status: "error" }, "status_unsafe"],
+    [{ ...structuredClone(BLUEPRINT), ownerId: "tea-dddddddddddddddddddd" }, "owner"],
+    [{ ...structuredClone(BLUEPRINT), resources: [] }, "membership"],
+    [
+      {
+        ...structuredClone(BLUEPRINT),
+        resources: [{ id: SERVICE_ID, name: "wrong-worker", type: "background_worker" }],
+      },
+      "membership",
+    ],
   ];
-  for (const blueprint of blueprints) {
+  for (const [blueprint, failureCode] of blueprints) {
     const provider = createProvider({ blueprint });
     await assert.rejects(
       syncRenderCanarySettings({
@@ -322,10 +325,22 @@ test("Blueprint metadata or membership drift fails before mutation", async () =>
         fetchImpl: provider.fetchImpl,
         log: () => {},
       }),
-      /render_blueprint_metadata_mismatch/,
+      new RegExp(`render_blueprint_${failureCode}_mismatch|render_blueprint_${failureCode}`),
     );
     assert.equal(provider.putCount, 0);
   }
+});
+
+test("an in-sync Blueprint with auto-sync disabled is a safe terminal state", async () => {
+  const provider = createProvider({
+    blueprint: { ...structuredClone(BLUEPRINT), status: "in_sync" },
+  });
+  await syncRenderCanarySettings({
+    env: BASE_ENV,
+    fetchImpl: provider.fetchImpl,
+    log: () => {},
+  });
+  assert.equal(provider.putCount, 1);
 });
 
 test("worker role and Sentry monitor prerequisites are required before mutation", async () => {

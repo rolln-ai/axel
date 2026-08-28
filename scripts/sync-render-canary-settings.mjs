@@ -10,6 +10,7 @@ const EXPECTED_SERVICE_TYPE = "background_worker";
 const EXPECTED_ENVIRONMENT = "node";
 const EXPECTED_INSTANCE_COUNT = 1;
 const EXPECTED_BLUEPRINT_PATH = "render.yaml";
+const SAFE_BLUEPRINT_STATUSES = new Set(["paused", "in_sync"]);
 const EXPECTED_INGEST_URL = "https://ingest.axelapp.ai/in/src_delivery_canary";
 const EXPECTED_INGEST_HEADER = "x-axel-token";
 const EXPECTED_RECEIPT_URL =
@@ -222,18 +223,28 @@ function verifyBlueprint(
   expectedServiceId,
   expectedOwnerId,
 ) {
+  if (!object(blueprint)) fail("render_blueprint_response_invalid");
+  if (blueprint.id !== expectedBlueprintId) {
+    fail("render_blueprint_identity_mismatch");
+  }
+  if (!SAFE_BLUEPRINT_STATUSES.has(blueprint.status)) {
+    fail("render_blueprint_status_unsafe");
+  }
+  if (blueprint.autoSync !== false) {
+    fail("render_blueprint_autosync_not_disabled");
+  }
   if (
-    !object(blueprint)
-    || blueprint.id !== expectedBlueprintId
-    || blueprint.status !== "paused"
-    || blueprint.branch !== EXPECTED_BRANCH
+    blueprint.branch !== EXPECTED_BRANCH
     || blueprint.path !== EXPECTED_BLUEPRINT_PATH
-    || blueprint.autoSync !== false
     || normalizeGitHubRepository(blueprint.repo) !== EXPECTED_REPOSITORY
-    || !Array.isArray(blueprint.resources)
-    || (Object.hasOwn(blueprint, "ownerId") && blueprint.ownerId !== expectedOwnerId)
   ) {
-    fail("render_blueprint_metadata_mismatch");
+    fail("render_blueprint_source_mismatch");
+  }
+  if (Object.hasOwn(blueprint, "ownerId") && blueprint.ownerId !== expectedOwnerId) {
+    fail("render_blueprint_owner_mismatch");
+  }
+  if (!Array.isArray(blueprint.resources)) {
+    fail("render_blueprint_membership_mismatch");
   }
   const matches = blueprint.resources.filter((resource) =>
     object(resource) && resource.id === expectedServiceId
@@ -243,7 +254,7 @@ function verifyBlueprint(
     || matches[0].name !== EXPECTED_SERVICE_NAME
     || matches[0].type !== EXPECTED_SERVICE_TYPE
   ) {
-    fail("render_blueprint_metadata_mismatch");
+    fail("render_blueprint_membership_mismatch");
   }
 }
 
