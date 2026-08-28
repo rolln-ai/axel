@@ -296,6 +296,11 @@ test("delivery canary settings target only the immutable singleton worker", () =
     render,
     /RENDER_DELIVERY_WORKERS_BLUEPRINT_ID: \$\{\{ vars\.RENDER_DELIVERY_WORKERS_BLUEPRINT_ID \}\}/,
   );
+  assert.match(
+    render,
+    /RENDER_DELIVERY_WORKERS_BLUEPRINT_REPOSITORY: \$\{\{ secrets\.RENDER_DELIVERY_WORKERS_BLUEPRINT_REPOSITORY \}\}/,
+  );
+  assert.doesNotMatch(render, /^      RENDER_DELIVERY_WORKERS_BLUEPRINT_REPOSITORY:/m);
   assert.match(render, /save-worker-canary-settings/);
   assert.match(render, /node scripts\/sync-render-canary-settings\.mjs/);
   assert.doesNotMatch(render, /\/deploys/);
@@ -325,6 +330,7 @@ test("delivery canary settings target only the immutable singleton worker", () =
     "AXEL_CANARY_RECEIPT_AUTH_VALUE",
     "AXEL_CANARY_RECEIPT_URL",
     "RENDER_API_KEY",
+    "RENDER_DELIVERY_WORKERS_BLUEPRINT_REPOSITORY",
   ]);
   assert.doesNotMatch(
     render,
@@ -337,7 +343,8 @@ test("delivery-canary hotfix runbook permits only an exact-SHA worker UI deploy"
   const runbook = read("docs/runbook-delivery-canary.md");
   assert.match(runbook, /gh workflow run sync-render-canary-settings\.yml --ref main/);
   assert.match(runbook, /RENDER_DELIVERY_WORKERS_SERVICE_ID/);
-  assert.match(runbook, /All three bindings are mandatory/);
+  assert.match(runbook, /All four bindings are mandatory/);
+  assert.match(runbook, /lowercase bare `owner\/repo`/);
   assert.match(runbook, /Deploy a specific commit/);
   assert.match(runbook, /full hotfix SHA from `main`/);
   assert.match(runbook, /Deploy that worker\s+only/);

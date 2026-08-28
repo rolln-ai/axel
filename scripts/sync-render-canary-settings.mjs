@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url";
 
 const API_BASE = "https://api.render.com/v1";
 const EXPECTED_SERVICE_NAME = "axel-delivery-workers";
-const EXPECTED_REPOSITORY = "rolln-ai/axel";
+const EXPECTED_SERVICE_REPOSITORY = "rolln-ai/axel";
 const EXPECTED_BRANCH = "main";
 const EXPECTED_SERVICE_TYPE = "background_worker";
 const EXPECTED_ENVIRONMENT = "node";
@@ -75,6 +75,14 @@ function ownerId(value) {
 function blueprintId(value) {
   if (!/^exs-[0-9a-z]{20}$/.test(value)) fail("render_blueprint_id_invalid");
   return value;
+}
+
+function blueprintRepository(value) {
+  const normalized = normalizeGitHubRepository(value);
+  if (!normalized || normalized !== value) {
+    fail("render_blueprint_repository_invalid");
+  }
+  return normalized;
 }
 
 function hasControlCharacters(value) {
@@ -215,7 +223,7 @@ function verifyService(service, expectedServiceId, expectedOwnerId) {
     || service.name !== EXPECTED_SERVICE_NAME
     || service.type !== EXPECTED_SERVICE_TYPE
     || service.branch !== EXPECTED_BRANCH
-    || normalizeGitHubRepository(service.repo) !== EXPECTED_REPOSITORY
+    || normalizeGitHubRepository(service.repo) !== EXPECTED_SERVICE_REPOSITORY
     || consistentServiceField(service, "env") !== EXPECTED_ENVIRONMENT
     || consistentServiceField(service, "runtime") !== EXPECTED_ENVIRONMENT
     || consistentServiceField(service, "numInstances") !== EXPECTED_INSTANCE_COUNT
@@ -234,6 +242,7 @@ function verifyBlueprint(
   expectedBlueprintId,
   expectedServiceId,
   expectedOwnerId,
+  expectedRepository,
 ) {
   if (!object(blueprint)) fail("render_blueprint_response_invalid");
   if (blueprint.id !== expectedBlueprintId) {
@@ -251,7 +260,7 @@ function verifyBlueprint(
   if (blueprint.path !== EXPECTED_BLUEPRINT_PATH) {
     fail("render_blueprint_path_mismatch");
   }
-  if (normalizeGitHubRepository(blueprint.repo) !== EXPECTED_REPOSITORY) {
+  if (normalizeGitHubRepository(blueprint.repo) !== expectedRepository) {
     fail("render_blueprint_repository_mismatch");
   }
   if (Object.hasOwn(blueprint, "ownerId") && blueprint.ownerId !== expectedOwnerId) {
@@ -469,6 +478,9 @@ export async function syncRenderCanarySettings(options = {}) {
   const expectedBlueprintId = blueprintId(
     requiredEnv(env, "RENDER_DELIVERY_WORKERS_BLUEPRINT_ID"),
   );
+  const expectedBlueprintRepository = blueprintRepository(
+    requiredEnv(env, "RENDER_DELIVERY_WORKERS_BLUEPRINT_REPOSITORY"),
+  );
   const token = requiredEnv(env, "RENDER_API_KEY");
   const candidate = buildCandidate(env);
 
@@ -488,7 +500,13 @@ export async function syncRenderCanarySettings(options = {}) {
   verifyService(service, expectedServiceId, expectedOwnerId);
 
   const blueprint = await request(`${API_BASE}/blueprints/${expectedBlueprintId}`, true);
-  verifyBlueprint(blueprint, expectedBlueprintId, expectedServiceId, expectedOwnerId);
+  verifyBlueprint(
+    blueprint,
+    expectedBlueprintId,
+    expectedServiceId,
+    expectedOwnerId,
+    expectedBlueprintRepository,
+  );
 
   const current = await readDirectEnvVars(request, expectedServiceId, pageLimit);
   verifyRuntimePrerequisites(current);

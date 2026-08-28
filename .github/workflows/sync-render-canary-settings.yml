@@ -42,6 +42,7 @@ jobs:
         run: node scripts/sync-render-canary-settings.mjs
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_DELIVERY_WORKERS_BLUEPRINT_REPOSITORY: ${{ secrets.RENDER_DELIVERY_WORKERS_BLUEPRINT_REPOSITORY }}
           AXEL_CANARY_ENABLED: "1"
           AXEL_CANARY_INTERVAL_MS: "900000"
           AXEL_CANARY_INGEST_URL: ${{ secrets.AXEL_CANARY_INGEST_URL }}

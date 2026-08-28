@@ -10,6 +10,7 @@ const API_KEY = "render-api-token-sensitive";
 const SERVICE_ID = "srv-aaaaaaaaaaaaaaaaaaaa";
 const OWNER_ID = "tea-bbbbbbbbbbbbbbbbbbbb";
 const BLUEPRINT_ID = "exs-cccccccccccccccccccc";
+const BLUEPRINT_REPOSITORY = "rolln-ai/render-blueprint-fixture";
 const CANARY = Object.freeze({
   AXEL_CANARY_ENABLED: "1",
   AXEL_CANARY_INTERVAL_MS: "900000",
@@ -26,6 +27,7 @@ const BASE_ENV = Object.freeze({
   RENDER_OWNER_ID: OWNER_ID,
   RENDER_DELIVERY_WORKERS_SERVICE_ID: SERVICE_ID,
   RENDER_DELIVERY_WORKERS_BLUEPRINT_ID: BLUEPRINT_ID,
+  RENDER_DELIVERY_WORKERS_BLUEPRINT_REPOSITORY: BLUEPRINT_REPOSITORY,
   ...CANARY,
 });
 const SERVICE = Object.freeze({
@@ -48,7 +50,7 @@ const BLUEPRINT = Object.freeze({
   id: BLUEPRINT_ID,
   autoSync: false,
   status: "paused",
-  repo: "https://github.com/rolln-ai/axel",
+  repo: `https://github.com/${BLUEPRINT_REPOSITORY}`,
   branch: "main",
   path: "render.yaml",
   resources: [
@@ -369,6 +371,7 @@ test("Blueprint metadata or membership drift fails before mutation", async () =>
       { ...structuredClone(BLUEPRINT), repo: "https://github.com/attacker/axel" },
       "repository",
     ],
+    [{ ...structuredClone(BLUEPRINT), repo: "rolln-ai/axel" }, "repository"],
     [{ ...structuredClone(BLUEPRINT), branch: "feature/canary" }, "branch"],
     [{ ...structuredClone(BLUEPRINT), path: "infra/render.yaml" }, "path"],
     [{ ...structuredClone(BLUEPRINT), autoSync: true }, "autosync_not_disabled"],
@@ -413,7 +416,7 @@ test("an in-sync Blueprint with auto-sync disabled is a safe terminal state", as
 
 test("accepts Render's bare repository encoding for a Blueprint", async () => {
   const provider = createProvider({
-    blueprint: { ...structuredClone(BLUEPRINT), repo: "rolln-ai/axel" },
+    blueprint: { ...structuredClone(BLUEPRINT), repo: BLUEPRINT_REPOSITORY },
   });
   await syncRenderCanarySettings({
     env: BASE_ENV,
@@ -458,6 +461,38 @@ test("invalid identifiers and incomplete canary candidates fail before provider 
       { ...BASE_ENV, RENDER_DELIVERY_WORKERS_BLUEPRINT_ID: "exs-not-an-id" },
       /render_blueprint_id_invalid/,
     ],
+    [
+      {
+        ...BASE_ENV,
+        RENDER_DELIVERY_WORKERS_BLUEPRINT_REPOSITORY:
+          "https://github.com/rolln-ai/render-blueprint-fixture",
+      },
+      /render_blueprint_repository_invalid/,
+    ],
+    [
+      {
+        ...BASE_ENV,
+        RENDER_DELIVERY_WORKERS_BLUEPRINT_REPOSITORY:
+          "rolln-ai/render-blueprint-fixture.git",
+      },
+      /render_blueprint_repository_invalid/,
+    ],
+    [
+      {
+        ...BASE_ENV,
+        RENDER_DELIVERY_WORKERS_BLUEPRINT_REPOSITORY:
+          "Rolln-AI/render-blueprint-fixture",
+      },
+      /render_blueprint_repository_invalid/,
+    ],
+    [
+      {
+        ...BASE_ENV,
+        RENDER_DELIVERY_WORKERS_BLUEPRINT_REPOSITORY:
+          "rolln-ai/render-blueprint-fixture ",
+      },
+      /render_blueprint_repository_invalid/,
+    ],
     [{ ...BASE_ENV, AXEL_CANARY_INTERVAL_MS: "60000" }, /canary_interval_value_invalid/],
     [{ ...BASE_ENV, AXEL_CANARY_INGEST_URL: "http://ingest.invalid" }, /canary_ingest_url_invalid/],
     [{ ...BASE_ENV, AXEL_CANARY_INGEST_URL: "https://attacker.invalid/ingest" }, /canary_ingest_url_invalid/],
@@ -483,6 +518,12 @@ test("invalid identifiers and incomplete canary candidates fail before provider 
   cases.push([
     missingBlueprint,
     /missing_required_environment:RENDER_DELIVERY_WORKERS_BLUEPRINT_ID/,
+  ]);
+  const missingBlueprintRepository = { ...BASE_ENV };
+  delete missingBlueprintRepository.RENDER_DELIVERY_WORKERS_BLUEPRINT_REPOSITORY;
+  cases.push([
+    missingBlueprintRepository,
+    /missing_required_environment:RENDER_DELIVERY_WORKERS_BLUEPRINT_REPOSITORY/,
   ]);
 
   for (const [env, error] of cases) {

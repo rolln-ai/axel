@@ -212,9 +212,13 @@ gh variable set RENDER_OWNER_ID --env Production --body '<tea-workspace-id>'
 gh variable set RENDER_DELIVERY_WORKERS_SERVICE_ID --env Production \
   --body '<srv-delivery-workers-id>'
 
-# Bind the owning Blueprint as a third mandatory Production identity.
+# Bind the owning Blueprint and its exact source repository as mandatory
+# Production identities. Keep the infrastructure repository value in the
+# protected environment secret rather than Git history or unmasked logs.
 gh variable set RENDER_DELIVERY_WORKERS_BLUEPRINT_ID --env Production \
   --body '<exs-blueprint-id>'
+printf %s '<github-owner/blueprint-repository>' \
+  | gh secret set RENDER_DELIVERY_WORKERS_BLUEPRINT_REPOSITORY --env Production
 ```
 
 The pinned Vercel command reads the receipt token from standard input, receives
@@ -263,8 +267,11 @@ ClickHouse, dashboard, or Cloudflare worker.
 
 First confirm the three protected `Production` variables identify the expected
 Render workspace, the immutable `axel-delivery-workers` service, and its owning
-Blueprint. All three bindings are mandatory. Review the full 40-character
-hotfix commit on `main`, then run only the dedicated save-only workflow:
+Blueprint. Confirm the protected `Production` secret binds that Blueprint to
+its exact repository in lowercase bare `owner/repo` form, with no URL, `.git`,
+or surrounding whitespace. All four bindings are mandatory. Review the full
+40-character hotfix commit on `main`, then run only the dedicated save-only
+workflow:
 
 ```sh
 gh workflow run sync-render-canary-settings.yml --ref main \
