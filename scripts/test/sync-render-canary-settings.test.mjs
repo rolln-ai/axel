@@ -36,8 +36,11 @@ const SERVICE = Object.freeze({
   repo: "https://github.com/rolln-ai/axel",
   branch: "main",
   autoDeploy: "no",
+  suspended: "not_suspended",
+  suspenders: [],
   serviceDetails: {
     env: "node",
+    runtime: "node",
     numInstances: 1,
   },
 });
@@ -241,7 +244,7 @@ test("verifies the required Blueprint identity and exact worker membership", asy
   );
 });
 
-test("requires exact owner, service name, type, repository, branch, runtime, and singleton state", async () => {
+test("requires exact identity, runtime, singleton scaling, and active service state", async () => {
   const patches = [
     { id: "srv-dddddddddddddddddddd" },
     { ownerId: "tea-dddddddddddddddddddd" },
@@ -250,8 +253,41 @@ test("requires exact owner, service name, type, repository, branch, runtime, and
     { repo: "https://github.com/attacker/axel" },
     { branch: "feature/canary" },
     { autoDeploy: "yes" },
-    { serviceDetails: { env: "docker", numInstances: 1 } },
-    { serviceDetails: { env: "node", numInstances: 2 } },
+    { autoDeploy: false },
+    { suspended: "suspended", suspenders: ["user"] },
+    { suspenders: ["billing"] },
+    {
+      serviceDetails: {
+        ...structuredClone(SERVICE.serviceDetails),
+        env: "docker",
+      },
+    },
+    {
+      serviceDetails: {
+        ...structuredClone(SERVICE.serviceDetails),
+        runtime: "python",
+      },
+    },
+    {
+      serviceDetails: {
+        ...structuredClone(SERVICE.serviceDetails),
+        numInstances: 2,
+      },
+    },
+    {
+      serviceDetails: {
+        ...structuredClone(SERVICE.serviceDetails),
+        autoscaling: {
+          enabled: true,
+          min: 1,
+          max: 2,
+          criteria: {
+            cpu: { enabled: true, percentage: 60 },
+            memory: { enabled: false, percentage: 60 },
+          },
+        },
+      },
+    },
   ];
 
   for (const patch of patches) {
@@ -268,8 +304,37 @@ test("requires exact owner, service name, type, repository, branch, runtime, and
   }
 });
 
+test("accepts an explicitly disabled autoscaling configuration", async () => {
+  const provider = createProvider({
+    service: {
+      ...structuredClone(SERVICE),
+      serviceDetails: {
+        ...structuredClone(SERVICE.serviceDetails),
+        autoscaling: {
+          enabled: false,
+          min: 1,
+          max: 1,
+          criteria: {
+            cpu: { enabled: false, percentage: 60 },
+            memory: { enabled: false, percentage: 60 },
+          },
+        },
+      },
+    },
+  });
+
+  await syncRenderCanarySettings({
+    env: BASE_ENV,
+    fetchImpl: provider.fetchImpl,
+    log: () => {},
+  });
+  assert.equal(provider.putCount, 1);
+});
+
 test("accepts documented repository encodings but rejects conflicting flattened metadata", async () => {
   for (const repo of [
+    "rolln-ai/axel",
+    "rolln-ai/axel.git",
     "https://github.com/rolln-ai/axel.git",
     "git@github.com:rolln-ai/axel.git",
     "ssh://git@github.com/rolln-ai/axel",
@@ -300,9 +365,12 @@ test("accepts documented repository encodings but rejects conflicting flattened 
 test("Blueprint metadata or membership drift fails before mutation", async () => {
   const blueprints = [
     [{ ...structuredClone(BLUEPRINT), id: "exs-dddddddddddddddddddd" }, "identity"],
-    [{ ...structuredClone(BLUEPRINT), repo: "https://github.com/attacker/axel" }, "source"],
-    [{ ...structuredClone(BLUEPRINT), branch: "feature/canary" }, "source"],
-    [{ ...structuredClone(BLUEPRINT), path: "infra/render.yaml" }, "source"],
+    [
+      { ...structuredClone(BLUEPRINT), repo: "https://github.com/attacker/axel" },
+      "repository",
+    ],
+    [{ ...structuredClone(BLUEPRINT), branch: "feature/canary" }, "branch"],
+    [{ ...structuredClone(BLUEPRINT), path: "infra/render.yaml" }, "path"],
     [{ ...structuredClone(BLUEPRINT), autoSync: true }, "autosync_not_disabled"],
     [{ ...structuredClone(BLUEPRINT), status: "created" }, "status_unsafe"],
     [{ ...structuredClone(BLUEPRINT), status: "syncing" }, "status_unsafe"],
@@ -334,6 +402,18 @@ test("Blueprint metadata or membership drift fails before mutation", async () =>
 test("an in-sync Blueprint with auto-sync disabled is a safe terminal state", async () => {
   const provider = createProvider({
     blueprint: { ...structuredClone(BLUEPRINT), status: "in_sync" },
+  });
+  await syncRenderCanarySettings({
+    env: BASE_ENV,
+    fetchImpl: provider.fetchImpl,
+    log: () => {},
+  });
+  assert.equal(provider.putCount, 1);
+});
+
+test("accepts Render's bare repository encoding for a Blueprint", async () => {
+  const provider = createProvider({
+    blueprint: { ...structuredClone(BLUEPRINT), repo: "rolln-ai/axel" },
   });
   await syncRenderCanarySettings({
     env: BASE_ENV,

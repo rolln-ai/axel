@@ -177,8 +177,8 @@ function normalizeGitHubRepository(value) {
   const prefix = prefixes.find((candidate) =>
     trimmed.toLowerCase().startsWith(candidate)
   );
-  if (!prefix) return "";
-  let repository = trimmed.slice(prefix.length).replace(/\/$/, "");
+  let repository = prefix ? trimmed.slice(prefix.length) : trimmed;
+  repository = repository.replace(/\/$/, "");
   if (repository.toLowerCase().endsWith(".git")) repository = repository.slice(0, -4);
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) return "";
   return repository.toLowerCase();
@@ -200,6 +200,13 @@ function consistentServiceField(service, key) {
   return values[0];
 }
 
+function autoscalingDisabled(service) {
+  if (!object(service.serviceDetails)) return false;
+  if (!Object.hasOwn(service.serviceDetails, "autoscaling")) return true;
+  const { autoscaling } = service.serviceDetails;
+  return object(autoscaling) && autoscaling.enabled === false;
+}
+
 function verifyService(service, expectedServiceId, expectedOwnerId) {
   if (!object(service)) fail("render_service_response_invalid");
   if (
@@ -210,8 +217,13 @@ function verifyService(service, expectedServiceId, expectedOwnerId) {
     || service.branch !== EXPECTED_BRANCH
     || normalizeGitHubRepository(service.repo) !== EXPECTED_REPOSITORY
     || consistentServiceField(service, "env") !== EXPECTED_ENVIRONMENT
+    || consistentServiceField(service, "runtime") !== EXPECTED_ENVIRONMENT
     || consistentServiceField(service, "numInstances") !== EXPECTED_INSTANCE_COUNT
-    || ![false, "no"].includes(service.autoDeploy)
+    || !autoscalingDisabled(service)
+    || service.autoDeploy !== "no"
+    || service.suspended !== "not_suspended"
+    || !Array.isArray(service.suspenders)
+    || service.suspenders.length !== 0
   ) {
     fail("render_service_metadata_mismatch");
   }
@@ -233,12 +245,14 @@ function verifyBlueprint(
   if (blueprint.autoSync !== false) {
     fail("render_blueprint_autosync_not_disabled");
   }
-  if (
-    blueprint.branch !== EXPECTED_BRANCH
-    || blueprint.path !== EXPECTED_BLUEPRINT_PATH
-    || normalizeGitHubRepository(blueprint.repo) !== EXPECTED_REPOSITORY
-  ) {
-    fail("render_blueprint_source_mismatch");
+  if (blueprint.branch !== EXPECTED_BRANCH) {
+    fail("render_blueprint_branch_mismatch");
+  }
+  if (blueprint.path !== EXPECTED_BLUEPRINT_PATH) {
+    fail("render_blueprint_path_mismatch");
+  }
+  if (normalizeGitHubRepository(blueprint.repo) !== EXPECTED_REPOSITORY) {
+    fail("render_blueprint_repository_mismatch");
   }
   if (Object.hasOwn(blueprint, "ownerId") && blueprint.ownerId !== expectedOwnerId) {
     fail("render_blueprint_owner_mismatch");
