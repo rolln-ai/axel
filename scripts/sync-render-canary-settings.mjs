@@ -38,6 +38,12 @@ class RenderCanarySyncError extends Error {
   }
 }
 
+export function renderCanarySyncFailureCode(error) {
+  return error instanceof RenderCanarySyncError
+    ? error.message
+    : "unexpected_error";
+}
+
 function fail(code) {
   throw new RenderCanarySyncError(code);
 }
@@ -476,8 +482,10 @@ export async function syncRenderCanarySettings(options = {}) {
 
 const invokedPath = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";
 if (import.meta.url === invokedPath) {
-  syncRenderCanarySettings().catch(() => {
-    console.error("Render delivery-canary settings sync failed.");
+  syncRenderCanarySettings().catch((error) => {
+    console.error(
+      `Render delivery-canary settings sync failed: ${renderCanarySyncFailureCode(error)}`,
+    );
     process.exitCode = 1;
   });
 }

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   MANAGED_CANARY_KEYS,
+  renderCanarySyncFailureCode,
   syncRenderCanarySettings,
 } from "../sync-render-canary-settings.mjs";
 
@@ -450,6 +451,11 @@ test("provider failures use fixed diagnostics and never request a deploy", async
     caught = error;
   }
   assert.equal(caught?.message, "render_api_http_error");
+  assert.equal(renderCanarySyncFailureCode(caught), "render_api_http_error");
+  assert.equal(
+    renderCanarySyncFailureCode(new Error(`provider echoed ${API_KEY}`)),
+    "unexpected_error",
+  );
   assertSensitiveValuesAbsent(caught?.stack);
   assert.equal(provider.calls.some((call) => call.url.pathname.includes("/deploys")), false);
 });
