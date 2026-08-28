@@ -126,6 +126,10 @@ import { createPostgresIdempotencyStore } from "./postgres-idempotency.js";
 import { QueueConsumerMetrics } from "./queue-consumer-metrics.js";
 import { recordQueueQuarantine } from "./queue-quarantine.js";
 import {
+  deliveryCanaryEnabled,
+  startDeliveryCanaryLoop,
+} from "./delivery-canary-runner.js";
+import {
   createQueueRealtimeMetricsRunner,
   fetchQueueRealtimeMetrics,
   queueRealtimeMetricsToLagSnapshot,
@@ -2086,6 +2090,12 @@ if (runWorkers && (process.env.PARQUET_COMPACTION_ENABLED ?? "") === "1") {
   console.log("[boot] parquet compaction loop started");
 }
 
+const deliveryCanaryHandle = deliveryCanaryEnabled(runWorkers, process.env)
+  ? startDeliveryCanaryLoop({ sentry, env: process.env })
+  : null;
+if (deliveryCanaryHandle) {
+  console.log("[boot] delivery canary loop started");
+}
 
 // ---- Graceful shutdown ---- //
 
@@ -2121,6 +2131,7 @@ async function shutdown(signal: string): Promise<void> {
   if (replayWorkerHandle) drains.push(replayWorkerHandle.stop());
   if (backfillJobWorkerHandle) drains.push(backfillJobWorkerHandle.stop());
   if (parquetCompactionHandle) drains.push(parquetCompactionHandle.stop());
+  if (deliveryCanaryHandle) drains.push(deliveryCanaryHandle.stop());
   const drainResults = await Promise.allSettled(drains);
   for (const result of drainResults) {
     if (result.status === "rejected") {

@@ -6,6 +6,8 @@ import { pathToFileURL } from "node:url";
 const DEFAULT_TIMEOUT_MS = 180_000;
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 const REQUEST_TIMEOUT_MS = 15_000;
+const RESPONSE_BODY_LIMIT_BYTES = 64 * 1024;
+const CANARY_ABORTED = "canary_aborted";
 
 function requiredEnv(env, name) {
   const value = env[name];
@@ -63,13 +65,127 @@ function receiptCredentialHeaders(env) {
   return headers;
 }
 
-async function fetchBounded(fetchImpl, input, init) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+function abortError() {
+  return new Error(CANARY_ABORTED);
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw abortError();
+}
+
+function isCanaryAbort(_error, signal) {
+  return signal?.aborted === true;
+}
+
+async function cancelBody(response) {
   try {
-    return await fetchImpl(input, { ...init, redirect: "error", signal: controller.signal });
+    await response.body?.cancel();
+  } catch {
+    // Keep cancellation and provider details out of diagnostics.
+  }
+}
+
+function readChunk(reader, signal) {
+  throwIfAborted(signal);
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener("abort", abort);
+      reject(abortError());
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+    reader.read().then(
+      (value) => {
+        signal.removeEventListener("abort", abort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      },
+    );
+  });
+}
+
+async function readBoundedJson(response, signal) {
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > RESPONSE_BODY_LIMIT_BYTES) {
+    await cancelBody(response);
+    throw new Error("canary_response_too_large");
+  }
+  if (!response.body) throw new Error("canary_response_invalid");
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let bytesRead = 0;
+  let text = "";
+  try {
+    while (true) {
+      throwIfAborted(signal);
+      const { done, value } = await readChunk(reader, signal);
+      throwIfAborted(signal);
+      if (done) break;
+      bytesRead += value.byteLength;
+      if (bytesRead > RESPONSE_BODY_LIMIT_BYTES) {
+        throw new Error("canary_response_too_large");
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
+  } catch (error) {
+    try {
+      await reader.cancel();
+    } catch {
+      // Keep the fixed local error.
+    }
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error("canary_response_invalid");
+  }
+}
+
+async function fetchBoundedJson(fetchImpl, input, init, options) {
+  const externalSignal = options.signal;
+  throwIfAborted(externalSignal);
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
+  const abortFromExternal = () => controller.abort();
+  externalSignal?.addEventListener("abort", abortFromExternal, { once: true });
+  if (externalSignal?.aborted) controller.abort();
+  let response;
+  try {
+    response = await fetchImpl(input, {
+      ...init,
+      redirect: "error",
+      signal: controller.signal,
+    });
+    throwIfAborted(externalSignal);
+    if (timedOut) throw new Error("canary_request_timeout");
+    if (!options.acceptStatus(response)) {
+      await cancelBody(response);
+      return { status: response.status, ok: response.ok, body: undefined };
+    }
+    const body = await readBoundedJson(response, controller.signal);
+    throwIfAborted(externalSignal);
+    if (timedOut) throw new Error("canary_request_timeout");
+    return { status: response.status, ok: response.ok, body };
+  } catch (error) {
+    if (isCanaryAbort(error, externalSignal)) throw abortError();
+    if (timedOut) throw new Error("canary_request_timeout");
+    throw error;
   } finally {
     clearTimeout(timeout);
+    externalSignal?.removeEventListener("abort", abortFromExternal);
   }
 }
 
@@ -79,13 +195,7 @@ function receiptUrl(template, probeId, eventId) {
     .replaceAll("{event_id}", encodeURIComponent(eventId));
 }
 
-async function hasMatchingReceipt(response, probeId) {
-  let receipt;
-  try {
-    receipt = await response.json();
-  } catch {
-    return false;
-  }
+function hasMatchingReceipt(receipt, probeId) {
   if (
     receipt === null
     || typeof receipt !== "object"
@@ -100,8 +210,21 @@ async function hasMatchingReceipt(response, probeId) {
     && new Date(receivedAtMs).toISOString() === receipt.received_at;
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms, signal) {
+  throwIfAborted(signal);
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }, ms);
+    const abort = () => {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
+      reject(abortError());
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+  });
 }
 
 /**
@@ -119,6 +242,9 @@ export async function runDeliveryCanary(options = {}) {
   const now = options.now ?? Date.now;
   const log = options.log ?? console.log;
   const errorLog = options.errorLog ?? console.error;
+  const signal = options.signal;
+
+  throwIfAborted(signal);
 
   const ingestUrl = requiredEnv(env, "AXEL_CANARY_INGEST_URL");
   const receiptTemplate = requiredEnv(env, "AXEL_CANARY_RECEIPT_URL");
@@ -152,42 +278,50 @@ export async function runDeliveryCanary(options = {}) {
 
   let ingestResponse;
   try {
-    ingestResponse = await fetchBounded(fetchImpl, ingestUrl, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "user-agent": "axel-production-delivery-canary/1",
-        ...ingestHeaders,
+    ingestResponse = await fetchBoundedJson(
+      fetchImpl,
+      ingestUrl,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "user-agent": "axel-production-delivery-canary/1",
+          ...ingestHeaders,
+        },
+        body: JSON.stringify(payload),
       },
-      body: JSON.stringify(payload),
-    });
-  } catch {
+      { signal, acceptStatus: (response) => response.status === 202 },
+    );
+  } catch (error) {
+    if (isCanaryAbort(error, signal)) throw abortError();
+    if (
+      error instanceof Error
+      && ["canary_response_invalid", "canary_response_too_large"].includes(error.message)
+    ) {
+      throw new Error("canary_ingest_response_invalid");
+    }
     throw new Error("canary_ingest_request_failed");
   }
   if (ingestResponse.status !== 202) {
     throw new Error(`canary_ingest_rejected_status:${ingestResponse.status}`);
   }
 
-  let ingestBody;
-  try {
-    ingestBody = await ingestResponse.json();
-  } catch {
-    throw new Error("canary_ingest_response_invalid");
-  }
+  const ingestBody = ingestResponse.body;
   const eventId = ingestBody !== null && typeof ingestBody === "object"
     && typeof ingestBody.event_id === "string" && ingestBody.event_id.length > 0
     ? ingestBody.event_id
     : null;
   if (!eventId) throw new Error("canary_ingest_response_missing_event_id");
 
-  log(`canary accepted probe=${probeId} event=${eventId}`);
+  throwIfAborted(signal);
+  log("canary accepted");
   const deadline = now() + timeoutMs;
   let receiptAttempts = 0;
   while (now() < deadline) {
     receiptAttempts += 1;
     let response;
     try {
-      response = await fetchBounded(
+      response = await fetchBoundedJson(
         fetchImpl,
         receiptUrl(receiptTemplate, probeId, eventId),
         {
@@ -198,24 +332,26 @@ export async function runDeliveryCanary(options = {}) {
             ...receiptHeaders,
           },
         },
+        { signal, acceptStatus: (candidate) => candidate.ok },
       );
-    } catch {
+    } catch (error) {
+      if (isCanaryAbort(error, signal)) throw abortError();
       response = null;
     }
 
-    if (response?.ok && await hasMatchingReceipt(response, probeId)) {
+    if (response?.ok && hasMatchingReceipt(response.body, probeId)) {
+      throwIfAborted(signal);
       const latencyMs = Math.max(0, now() - Date.parse(sentAt));
       log(
-        `canary delivered probe=${probeId} event=${eventId} latency_ms=${latencyMs} receipt_attempts=${receiptAttempts}`,
+        `canary delivered latency_ms=${latencyMs} receipt_attempts=${receiptAttempts}`,
       );
       return { probeId, eventId, latencyMs, receiptAttempts };
     }
-    await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - now())));
+    await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - now())), signal);
   }
 
-  errorLog(
-    `canary delivery divergence probe=${probeId} event=${eventId} timeout_ms=${timeoutMs}`,
-  );
+  throwIfAborted(signal);
+  errorLog(`canary delivery divergence timeout_ms=${timeoutMs}`);
   throw new Error("canary_delivery_divergence");
 }
 

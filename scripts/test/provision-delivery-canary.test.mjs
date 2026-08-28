@@ -449,7 +449,7 @@ test("writer verification fails closed if a forbidden read succeeds", async () =
   assert.equal(writer.calls.some((call) => call.sql === "ROLLBACK"), true);
 });
 
-test("runbook keeps migration, secret installation, rollout, and monitoring fail-safe", async () => {
+test("runbook keeps migration, canary settings, worker deploy, and monitoring fail-safe", async () => {
   const runbook = await readFile(
     new URL("../../docs/runbook-delivery-canary.md", import.meta.url),
     "utf8",
@@ -460,20 +460,20 @@ test("runbook keeps migration, secret installation, rollout, and monitoring fail
     "unset DATABASE_URL CREDENTIALS_MASTER_KEY AXEL_CANARY_WRITER_PASSWORD",
   );
   const firstGitHubWrite = runbook.indexOf("gh secret set AXEL_CANARY_INGEST_URL");
-  const deployVercel = runbook.indexOf("gh workflow run deploy-vercel.yml");
-  const syncRender = runbook.indexOf("gh workflow run sync-render-secrets.yml");
-  const deployRender = runbook.indexOf("gh workflow run deploy-render.yml");
-  const deployCloudflare = runbook.indexOf("gh workflow run deploy-cloudflare.yml");
+  const syncRender = runbook.indexOf("gh workflow run sync-render-canary-settings.yml");
+  const manualWorkerDeploy = runbook.indexOf("Deploy a specific commit");
+  const observation = runbook.indexOf("## Start the 72-hour observation window");
 
   assert(migration >= 0 && migration < provisioner);
   assert(clearAdminSecrets > provisioner && clearAdminSecrets < firstGitHubWrite);
-  assert(
-    deployVercel >= 0
-      && deployVercel < syncRender
-      && syncRender < deployRender
-      && deployRender < deployCloudflare,
-  );
-  assert.match(runbook, /previously absent\s+`sync:false` values/);
+  assert(firstGitHubWrite < syncRender && syncRender < manualWorkerDeploy);
+  assert(manualWorkerDeploy < observation);
+  assert.match(runbook, /changes only\s+the eight `AXEL_CANARY_\*` settings/);
+  assert.match(runbook, /Deploy that worker\s+only/);
+  assert.match(runbook, /Never dispatch `\.github\/workflows\/deploy-render\.yml`/);
+  assert.doesNotMatch(runbook, /gh workflow run deploy-render\.yml/);
+  assert.doesNotMatch(runbook, /gh workflow run sync-render-secrets\.yml/);
+  assert.doesNotMatch(runbook, /-f service=all/);
   assert.match(runbook, /\[skip render\]/);
   assert.match(runbook, /for github_environment in Monitoring Production/);
   assert.match(runbook, /no\s+required reviewers and no wait timer/);

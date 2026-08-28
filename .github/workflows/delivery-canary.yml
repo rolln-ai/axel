@@ -2,8 +2,9 @@ name: Production Delivery Canary
 
 on:
   schedule:
-    # Avoid GitHub's busiest top-of-hour scheduling window while preserving a
-    # 15-minute cadence.
+    # Best-effort fallback only. The authoritative 15-minute cadence runs in
+    # the singleton axel-delivery-workers process because GitHub scheduled this
+    # workflow zero times during the 2026-08-27 production rehearsal.
     - cron: "7,22,37,52 * * * *"
   workflow_dispatch: {}
 
@@ -23,9 +24,6 @@ jobs:
     timeout-minutes: 8
     permissions:
       contents: read
-    env:
-      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
-      SENTRY_ENVIRONMENT: production
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -38,11 +36,6 @@ jobs:
         run: |
           test "${AXEL_SOAK_CANDIDATE_SHA}" = "${GITHUB_SHA}"
 
-      - name: Sentry check-in started
-        id: checkin
-        if: env.SENTRY_DSN != ''
-        run: bash scripts/sentry-cron-checkin.sh in_progress production-delivery-canary '' '7,22,37,52 * * * *' 5 10
-
       - name: Prove production delivery
         run: node scripts/delivery-canary.mjs
         env:
@@ -54,11 +47,3 @@ jobs:
           AXEL_CANARY_RECEIPT_AUTH_VALUE: ${{ secrets.AXEL_CANARY_RECEIPT_AUTH_VALUE }}
           AXEL_CANARY_TIMEOUT_MS: "180000"
           AXEL_CANARY_POLL_INTERVAL_MS: "5000"
-
-      - name: Sentry check-in passed
-        if: success() && env.SENTRY_DSN != '' && steps.checkin.outputs.check_in_id != ''
-        run: bash scripts/sentry-cron-checkin.sh ok production-delivery-canary "${{ steps.checkin.outputs.check_in_id }}"
-
-      - name: Sentry check-in failed
-        if: failure() && env.SENTRY_DSN != '' && steps.checkin.outputs.check_in_id != ''
-        run: bash scripts/sentry-cron-checkin.sh error production-delivery-canary "${{ steps.checkin.outputs.check_in_id }}"

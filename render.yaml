@@ -187,6 +187,24 @@ services:
         sync: false
       - key: SENTRY_ENVIRONMENT
         value: production
+      # This exact singleton owns the authoritative production delivery canary.
+      # GitHub Actions remains a manual and best-effort fallback.
+      - key: AXEL_CANARY_ENABLED
+        value: "1"
+      - key: AXEL_CANARY_INTERVAL_MS
+        value: "900000"
+      - key: AXEL_CANARY_INGEST_URL
+        sync: false
+      - key: AXEL_CANARY_INGEST_AUTH_HEADER
+        sync: false
+      - key: AXEL_CANARY_INGEST_AUTH_VALUE
+        sync: false
+      - key: AXEL_CANARY_RECEIPT_URL
+        sync: false
+      - key: AXEL_CANARY_RECEIPT_AUTH_HEADER
+        sync: false
+      - key: AXEL_CANARY_RECEIPT_AUTH_VALUE
+        sync: false
       - key: REPLAY_WORKER_BATCH_SIZE
         value: "500"
       - key: REPLAY_WORKER_INTERVAL_MS

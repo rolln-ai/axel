@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { runDeliveryCanary } from "../delivery-canary.mjs";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const scriptPath = fileURLToPath(new URL("../delivery-canary.mjs", import.meta.url));
@@ -96,6 +97,9 @@ test("delivery canary proves accepted ingest reached the controlled destination"
     assert.equal(result.code, 0, result.stderr);
     assert.match(result.stdout, /canary accepted/);
     assert.match(result.stdout, /canary delivered/);
+    assert.doesNotMatch(`${result.stdout}${result.stderr}`, /\b(?:probe|event)=/);
+    assert.equal(result.stdout.includes(probeId), false);
+    assert.equal(result.stdout.includes("evt_canary_1"), false);
     assert.doesNotMatch(`${result.stdout}${result.stderr}`, /secret-never-log/);
   } finally {
     await close(server);
@@ -226,8 +230,109 @@ test("delivery canary fails on ingest and receipt divergence without printing cr
     assert.equal(result.code, 1);
     assert.match(result.stderr, /canary delivery divergence/);
     assert.match(result.stderr, /canary_delivery_divergence/);
+    assert.doesNotMatch(`${result.stdout}${result.stderr}`, /\b(?:probe|event)=/);
+    assert.doesNotMatch(`${result.stdout}${result.stderr}`, /evt_diverged_1/);
     assert.doesNotMatch(`${result.stdout}${result.stderr}`, /divergence-secret-never-log/);
   } finally {
     await close(server);
   }
+});
+
+test("delivery canary bounds response bodies before parsing", async () => {
+  const fetchImpl = async () => new Response(
+    JSON.stringify({ event_id: "evt_oversized", padding: "x".repeat(70_000) }),
+    {
+      status: 202,
+      headers: {
+        "content-type": "application/json",
+        "content-length": "70064",
+      },
+    },
+  );
+
+  await assert.rejects(
+    runDeliveryCanary({
+      env: {
+        AXEL_CANARY_INGEST_URL: "https://ingest.invalid/canary",
+        AXEL_CANARY_RECEIPT_URL: "https://receipt.invalid/{probe_id}",
+      },
+      fetchImpl,
+      log: () => {},
+      errorLog: () => {},
+    }),
+    /canary_ingest_response_invalid/,
+  );
+});
+
+test("delivery canary aborts a stalled response-body read promptly", async () => {
+  let bodyReadStarted;
+  const started = new Promise((resolve) => {
+    bodyReadStarted = resolve;
+  });
+  const body = new ReadableStream({
+    pull() {
+      bodyReadStarted();
+      return new Promise(() => {});
+    },
+  });
+  const fetchImpl = async () => new Response(body, {
+    status: 202,
+    headers: { "content-type": "application/json" },
+  });
+  const controller = new AbortController();
+  const canary = runDeliveryCanary({
+    env: {
+      AXEL_CANARY_INGEST_URL: "https://ingest.invalid/canary",
+      AXEL_CANARY_RECEIPT_URL: "https://receipt.invalid/{probe_id}",
+    },
+    fetchImpl,
+    log: () => {},
+    errorLog: () => {},
+    signal: controller.signal,
+  });
+
+  await started;
+  const abortStartedAt = Date.now();
+  controller.abort();
+  await assert.rejects(canary, /canary_aborted/);
+  assert.ok(Date.now() - abortStartedAt < 500, "abort should not wait for the request timeout");
+});
+
+test("delivery canary cancels its receipt polling sleep promptly", async () => {
+  let receiptRequested;
+  const requested = new Promise((resolve) => {
+    receiptRequested = resolve;
+  });
+  const fetchImpl = async (_input, init = {}) => {
+    if (init.method === "POST") {
+      return new Response(JSON.stringify({ event_id: "evt_sleep_abort" }), {
+        status: 202,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    receiptRequested();
+    return new Response("[]", {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  const controller = new AbortController();
+  const canary = runDeliveryCanary({
+    env: {
+      AXEL_CANARY_INGEST_URL: "https://ingest.invalid/canary",
+      AXEL_CANARY_RECEIPT_URL: "https://receipt.invalid/{probe_id}",
+      AXEL_CANARY_POLL_INTERVAL_MS: "60000",
+    },
+    fetchImpl,
+    log: () => {},
+    errorLog: () => {},
+    signal: controller.signal,
+  });
+
+  await requested;
+  await new Promise((resolve) => setImmediate(resolve));
+  const abortStartedAt = Date.now();
+  controller.abort();
+  await assert.rejects(canary, /canary_aborted/);
+  assert.ok(Date.now() - abortStartedAt < 500, "abort should not wait for the poll interval");
 });

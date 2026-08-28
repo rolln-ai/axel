@@ -1,0 +1,55 @@
+name: Save Render Delivery Canary Settings
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_production:
+        description: Type save-worker-canary-settings after reviewing the exact worker target
+        required: true
+        type: string
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Save settings on the exact delivery worker
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: Production
+    env:
+      RENDER_OWNER_ID: ${{ vars.RENDER_OWNER_ID }}
+      RENDER_DELIVERY_WORKERS_SERVICE_ID: ${{ vars.RENDER_DELIVERY_WORKERS_SERVICE_ID }}
+      RENDER_DELIVERY_WORKERS_BLUEPRINT_ID: ${{ vars.RENDER_DELIVERY_WORKERS_BLUEPRINT_ID }}
+    permissions:
+      contents: read
+    steps:
+      - name: Require exact production confirmation
+        env:
+          PRODUCTION_CONFIRMATION: ${{ inputs.confirm_production }}
+        run: test "$PRODUCTION_CONFIRMATION" = "save-worker-canary-settings"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: .node-version
+
+      - name: Save only the eight delivery-canary settings
+        run: node scripts/sync-render-canary-settings.mjs
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          AXEL_CANARY_ENABLED: "1"
+          AXEL_CANARY_INTERVAL_MS: "900000"
+          AXEL_CANARY_INGEST_URL: ${{ secrets.AXEL_CANARY_INGEST_URL }}
+          AXEL_CANARY_INGEST_AUTH_HEADER: ${{ secrets.AXEL_CANARY_INGEST_AUTH_HEADER }}
+          AXEL_CANARY_INGEST_AUTH_VALUE: ${{ secrets.AXEL_CANARY_INGEST_AUTH_VALUE }}
+          AXEL_CANARY_RECEIPT_URL: ${{ secrets.AXEL_CANARY_RECEIPT_URL }}
+          AXEL_CANARY_RECEIPT_AUTH_HEADER: ${{ secrets.AXEL_CANARY_RECEIPT_AUTH_HEADER }}
+          AXEL_CANARY_RECEIPT_AUTH_VALUE: ${{ secrets.AXEL_CANARY_RECEIPT_AUTH_VALUE }}
+
+      - name: Record save-only completion
+        run: echo "Canary settings were saved without deploying. Use the Render UI for an exact-SHA, worker-only manual deploy."

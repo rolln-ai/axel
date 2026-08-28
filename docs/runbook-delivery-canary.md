@@ -4,10 +4,10 @@ The delivery canary sends a synthetic event through the production ingest,
 router, native queue, and Postgres destination. It does not use customer
 webhooks or a customer destination.
 
-For the initial merge only, the PR squash title or merge commit message must
-contain `[skip render]`. Render git auto-deploy is still live until the first
-protected Render workflow runs its hardener, so this guard prevents the merge
-itself from racing the migration, provisioning, and staged proof below.
+For the hotfix merge, the PR squash title or merge commit message must contain
+`[skip render]`. The worker-only save also refuses to proceed unless Render
+reports that git auto-deploy is disabled. These controls keep the merge and the
+settings update separate from the later manual, exact-commit worker deploy.
 
 ## Provision the isolated canary
 
@@ -154,9 +154,12 @@ The fixed route is active and declarative. Its binding is:
 ```
 
 After the provisioner succeeds, configure the same canary values in both the
-GitHub `Monitoring` and `Production` environments. Every `AXEL_CANARY_*` input
-is read through `secrets.*`, including URLs and header names. The writer
-password, admin DSN, and master key do not belong in GitHub:
+GitHub `Monitoring` and `Production` environments. The `Production` copies feed
+the save-only sync to the singleton `axel-delivery-workers` Render service. The
+`Monitoring` copies remain available to the manual and best-effort GitHub
+Actions fallback. Every `AXEL_CANARY_*` input is read through `secrets.*`,
+including URLs and header names. The writer password, admin DSN, and master key
+do not belong in GitHub:
 
 Create the `Monitoring` environment before setting its secrets. It must have no
 required reviewers and no wait timer; a protected approval gate would leave the
@@ -202,6 +205,16 @@ for github_environment in Monitoring Production; do
 done
 
 unset AXEL_CANARY_SOURCE_TOKEN DELIVERY_CANARY_RECEIPT_TOKEN
+
+# Bind the save to immutable Render identities. Copy the values from the
+# protected Render workspace and exact axel-delivery-workers service.
+gh variable set RENDER_OWNER_ID --env Production --body '<tea-workspace-id>'
+gh variable set RENDER_DELIVERY_WORKERS_SERVICE_ID --env Production \
+  --body '<srv-delivery-workers-id>'
+
+# Bind the owning Blueprint as a third mandatory Production identity.
+gh variable set RENDER_DELIVERY_WORKERS_BLUEPRINT_ID --env Production \
+  --body '<exs-blueprint-id>'
 ```
 
 The pinned Vercel command reads the receipt token from standard input, receives
@@ -226,8 +239,11 @@ authentication failures behind a 404 response, and prunes receipts older than
 seven days after successful reads.
 
 Keep all six `AXEL_CANARY_*` GitHub secrets identical between `Monitoring` and
-`Production`. The ingest, receipt, and Vercel automation-bypass credentials
-must all be distinct. Do not put either Axel token in a URL.
+`Production`. The Render sync sends them only to `axel-delivery-workers` and
+sets `AXEL_CANARY_ENABLED=1` and `AXEL_CANARY_INTERVAL_MS=900000`. It does not
+send canary credentials to the native delivery or pull-worker services. The
+ingest, receipt, and Vercel automation-bypass credentials must all be distinct.
+Do not put either Axel token in a URL.
 
 The Vercel deployment workflow proves the exact staged dashboard URL before it
 promotes it. The GitHub `Production` environment or repository must contain the
@@ -237,75 +253,63 @@ dashboard automation-bypass value under the exact secret name
 not create generic `AXEL_CANARY_RECEIPT_PROTECTION_BYPASS_*` GitHub secrets;
 the workflow does not read them.
 
-## First production rollout
+## Worker-only hotfix rollout
 
-Before the rollout, create two account-restricted Cloudflare runtime tokens:
+This rollout assumes the migration, isolated canary provisioner, dashboard
+receipt route, and both GitHub environments above are already complete. It does
+not change any database, ClickHouse, Cloudflare, delivery, Sentry, or master-key
+credential. It does not deploy the native delivery service, pull worker,
+ClickHouse, dashboard, or Cloudflare worker.
 
-- Delivery: Queues Edit plus Workers R2 Storage Write.
-- Dashboard: Workers R2 Storage Write only. Omit Queues, Worker Scripts,
-  Worker Routes, zones, and token-management permissions.
-
-Cloudflare's REST object API requires account-wide Workers R2 Storage Write,
-which also permits bucket management. Use a dedicated Cloudflare account if
-that residual scope is unacceptable. Do not reuse the Worker-deployment token.
-Install the delivery value as GitHub secret `CLOUDFLARE_QUEUE_API_TOKEN` and the
-dashboard value as Vercel Production variable `CLOUDFLARE_R2_API_TOKEN`, both
-through standard input. Remove the legacy dashboard Production variable
-`CLOUDFLARE_API_TOKEN` before building the new candidate. Existing Vercel
-deployments keep their captured environment until promotion, so this sequence
-does not change the live deployment in place.
-
-The production Vercel helper fails before build unless the new dashboard token
-can complete an isolated R2 PUT/GET/DELETE, cannot list Queues or Worker
-scripts, and the legacy variable is absent. No probe prints a credential,
-provider response body, or object body.
-
-After the standalone migration reaches terminal success, run the provisioner,
-install the dashboard receipt token, and configure both GitHub environments.
-Then dispatch these workflows strictly in order:
+First confirm the three protected `Production` variables identify the expected
+Render workspace, the immutable `axel-delivery-workers` service, and its owning
+Blueprint. All three bindings are mandatory. Review the full 40-character
+hotfix commit on `main`, then run only the dedicated save-only workflow:
 
 ```sh
-gh workflow run deploy-vercel.yml --ref main \
-  -f reason='First delivery-canary rollout'
-gh run list --workflow deploy-vercel.yml --branch main --event workflow_dispatch --limit 5
-gh run watch <vercel-run-id> --exit-status
-
-gh workflow run sync-render-secrets.yml --ref main -f service=all
-gh run list --workflow sync-render-secrets.yml --branch main \
+gh workflow run sync-render-canary-settings.yml --ref main \
+  -f confirm_production=save-worker-canary-settings
+gh run list --workflow sync-render-canary-settings.yml --branch main \
   --event workflow_dispatch --limit 5
-gh run watch <render-secret-sync-run-id> --exit-status
-
-gh workflow run deploy-render.yml --ref main \
-  -f reason='First delivery-canary rollout' -f service=all
-gh run list --workflow deploy-render.yml --branch main --event workflow_dispatch --limit 5
-gh run watch <render-run-id> --exit-status
-
-gh workflow run deploy-cloudflare.yml --ref main \
-  -f reason='First delivery-canary rollout' -f service=all
-gh run list --workflow deploy-cloudflare.yml --branch main --event workflow_dispatch --limit 5
-gh run watch <cloudflare-run-id> --exit-status
+gh run watch <canary-settings-run-id> --exit-status
 ```
 
-Replace each placeholder with the run ID printed by the immediately preceding
-`gh run list`. Do not sync Render secrets until Vercel reaches terminal
-success, do not deploy Render until the save-only secret sync succeeds, and do
-not dispatch Cloudflare until Render reaches terminal success. The sync is
-required on the first rollout because it installs the previously absent
-`sync:false` values on `axel-delivery-workers`; it does not deploy a service.
-All four workflows share the `production-deploy` concurrency group. GitHub
-retains only one pending run in a concurrency group, so dispatch and wait for
-each operation one at a time. Stop on any non-success result and investigate
-before continuing.
+Replace the placeholder with the run ID printed by the preceding `gh run list`.
+The workflow retrieves the exact service ID, verifies its owner, name,
+background-worker type, connected `rolln-ai/axel` repository, `main` branch,
+Node runtime, singleton count, and disabled auto-deploy state. It also verifies
+the required Blueprint identity, disabled Blueprint auto-sync, `paused` status,
+repository, branch, path, and exact worker membership. Before
+saving, it requires the
+existing direct environment to retain `DELIVERY_ROLE=worker`,
+`SENTRY_ENVIRONMENT=production`, and a nonempty `SENTRY_DSN`. It changes only
+the eight `AXEL_CANARY_*` settings, performs one save-only bulk update, and
+reads every variable back. All unrelated values must remain byte-for-byte
+unchanged. Stop on any non-success result.
+
+After the save succeeds, open the Render dashboard and select the project, then
+the `axel-delivery-workers` background worker whose immutable service ID matches
+the protected variable. Use the Render UI's manual **Deploy a specific commit**
+action and paste the reviewed full hotfix SHA from `main`. Deploy that worker
+only. Wait for the deployment to reach terminal live status and confirm the UI
+shows the exact SHA before checking runtime health.
+
+Never dispatch `.github/workflows/deploy-render.yml` for this hotfix. It enters
+the repository's database-migration and multi-service deployment path and is
+outside this worker-only change. Do not dispatch
+`.github/workflows/sync-render-secrets.yml` either; it manages unrelated runtime
+credentials. Never select an all-services option or call Render's deploy API
+for this procedure.
 
 ## Start the 72-hour observation window
 
-The `Monitoring` environment must be able to resolve `SENTRY_DSN`. Prefer an
-environment secret; an existing repository secret of the same name is also
-available as a fallback. A missing DSN does not fail the canary—the Sentry
-steps skip—so confirm this separately instead of inferring it from a green run.
+The singleton Render worker must have `SENTRY_DSN` and
+`SENTRY_ENVIRONMENT=production`. The save-only sync reads back its complete
+result, but a successful save is not a monitor check-in. Confirm the Sentry
+transport from the running worker separately.
 
-After the complete rollout sequence succeeds, pin the merged candidate SHA as
-a repository variable. Every manual and scheduled canary fails if `main` drifts
+After the exact-SHA worker deploy succeeds, pin the merged candidate SHA as a
+repository variable. Every manual and scheduled canary fails if `main` drifts
 from this value:
 
 ```sh
@@ -313,7 +317,8 @@ gh variable set AXEL_SOAK_CANDIDATE_SHA --repo rolln-ai/axel \
   --body '<full-40-character-candidate-sha>'
 ```
 
-Dispatch the first canary and wait for terminal success:
+Dispatch the GitHub fallback once and wait for terminal success. This proves the
+same controlled route independently, but it does not own the Sentry monitor:
 
 ```sh
 gh workflow run delivery-canary.yml --ref main
@@ -322,10 +327,10 @@ gh run list --workflow delivery-canary.yml --branch main \
 gh run watch <canary-run-id> --exit-status
 ```
 
-In Sentry, verify that the `production-delivery-canary` cron monitor exists and
-that the manual run recorded a successful check-in. The monitor must show the
-UTC `7,22,37,52 * * * *` schedule, a five-minute maximum runtime, and a
-10-minute check-in margin.
+The worker waits one full interval before its first check. In Sentry, verify
+that `production-delivery-canary` records `in_progress` and `ok` from the pinned
+worker release. The monitor must show a 15-minute interval, a 10-minute maximum
+runtime, and a five-minute check-in margin.
 
 Then send one controlled critical queue-lag alert through the authenticated
 dashboard route. Read both credentials from the operator environment. Do not
@@ -356,9 +361,8 @@ probe. A Sentry event, workflow success, or configured notification rule is
 not delivery proof. Do not start T0 without both confirmations and the final
 resolved state.
 
-Do not start T0 until two consecutive `schedule` event runs succeed at the
-pinned SHA after the manual proof. GitHub schedules are best-effort; any
-missing, replaced, canceled, wrong-SHA, or non-success slot during the window
-invalidates the 288-slot evidence and restarts the soak after investigation.
-Actions-only monitoring is not an accepted substitute for the proven Sentry
-route. Keep both systems under observation for the full 72 hours.
+Do not start T0 until two consecutive worker check-ins succeed at the pinned
+SHA after the manual proof. During the window, a missing, wrong-SHA, or failed
+worker check-in invalidates the observation evidence and restarts the soak after
+investigation. GitHub schedules are best-effort fallback evidence only. Keep
+the worker monitor and fallback workflow under observation for the full 72 hours.

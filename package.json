@@ -7,7 +7,7 @@
   "scripts": {
     "build": "turbo run build",
     "test": "turbo run test && pnpm test:deploy-scripts",
-    "test:deploy-scripts": "bash scripts/test/sentry-release-deploy.test.sh && bash scripts/test/deploy-render-service.test.sh && bash scripts/test/harden-render-auto-deploy.test.sh && bash scripts/test/vercel-preview-deploy.test.sh && bash scripts/test/self-host-provisioner.test.sh && bash scripts/test/self-host-compose.test.sh && bash scripts/test/docker-build-context.test.sh && node scripts/test/migrate-bigquery-nested-bindings.test.mjs && node --test scripts/test/production-workflows.test.mjs scripts/test/delivery-canary.test.mjs scripts/test/harden-cloudflare-native-queue.test.mjs scripts/test/self-host-runtime-token.test.mjs scripts/test/dashboard-r2-runtime-token.test.mjs scripts/test/provision-delivery-canary.test.mjs",
+    "test:deploy-scripts": "bash scripts/test/sentry-release-deploy.test.sh && bash scripts/test/deploy-render-service.test.sh && bash scripts/test/harden-render-auto-deploy.test.sh && bash scripts/test/vercel-preview-deploy.test.sh && bash scripts/test/self-host-provisioner.test.sh && bash scripts/test/self-host-compose.test.sh && bash scripts/test/docker-build-context.test.sh && node scripts/test/migrate-bigquery-nested-bindings.test.mjs && node --test scripts/test/production-workflows.test.mjs scripts/test/delivery-canary.test.mjs scripts/test/harden-cloudflare-native-queue.test.mjs scripts/test/self-host-runtime-token.test.mjs scripts/test/dashboard-r2-runtime-token.test.mjs scripts/test/provision-delivery-canary.test.mjs scripts/test/sync-render-canary-settings.test.mjs",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "lint:sql": "node scripts/check-clickhouse-aliases.mjs",

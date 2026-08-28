@@ -215,14 +215,15 @@ test("scheduled operations do not share the reviewer-gated deploy environment", 
   assert.match(read(".github/workflows/clickhouse-backup.yml"), /environment: Backup/);
 });
 
-test("delivery canary uses an off-minute schedule and the pinned soak candidate", () => {
+test("delivery canary workflow is a pinned manual or best-effort fallback", () => {
   const workflow = read(".github/workflows/delivery-canary.yml");
   assert.match(workflow, /cron: "7,22,37,52 \* \* \* \*"/);
   assert.match(workflow, /^  queue: max$/m);
   assert.match(workflow, /^  cancel-in-progress: false$/m);
   assert.match(workflow, /AXEL_SOAK_CANDIDATE_SHA/);
   assert.match(workflow, /test "\$\{AXEL_SOAK_CANDIDATE_SHA\}" = "\$\{GITHUB_SHA\}"/);
-  assert.match(workflow, /production-delivery-canary '' '7,22,37,52 \* \* \* \*' 5 10/);
+  assert.doesNotMatch(workflow, /sentry-cron-checkin\.sh/);
+  assert.match(workflow, /authoritative 15-minute cadence runs/);
 });
 
 test("protected production smokes require the Sentry transport probe", () => {
@@ -282,6 +283,72 @@ test("secret mutations cannot race production deploys", () => {
   assert.match(render, /Dispatch Deploy Render Services for the reviewed main commit/);
 });
 
+test("delivery canary settings target only the immutable singleton worker", () => {
+  const render = read(".github/workflows/sync-render-canary-settings.yml");
+  assert.match(render, /^  group: production-deploy$/m);
+  assert.match(render, /^    environment: Production$/m);
+  assert.match(render, /RENDER_OWNER_ID: \$\{\{ vars\.RENDER_OWNER_ID \}\}/);
+  assert.match(
+    render,
+    /RENDER_DELIVERY_WORKERS_SERVICE_ID: \$\{\{ vars\.RENDER_DELIVERY_WORKERS_SERVICE_ID \}\}/,
+  );
+  assert.match(
+    render,
+    /RENDER_DELIVERY_WORKERS_BLUEPRINT_ID: \$\{\{ vars\.RENDER_DELIVERY_WORKERS_BLUEPRINT_ID \}\}/,
+  );
+  assert.match(render, /save-worker-canary-settings/);
+  assert.match(render, /node scripts\/sync-render-canary-settings\.mjs/);
+  assert.doesNotMatch(render, /\/deploys/);
+  assert.doesNotMatch(render, /\/messages\/(pull|ack)/);
+  assert.doesNotMatch(render, /^      deploy:$/m);
+  assert.doesNotMatch(render, /inputs\.service/);
+  assert.match(render, /AXEL_CANARY_ENABLED: "1"/);
+  assert.match(render, /AXEL_CANARY_INTERVAL_MS: "900000"/);
+  for (const key of [
+    "AXEL_CANARY_INGEST_URL",
+    "AXEL_CANARY_INGEST_AUTH_HEADER",
+    "AXEL_CANARY_INGEST_AUTH_VALUE",
+    "AXEL_CANARY_RECEIPT_URL",
+    "AXEL_CANARY_RECEIPT_AUTH_HEADER",
+    "AXEL_CANARY_RECEIPT_AUTH_VALUE",
+  ]) {
+    assert.match(render, new RegExp(`${key}: \\$\\{\\{ secrets\\.${key} \\}\\}`));
+  }
+  const referencedSecrets = [...render.matchAll(/secrets\.([A-Z0-9_]+)/g)]
+    .map((match) => match[1])
+    .sort();
+  assert.deepEqual(referencedSecrets, [
+    "AXEL_CANARY_INGEST_AUTH_HEADER",
+    "AXEL_CANARY_INGEST_AUTH_VALUE",
+    "AXEL_CANARY_INGEST_URL",
+    "AXEL_CANARY_RECEIPT_AUTH_HEADER",
+    "AXEL_CANARY_RECEIPT_AUTH_VALUE",
+    "AXEL_CANARY_RECEIPT_URL",
+    "RENDER_API_KEY",
+  ]);
+  assert.doesNotMatch(
+    render,
+    /DATABASE_URL|CLICKHOUSE_|CLOUDFLARE_|DELIVERY_QUEUE_ID|EDGE_DELIVERY_QUEUE_ID|DELIVERY_SHARED_SECRET|SOURCE_LOOKUP_SHARED_SECRET|SENTRY_|CREDENTIALS_MASTER_KEY/,
+  );
+  assert.match(render, /Render UI for an exact-SHA, worker-only manual deploy/);
+});
+
+test("delivery-canary hotfix runbook permits only an exact-SHA worker UI deploy", () => {
+  const runbook = read("docs/runbook-delivery-canary.md");
+  assert.match(runbook, /gh workflow run sync-render-canary-settings\.yml --ref main/);
+  assert.match(runbook, /RENDER_DELIVERY_WORKERS_SERVICE_ID/);
+  assert.match(runbook, /All three bindings are mandatory/);
+  assert.match(runbook, /Deploy a specific commit/);
+  assert.match(runbook, /full hotfix SHA from `main`/);
+  assert.match(runbook, /Deploy that worker\s+only/);
+  assert.match(runbook, /Never dispatch `\.github\/workflows\/deploy-render\.yml`/);
+  assert.match(runbook, /Do not dispatch\s+`\.github\/workflows\/sync-render-secrets\.yml`/);
+  assert.doesNotMatch(runbook, /gh workflow run deploy-render\.yml/);
+  assert.doesNotMatch(runbook, /gh workflow run sync-render-secrets\.yml/);
+  assert.doesNotMatch(runbook, /-f service=all/);
+  assert.doesNotMatch(runbook, /for render_service/);
+});
+
 test("production mutations and provider requests have finite deadlines", () => {
   for (const file of [
     ".github/workflows/deploy-cloudflare.yml",
@@ -290,6 +357,7 @@ test("production mutations and provider requests have finite deadlines", () => {
     ".github/workflows/smoke.yml",
     ".github/workflows/sync-cloudflare-secrets.yml",
     ".github/workflows/sync-render-secrets.yml",
+    ".github/workflows/sync-render-canary-settings.yml",
     ".github/workflows/migrate-postgres-run.yml",
     ".github/workflows/migrate-postgres.yml",
     ".github/workflows/migrate-clickhouse.yml",
