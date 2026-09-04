@@ -126,6 +126,19 @@ test("production deploys are reviewed, migration-first manual promotions", () =>
   }
 });
 
+test("marketing can deploy independently while dashboard deploys remain migration-first", () => {
+  const workflow = read(".github/workflows/deploy-vercel.yml");
+  for (const step of ["Install Postgres client", "Apply pending Postgres migrations", "Stage dashboard at the reviewed commit", "Promote staged dashboard"]) {
+    assert.ok(workflow.includes(`- name: ${step}\n        if: \u0024{{ inputs.application != 'marketing' }}`), step);
+  }
+  for (const step of ["Stage marketing at the reviewed commit", "Promote staged marketing"]) {
+    assert.ok(workflow.includes(`- name: ${step}\n        if: \u0024{{ inputs.application != 'dashboard' }}`), step);
+  }
+  assert.match(workflow, /steps\.dashboard\.outputs\.url \|\| vars\.AXEL_APP_URL/);
+  assert.match(workflow, /steps\.marketing\.outputs\.url \|\| vars\.AXEL_MARKETING_URL/);
+  assert.match(workflow, /\|\| secrets\.AXEL_CANARY_RECEIPT_URL/);
+});
+
 test("production mutations are single-target and smoke even after a failed mutation", () => {
   for (const file of [
     ".github/workflows/deploy-cloudflare.yml",
@@ -503,7 +516,7 @@ test("Vercel production is staged, smoked, then promoted", () => {
   assert.match(dashboardStage, /SENTRY_RELEASE: \$\{\{ github\.sha \}\}/);
   assert.match(
     workflow,
-    /AXEL_CANARY_RECEIPT_URL: \$\{\{ steps\.dashboard\.outputs\.url \}\}\/api\/ops\/delivery-canary\/receipt\?probe=\{probe_id\}/,
+    /AXEL_CANARY_RECEIPT_URL: \$\{\{ steps\.dashboard\.outputs\.url && format\('\{0\}\/api\/ops\/delivery-canary\/receipt\?probe=\{\{probe_id\}\}', steps\.dashboard\.outputs\.url\) \|\| secrets\.AXEL_CANARY_RECEIPT_URL \}\}/,
   );
   const stagedSmoke = workflow.slice(smoke, promote);
   assert.match(stagedSmoke, /AXEL_REQUIRE_OPERATIONAL_STATUS: "1"/);

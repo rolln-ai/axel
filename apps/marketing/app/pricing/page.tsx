@@ -9,7 +9,7 @@ import { PricingEstimator } from "./PricingEstimator";
 export const metadata: Metadata = pageMetadata({
   title: "Pricing",
   description:
-    "$20/month applied as usage credit. Start free, then pay only for accepted inbound events.",
+    "Axel Cloud starts free. Pro is $20/month applied as usage credit. Self-host the Apache-2.0 application with no Axel license fee.",
   path: "/pricing",
 });
 
@@ -61,6 +61,10 @@ const tiers: Tier[] = [
 
 const faqs: Array<{ q: string; a: string }> = [
   {
+    q: "Can I self-host Axel?",
+    a: "Yes. Axel is Apache-2.0 software, including the connectors, routing, retries, and replay. Self-hosting has no Axel license fee. You run the Docker and Cloudflare infrastructure, backups, and upgrades. The small install omits ClickHouse; add it for event search and analytics. Cloud includes managed infrastructure and 30 days of searchable history.",
+  },
+  {
     q: "What counts toward usage?",
     a: "Only accepted inbound events are metered. Rejected requests do not count.",
   },
@@ -90,7 +94,7 @@ export default function PricingPage() {
 
       <section className="hero pricingHero">
         <div className="container">
-          <span className="kicker">Pricing</span>
+          <span className="kicker">Axel Cloud pricing</span>
           <h1 className="heroTitle pricingTitle">
             Free to test. <em>$20 applied to usage</em> when you go live.
           </h1>
@@ -131,6 +135,24 @@ export default function PricingPage() {
       </section>
 
       <PricingEstimator />
+
+      <section className="feature" id="self-hosting">
+        <div className="container">
+          <div className="sectionHead">
+            <span className="kicker">Open source, managed for you</span>
+            <h2>Pay us to run it. Or run it yourself.</h2>
+            <p className="lede">
+              Cloud runs the same application code available under Apache-2.0. Your subscription
+              covers managed infrastructure, updates, delivery monitoring, and searchable history.
+              Self-hosting has no Axel license fee; you operate the stack and pay your providers.
+            </p>
+            <div className="heroActions">
+              <a className="btn" href="https://app.axelapp.ai/signup">Start on Axel Cloud <span className="arrow">→</span></a>
+              <Link className="btn ghost" href="/docs#self-hosting">Self-hosting guide</Link>
+            </div>
+          </div>
+        </div>
+      </section>
 
       <section className="feature">
         <div className="container">

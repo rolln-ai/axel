@@ -3,6 +3,15 @@ name: Deploy Vercel Applications
 on:
   workflow_dispatch:
     inputs:
+      application:
+        description: Applications to deploy (marketing does not use Postgres)
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - dashboard
+          - marketing
       reason:
         description: Reviewed release or incident change being deployed
         required: true
@@ -61,11 +70,13 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Install Postgres client
+        if: ${{ inputs.application != 'marketing' }}
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
       - name: Mark the production mutation attempt
         id: mutation_attempt
         run: echo "attempted=true" >> "$GITHUB_OUTPUT"
       - name: Apply pending Postgres migrations
+        if: ${{ inputs.application != 'marketing' }}
         run: ./scripts/run-migrations.sh
         env:
           DATABASE_URL: ${{ secrets.DATABASE_MIGRATION_URL }}
@@ -81,6 +92,7 @@ jobs:
           DATABASE_MIGRATION_ROLE_REQUIRED: "1"
 
       - name: Stage dashboard at the reviewed commit
+        if: ${{ inputs.application != 'marketing' }}
         id: dashboard
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
@@ -94,6 +106,7 @@ jobs:
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
       - name: Stage marketing at the reviewed commit
+        if: ${{ inputs.application != 'dashboard' }}
         id: marketing
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
@@ -109,8 +122,8 @@ jobs:
       - name: Smoke exact deployment URLs
         run: bash scripts/smoke.sh
         env:
-          AXEL_MARKETING_URL: ${{ steps.marketing.outputs.url }}
-          AXEL_APP_URL: ${{ steps.dashboard.outputs.url }}
+          AXEL_MARKETING_URL: ${{ steps.marketing.outputs.url || vars.AXEL_MARKETING_URL || 'https://axelapp.ai' }}
+          AXEL_APP_URL: ${{ steps.dashboard.outputs.url || vars.AXEL_APP_URL || 'https://app.axelapp.ai' }}
           AXEL_INGEST_URL: ${{ vars.AXEL_INGEST_URL || 'https://ingest.axelapp.ai' }}
           AXEL_DELIVERY_URL: ${{ vars.AXEL_DELIVERY_URL || 'https://axel-delivery-native.onrender.com' }}
           VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
@@ -123,13 +136,14 @@ jobs:
           AXEL_CANARY_INGEST_AUTH_VALUE: ${{ secrets.AXEL_CANARY_INGEST_AUTH_VALUE }}
           # Query the staged dashboard itself. On the first rollout, the old
           # production alias does not have the receipt endpoint yet.
-          AXEL_CANARY_RECEIPT_URL: ${{ steps.dashboard.outputs.url }}/api/ops/delivery-canary/receipt?probe={probe_id}
+          AXEL_CANARY_RECEIPT_URL: ${{ steps.dashboard.outputs.url && format('{0}/api/ops/delivery-canary/receipt?probe={{probe_id}}', steps.dashboard.outputs.url) || secrets.AXEL_CANARY_RECEIPT_URL }}
           AXEL_CANARY_RECEIPT_AUTH_HEADER: ${{ secrets.AXEL_CANARY_RECEIPT_AUTH_HEADER }}
           AXEL_CANARY_RECEIPT_AUTH_VALUE: ${{ secrets.AXEL_CANARY_RECEIPT_AUTH_VALUE }}
           AXEL_CANARY_RECEIPT_PROTECTION_BYPASS_HEADER: x-vercel-protection-bypass
           AXEL_CANARY_RECEIPT_PROTECTION_BYPASS_VALUE: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET_DASHBOARD }}
 
       - name: Promote staged dashboard
+        if: ${{ inputs.application != 'marketing' }}
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
@@ -142,6 +156,7 @@ jobs:
           pnpm exec vercel promote "$STAGED_URL" --yes
 
       - name: Promote staged marketing
+        if: ${{ inputs.application != 'dashboard' }}
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}

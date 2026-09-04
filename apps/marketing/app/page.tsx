@@ -92,8 +92,8 @@ export default function Page() {
         <div className="container heroInner">
           <div>
             <span className="heroBadge">
-              <strong>New</strong>
-              Replay a stored webhook from the dashboard or CLI
+              <strong>Open source</strong>
+              Run it yourself, or let Axel Cloud run it for you
             </span>
             <h1 className="heroTitle">
               Capture webhooks and deliver them to <em>your data stack</em>.
@@ -105,8 +105,9 @@ export default function Page() {
             </p>
             <div className="heroActions">
               <a className="btn" href="https://app.axelapp.ai/signup">
-                Send your first webhook <span className="arrow">→</span>
+                Start on Axel Cloud <span className="arrow">→</span>
               </a>
+              <a className="btn ghost" href="/docs#self-hosting">Self-host Axel</a>
             </div>
             <div className="heroMeta">
               <span className="dot" aria-hidden="true" />
@@ -350,12 +351,12 @@ export default function Page() {
           <div className="ctaInner">
             <h2>Send one webhook. Keep its delivery history.</h2>
             <p>
-              Capture your first webhook in minutes. Sources, routes, destinations, replay, and
-              failure handling all live in one dashboard.
+              Use Axel Cloud and leave the infrastructure, updates, and delivery monitoring
+              to us. Start free, then upgrade as your traffic grows.
             </p>
             <div className="heroActions">
               <a className="btn" href="https://app.axelapp.ai/signup">
-                Send your first webhook <span className="arrow">→</span>
+                Start on Axel Cloud <span className="arrow">→</span>
               </a>
               <a className="btn ghost" href="/docs">
                 Read the docs

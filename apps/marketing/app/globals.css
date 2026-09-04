@@ -2812,21 +2812,6 @@ section.tiersBand {
     animation-delay: calc(var(--i, 0) * 40ms);
   }
 
-  /* Mid-page surfaces fade up as they enter the viewport.
-     Scroll-driven, no JS; older browsers simply render them static. */
-  @supports (animation-timeline: view()) {
-    .sectionHead,
-    .statGrid,
-    .dashMock.standalone,
-    .pipelineMock,
-    .routeMock,
-    .sourceMock,
-    .ctaInner {
-      animation: fadeUp 0.6s ease-out both;
-      animation-timeline: view();
-      animation-range: entry 5% entry 40%;
-    }
-  }
 }
 
 @media (hover: hover) {
@@ -2839,7 +2824,7 @@ section.tiersBand {
   }
 }
 
-/* Print / static capture: never leave scroll-revealed content hidden. */
+/* Keep printed charts and headings static. */
 @media print {
   * {
     animation: none !important;
