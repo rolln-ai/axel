@@ -48,6 +48,7 @@
       "ip-address": "10.3.1",
       "postcss": "8.5.23",
       "browserslist": "4.28.8",
+      "path-to-regexp@>=4.0.0 <6.3.0": "6.3.0",
       "path-to-regexp@>=8.0.0 <8.4.0": "8.4.0",
       "fast-uri": "4.1.4",
       "minimatch@>=10.0.0 <10.2.3": "10.2.3",
