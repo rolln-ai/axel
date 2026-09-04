@@ -8,6 +8,20 @@ export interface ClickhouseQueryable {
   ): Promise<{ rows: T[] }>;
 }
 
+/** Keep machine-readable failures without retaining SQL or provider response bodies. */
+export class ClickhouseQueryError extends Error {
+  constructor(readonly status: number, readonly code: number | null) {
+    super(`ClickHouse query failed (${status})`);
+    this.name = "ClickhouseQueryError";
+  }
+}
+
+function exceptionCode(response: Response): number | null {
+  const raw = response.headers.get("x-clickhouse-exception-code");
+  // Never retain arbitrary header text in errors or telemetry.
+  return raw && /^[1-9]\d{0,5}$/.test(raw) ? Number(raw) : null;
+}
+
 export function hasClickhouseUrl(): boolean {
   return Boolean(process.env.CLICKHOUSE_URL);
 }
@@ -112,9 +126,10 @@ export function clickhouse(options?: {
             },
           });
 
-          if (!res.ok) {
+          const code = exceptionCode(res);
+          if (!res.ok || code !== null) {
             await res.body?.cancel().catch(() => undefined);
-            const error = new Error(`ClickHouse query failed (${res.status})`);
+            const error = new ClickhouseQueryError(res.status, code);
             if (attempt < CLICKHOUSE_QUERY_ATTEMPTS && isTransientPlatformHttpError(error)) {
               await sleep(CLICKHOUSE_QUERY_RETRY_BASE_DELAY_MS * attempt);
               continue;

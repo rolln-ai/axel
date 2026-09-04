@@ -1,7 +1,7 @@
 # ADR-0001 — Architecture Baseline
 
 Date: 2026-04-30
-Status: Accepted
+Status: Historical. Deployment topology superseded by [ADR-0002](adr-0002-current-runtime.md).
 ## Context
 
 Axel must capture webhook bursts (30k events in <5s) and deliver to multiple destination types without dropping events. The architectural commitment is: ingest never blocks; everything after ingest is async; raw payload is the source of truth; system tolerates duplicates.

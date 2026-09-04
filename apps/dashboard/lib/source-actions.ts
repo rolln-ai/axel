@@ -11,7 +11,6 @@ import {
   requireEdgeSourceFence,
 } from "./edge-invalidation";
 import { runDashboardPullSync } from "./pull-sync";
-import { entityNameError } from "./entity-name";
 import {
   validateSubjectKeyPaths,
 } from "@axel/shared";
@@ -23,17 +22,6 @@ import type { ActionState } from "./action-data";
 
 // requireWritableRole / requireActiveWorkspace / replayBillingGateError now live
 // in ./auth-guards so every server-action file applies the same gates.
-
-function _clampInt(input: string | null, fallback: number, max: number): number {
-  if (!input) return fallback;
-  const value = Number.parseInt(input, 10);
-  if (!Number.isFinite(value) || value <= 0) return fallback;
-  return Math.min(value, max);
-}
-
-function _isValidSourceName(name: string): boolean {
-  return entityNameError(name) === null;
-}
 
 /**
  * Fence hosted authorization, perform the database mutation, then publish a

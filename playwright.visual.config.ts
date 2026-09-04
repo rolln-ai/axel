@@ -1,4 +1,5 @@
 import { defineConfig } from "@playwright/test";
+import { origins, qaPortBase } from "./tests/visual/origins";
 
 const isCi = Boolean(process.env.CI);
 
@@ -39,14 +40,14 @@ export default defineConfig({
   ],
   webServer: [
     {
-      command: "pnpm --filter @axel/marketing exec next start -H 127.0.0.1 -p 34100",
-      url: "http://127.0.0.1:34100",
+      command: `pnpm --filter @axel/marketing exec next start -H 127.0.0.1 -p ${qaPortBase}`,
+      url: origins.marketing,
       timeout: 120_000,
       reuseExistingServer: false,
     },
     {
-      command: "pnpm --filter @axel/dashboard exec next start -H 127.0.0.1 -p 34101",
-      url: "http://127.0.0.1:34101/login",
+      command: `pnpm --filter @axel/dashboard exec next start -H 127.0.0.1 -p ${qaPortBase + 1}`,
+      url: `${origins.dashboard}/login`,
       timeout: 120_000,
       reuseExistingServer: false,
     },

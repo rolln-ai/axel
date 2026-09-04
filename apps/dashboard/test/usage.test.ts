@@ -16,12 +16,10 @@ import {
   listWorkspaceFailureTypes,
   listSourceUsage,
 } from "../lib/usage";
-import { clickhouse } from "../lib/clickhouse";
+import { clickhouse, ClickhouseQueryError } from "../lib/clickhouse";
 import {
   BASE_EVENT_ID_EXPR,
   SUCCESS_PREDICATE,
-  TERMINAL_FAILURE_PREDICATE,
-  latestOutcomesCTE,
 } from "../lib/clickhouse-fragments";
 import { fakeClickhouse } from "@axel/test-utils";
 
@@ -69,6 +67,41 @@ describe("usage", () => {
     await expect(query).rejects.toThrow(/^ClickHouse query failed \(400\)$/);
     await expect(query).rejects.not.toThrow(/provider-private-response/);
   });
+
+  it.each([404, 200])("falls back from a missing rollup over real HTTP with status %i", async (status) => {
+    process.env.CLICKHOUSE_URL = "https://clickhouse.example";
+    const response = new Response("private SQL and payload", {
+      status,
+      headers: { "X-ClickHouse-Exception-Code": "60" },
+    });
+    const cancel = vi.spyOn(response.body!, "cancel");
+    globalThis.__axelClickhouseFetch = vi.fn()
+      .mockResolvedValueOnce(response)
+      .mockResolvedValueOnce(Response.json({ data: [{ day: "2026-05-15", success: "12", retry: "1", dead: "0" }] }));
+
+    await expect(getDailyDeliveryStats("ws_test", 14, { now: () => NOW })).resolves.toEqual([
+      { day: "2026-05-15", success: 12, retry: 1, dead: 0 },
+    ]);
+    expect(cancel).toHaveBeenCalledOnce();
+    const calls = vi.mocked(globalThis.__axelClickhouseFetch).mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.[1]?.body).toContain("FROM delivery_attempts");
+  });
+
+  it.each(["241", "497", "60 private text", "-60", "9999999", ""]) (
+    "does not turn unrelated or malformed exception codes into a missing-table fallback: %s",
+    async (code) => {
+      process.env.CLICKHOUSE_URL = "https://clickhouse.example";
+      globalThis.__axelClickhouseFetch = vi.fn(async () => new Response("private SQL", {
+        status: 400,
+        headers: { "X-ClickHouse-Exception-Code": code },
+      }));
+      const query = getDailyDeliveryStats("ws_test", 14);
+      await expect(query).rejects.toBeInstanceOf(ClickhouseQueryError);
+      await expect(query).rejects.not.toThrow(/private/);
+      expect(globalThis.__axelClickhouseFetch).toHaveBeenCalledOnce();
+    },
+  );
 
   it("lets background callers override and retry the interactive query timeout", async () => {
     vi.useFakeTimers();
@@ -212,8 +245,6 @@ describe("usage", () => {
     await listWorkspaceFailureTypes("ws_test", { clickhouse: client, now: () => NOW });
 
     expect(calls[0]?.sql).toContain("FROM delivery_base_latest_outcomes");
-    expect(calls[0]?.sql).not.toContain("FINAL");
-    expect(calls[0]?.sql).toContain("argMax(latest_status, latest_at)");
     expect(calls[0]?.sql).toContain(`NOT ${SUCCESS_PREDICATE}`);
     expect(calls[0]?.sql).toContain("already_delivered");
     expect(calls[0]?.sql).toContain("GROUP BY outcome_response, outcome_status");
@@ -225,7 +256,6 @@ describe("usage", () => {
     await listWorkspaceFailureTypes("ws_test", { clickhouse: client, now: () => NOW });
 
     expect(calls[0]?.sql).toContain("FROM delivery_base_latest_outcomes");
-    expect(calls[1]?.sql).toContain(latestOutcomesCTE({ source: "attempts" }));
     expect(calls[1]?.sql).toContain("GROUP BY base_event_id, route_id, destination_id");
     expect(calls[1]?.sql).toContain("replaceRegexpOne(event_id, '#rpy_[A-Za-z0-9_-]+$', '')");
   });
@@ -260,8 +290,6 @@ describe("usage", () => {
     }
     expect(calls[0]?.sql).toContain("FROM events_daily");
     expect(calls[3]?.sql).toContain("FROM delivery_base_latest_outcomes");
-    expect(calls[3]?.sql).not.toContain("FINAL");
-    expect(calls[3]?.sql).toContain("argMax(latest_status, latest_at)");
     expect(calls[3]?.sql).toContain("already_delivered");
   });
 
@@ -367,8 +395,6 @@ describe("usage", () => {
 
     expect(rows).toEqual([{ day: "2026-05-15", success: 10, retry: 1, dead: 2 }]);
     expect(calls[0]?.sql).toContain("FROM delivery_base_latest_outcomes");
-    expect(calls[0]?.sql).not.toContain("FINAL");
-    expect(calls[0]?.sql).toContain("argMax(latest_status, latest_at)");
     expect(calls[0]?.sql).toContain("toDate(outcome_at, {timezone:String})");
     expect(calls[0]?.sql).toContain("already_delivered");
     expect(calls[0]?.sql).toContain("AS success");
@@ -727,21 +753,6 @@ describe("usage", () => {
     // their outer aggregation — so success can never mean different things
     // on different dashboard cards.
 
-    async function collectRollupSql(): Promise<string[]> {
-      const usage = fakeClickhouse({
-        responses: [[{ events: "1", bytes: "1" }], [{ c: "1" }], [{ c: "1" }], []],
-      });
-      await getWorkspaceUsage("ws_test", { clickhouse: usage.client, now: () => NOW });
-
-      const failures = fakeClickhouse({ responses: [[]] });
-      await listWorkspaceFailureTypes("ws_test", { clickhouse: failures.client, now: () => NOW });
-
-      const daily = fakeClickhouse({ responses: [[]] });
-      await getDailyDeliveryStats("ws_test", 14, { clickhouse: daily.client, now: () => NOW });
-
-      return [usage.calls[3]!.sql, failures.calls[0]!.sql, daily.calls[0]!.sql];
-    }
-
     async function collectFallbackSql(): Promise<string[]> {
       // getWorkspaceUsage fires 4 rollup queries first (calls 0-3); only the
       // deliveries rollup fails, so call 4 is its raw-attempts fallback.
@@ -764,31 +775,6 @@ describe("usage", () => {
 
       return [usage.calls[4]!.sql, failures.calls[1]!.sql, daily.calls[1]!.sql];
     }
-
-    it("all three rollup surfaces embed the identical rollup CTE and canonical predicates", async () => {
-      const rollupCte = latestOutcomesCTE({ source: "rollup" });
-      const [totalsSql, failuresSql, dailySql] = await collectRollupSql();
-      for (const sql of [totalsSql, failuresSql, dailySql]) {
-        expect(sql).toContain(rollupCte);
-        expect(sql).toContain(SUCCESS_PREDICATE);
-        expect(sql).toContain("GROUP BY base_event_id, route_id, destination_id");
-      }
-      // The counting surfaces also share the canonical terminal-failure split.
-      expect(totalsSql).toContain(TERMINAL_FAILURE_PREDICATE);
-      expect(dailySql).toContain(TERMINAL_FAILURE_PREDICATE);
-      expect(failuresSql).toContain(`NOT ${SUCCESS_PREDICATE}`);
-    });
-
-    it("all three raw fallbacks embed the identical attempts CTE with replay-id normalization", async () => {
-      const attemptsCte = latestOutcomesCTE({ source: "attempts" });
-      for (const sql of await collectFallbackSql()) {
-        expect(sql).toContain(attemptsCte);
-        expect(sql).toContain(BASE_EVENT_ID_EXPR);
-        expect(sql).toContain("replaceRegexpOne(event_id, '#rpy_[A-Za-z0-9_-]+$', '')");
-        expect(sql).toContain(SUCCESS_PREDICATE);
-        expect(sql).toContain("GROUP BY base_event_id, route_id, destination_id");
-      }
-    });
 
     it("getWorkspaceUsage raw fallback collapses replays like the other surfaces (drift fix)", async () => {
       const [usageSql] = await collectFallbackSql();

@@ -361,13 +361,21 @@ a successful save is not a monitor check-in. Confirm the Sentry transport from
 the running worker separately.
 
 After the exact-SHA worker deploy succeeds, pin the merged candidate SHA as a
-repository variable. Every manual and scheduled canary fails if `main` drifts
-from this value:
+repository variable. The independent observation check fails if `main` drifts
+from this value. Delivery monitoring still runs so release drift cannot hide a
+production delivery failure. With no candidate pinned, the workflow runs only
+delivery monitoring; that success is not evidence of a completed release soak:
 
 ```sh
 gh variable set AXEL_SOAK_CANDIDATE_SHA --repo rolln-ai/axel \
   --body '<full-40-character-candidate-sha>'
 ```
+
+After completing or abandoning the observation, remove the repository variable
+with `gh variable delete AXEL_SOAK_CANDIDATE_SHA --repo rolln-ai/axel`.
+Changing the pin starts a new observation window; it does not preserve earlier
+soak evidence. The standalone protected Production Smoke workflow still
+requires the pin.
 
 Dispatch the GitHub fallback once and wait for terminal success. This proves the
 same controlled route independently, but it does not own the Sentry monitor:

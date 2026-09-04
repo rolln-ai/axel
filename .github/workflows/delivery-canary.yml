@@ -30,12 +30,6 @@ jobs:
         with:
           node-version-file: .node-version
 
-      - name: Require the pinned soak candidate
-        env:
-          AXEL_SOAK_CANDIDATE_SHA: ${{ vars.AXEL_SOAK_CANDIDATE_SHA }}
-        run: |
-          test "${AXEL_SOAK_CANDIDATE_SHA}" = "${GITHUB_SHA}"
-
       - name: Prove production delivery
         run: node scripts/delivery-canary.mjs
         env:
@@ -47,3 +41,22 @@ jobs:
           AXEL_CANARY_RECEIPT_AUTH_VALUE: ${{ secrets.AXEL_CANARY_RECEIPT_AUTH_VALUE }}
           AXEL_CANARY_TIMEOUT_MS: "180000"
           AXEL_CANARY_POLL_INTERVAL_MS: "5000"
+
+  soak-candidate:
+    name: Verify active observation candidate
+    # Monitoring always runs. An active release observation separately fails
+    # on main drift, without suppressing the delivery proof above.
+    if: ${{ github.ref == 'refs/heads/main' && vars.AXEL_SOAK_CANDIDATE_SHA != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    permissions:
+      contents: read
+    steps:
+      - name: Require the pinned soak candidate
+        env:
+          AXEL_SOAK_CANDIDATE_SHA: ${{ vars.AXEL_SOAK_CANDIDATE_SHA }}
+        run: |
+          if ! test "${AXEL_SOAK_CANDIDATE_SHA}" = "${GITHUB_SHA}"; then
+            echo "::error::Main changed during the active release observation. Review and restart the observation window."
+            exit 1
+          fi

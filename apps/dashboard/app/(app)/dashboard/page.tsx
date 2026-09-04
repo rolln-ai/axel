@@ -184,7 +184,7 @@ export default async function DashboardPage({
       />
 
       <DashboardFreshnessGate>
-        <Suspense fallback={<KpiRowSkeleton />}>
+        <Suspense fallback={<KpiLoadingSurface />}>
           <KpiRow
             workspaceId={workspaceId}
             timezone={timezone}
@@ -195,7 +195,7 @@ export default async function DashboardPage({
 
         {usageOn ? (
           <section className="mt-6" aria-label={`Volume — last ${chartDays} days`}>
-            <Suspense fallback={<ChartSkeleton />}>
+            <Suspense fallback={<PrimaryChartLoadingSurface />}>
               <ChartSection
                 workspaceId={workspaceId}
                 timezone={timezone}
@@ -209,7 +209,7 @@ export default async function DashboardPage({
         )}
 
         <div className="mt-6 flex flex-col gap-6">
-          <Panel title="Top sources" link={{ href: "/sources", label: "All sources" }}>
+          <Panel title="Top sources this month" link={{ href: "/sources", label: "All sources" }}>
             <Suspense fallback={<ListSkeleton rows={6} />}>
               <TopSourcesSection workspaceId={workspaceId} canMutate={canMutate} />
             </Suspense>
@@ -915,14 +915,6 @@ function ReasonActions({ row }: { row: UnresolvedReasonRow }) {
 }
 
 // --- Skeletons ------------------------------------------------------------ //
-
-function KpiRowSkeleton() {
-  return <KpiLoadingSurface />;
-}
-
-function ChartSkeleton() {
-  return <PrimaryChartLoadingSurface />;
-}
 
 function ListSkeleton({ rows }: { rows: number }) {
   return (

@@ -5,7 +5,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "echo 'e2e is typecheck-only — no build artifacts' && exit 0",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },

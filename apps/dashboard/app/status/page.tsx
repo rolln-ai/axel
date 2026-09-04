@@ -11,6 +11,7 @@
  */
 
 import {
+  combineHealthStatus,
   describeStatus,
   getUptimeHistory,
   listComponentHealth,
@@ -70,10 +71,8 @@ async function probe(url: string | null): Promise<Omit<ComponentStatus, "name">>
   const target = url.replace(/\/$/, "") + "/health";
   const started = Date.now();
   try {
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 4000);
-    const response = await fetch(target, { method: "GET", cache: "no-store", signal: ac.signal });
-    clearTimeout(timer);
+    const response = await fetch(target, { method: "GET", redirect: "manual", cache: "no-store", signal: AbortSignal.timeout(4000) });
+    await response.body?.cancel().catch(() => undefined);
     const ok = response.ok;
     return {
       url: target,
@@ -126,49 +125,35 @@ export default async function StatusPage() {
   const uptime = uptimeSettled.status === "fulfilled" ? uptimeSettled.value : new Map();
   const heartbeatOverall: HealthStatus =
     healthSettled.status === "fulfilled" ? overallStatus(heartbeats) : "red";
-  const allProbesUp = checks.every((c) => c.ok);
-  const someProbesDown = checks.some((c) => !c.ok);
-  const probesOverall: "operational" | "degraded" | "outage" = allProbesUp
-    ? "operational"
-    : someProbesDown && checks.some((c) => c.ok)
-    ? "degraded"
-    : "outage";
-  // Final verdict combines both. Worst of the two wins so the
-  // banner can't claim "operational" when heartbeats are red.
-  const overall: "operational" | "degraded" | "outage" =
-    heartbeatOverall === "red" || probesOverall === "outage"
-      ? "outage"
-      : heartbeatOverall === "yellow" || probesOverall === "degraded"
-      ? "degraded"
-      : "operational";
-  const outageMessage =
-    probesOverall === "outage"
-      ? "Major outage — ingest and delivery endpoints are unreachable"
-      : "Processing disruption — an asynchronous worker is not reporting";
+  const overall = combineHealthStatus(checks, heartbeatOverall);
+  const allProbesDown = checks.length > 0 && checks.every((check) => !check.ok);
+  const outageMessage = allProbesDown
+    ? "Ingest and delivery health checks failed"
+    : "Processing disruption: a worker is down or stalled";
 
   return (
     <main className="mx-auto min-h-screen max-w-3xl px-6 py-12">
       <header className="mb-8 space-y-2">
-        <h1 className="text-3xl font-semibold tracking-tight">Axel Status</h1>
+        <h1 className="text-3xl font-semibold tracking-tight">Axel status</h1>
         <p className="text-sm text-muted-foreground">
-          Live synthetic checks against ingest + delivery. Refresh to re-probe.
+          Current endpoint checks and worker heartbeats. Refresh to check again.
         </p>
       </header>
 
       <section
         className={`mb-6 rounded-lg border px-5 py-4 ${
           overall === "operational"
-            ? "border-green-300 bg-green-50 text-green-900 dark:border-green-700 dark:bg-green-950 dark:text-green-100"
+            ? "border-border bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
             : overall === "degraded"
-            ? "border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100"
-            : "border-red-300 bg-red-50 text-red-900 dark:border-red-700 dark:bg-red-950 dark:text-red-100"
+            ? "border-border bg-amber-500/10 text-amber-600 dark:text-amber-400"
+            : "border-border bg-destructive/10 text-destructive"
         }`}
       >
         <p className="text-base font-semibold">
           {overall === "operational"
             ? "All systems operational"
             : overall === "degraded"
-            ? "Partial outage — some components are unreachable"
+            ? "Some checks are unavailable or delayed"
             : outageMessage}
         </p>
         <p className="mt-1 text-xs">
@@ -187,18 +172,18 @@ export default async function StatusPage() {
           {checks.map((c) => (
             <li
               key={c.name}
-              className="flex items-center justify-between border-b border-border px-5 py-3 last:border-b-0"
+              className="flex flex-col gap-2 border-b border-border px-5 py-3 last:border-b-0 sm:flex-row sm:items-center sm:justify-between"
             >
-              <div className="flex flex-col gap-1">
+              <div className="flex min-w-0 flex-col gap-1">
                 <span className="text-sm font-medium text-foreground">{c.name}</span>
-                <small className="font-mono text-[11px] text-muted-foreground">{c.url}</small>
+                <small className="break-all font-mono text-[11px] text-muted-foreground">{c.url}</small>
               </div>
-              <div className="flex flex-col items-end gap-1">
+              <div className="flex shrink-0 flex-col items-start gap-1 sm:items-end">
                 <span
                   className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
                     c.ok
-                      ? "bg-green-500/15 text-green-700 dark:text-green-400"
-                      : "bg-red-500/15 text-red-700 dark:text-red-400"
+                      ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                      : "bg-destructive/10 text-destructive"
                   }`}
                 >
                   {c.ok ? "up" : "down"}
@@ -221,8 +206,8 @@ export default async function StatusPage() {
         </h2>
         {heartbeats.length === 0 ? (
           <p className="px-5 py-3 text-xs text-muted-foreground">
-            No heartbeat data available — either no workers have started since the table
-            was created, or the dashboard can't reach the database.
+            Worker health is unavailable. Workers may not have reported yet, or the
+            dashboard cannot reach the database.
           </p>
         ) : (
           <ul>
@@ -234,8 +219,8 @@ export default async function StatusPage() {
                   key={h.component}
                   className="flex flex-col gap-2 border-b border-border px-5 py-3 last:border-b-0"
                 >
-                  <div className="flex items-center justify-between">
-                    <div className="flex flex-col gap-1">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex min-w-0 flex-col gap-1">
                       <span className="text-sm font-medium text-foreground">{h.component}</span>
                       <small className="text-[11px] text-muted-foreground">
                         {h.last_seen
@@ -243,20 +228,20 @@ export default async function StatusPage() {
                           : "no heartbeat yet"}
                       </small>
                     </div>
-                    <div className="flex flex-col items-end gap-1">
+                    <div className="flex shrink-0 flex-col items-start gap-1 sm:items-end">
                       <span
                         className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
                           h.status === "green"
-                            ? "bg-green-500/15 text-green-700 dark:text-green-400"
+                            ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
                             : h.status === "yellow"
-                            ? "bg-amber-500/15 text-amber-700 dark:text-amber-400"
+                            ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
                             : h.status === "red"
-                            ? "bg-red-500/15 text-red-700 dark:text-red-400"
+                            ? "bg-destructive/10 text-destructive"
                             : "bg-muted text-muted-foreground"
                         }`}
                         title={describeStatus(h.status)}
                       >
-                        {h.status}
+                        {describeStatus(h.status)}
                       </span>
                       <small className="text-[11px] text-muted-foreground">
                         {label ?? `expected every ${h.expected_interval_seconds}s`}

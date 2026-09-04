@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
+import { origins } from "./origins";
 
 type AppName = "marketing" | "dashboard";
 
@@ -9,11 +10,6 @@ type VisualRoute = {
   name: string;
   path: string;
   minTextLength?: number;
-};
-
-const origins: Record<AppName, string> = {
-  marketing: "http://127.0.0.1:34100",
-  dashboard: "http://127.0.0.1:34101",
 };
 
 const routes: VisualRoute[] = [
@@ -184,4 +180,21 @@ function formatConsoleError(message: string, url: string): string {
 
 function isIgnorableConsoleError(message: string): boolean {
   return /favicon\.ico/.test(message);
+}
+
+for (const theme of ["light", "dark"]) {
+  test(`status remains readable in ${theme} mode`, async ({ page }, testInfo) => {
+    await page.addInitScript((selectedTheme) => {
+      window.localStorage.setItem("theme", selectedTheme);
+    }, theme);
+    await page.goto(`${origins.dashboard}/status`);
+    await expect(page.locator("html")).toHaveClass(new RegExp(`\\b${theme}\\b`));
+    await expect(page.getByRole("heading", { name: "Axel status", exact: true })).toBeVisible();
+    const state = await readPageState(page);
+    expect(state.scrollWidth).toBeLessThanOrEqual(state.viewportWidth + 2);
+    const screenshot = path.join("artifacts", "visual-smoke", testInfo.project.name, `dashboard-status-${theme}.png`);
+    await mkdir(path.dirname(screenshot), { recursive: true });
+    await page.screenshot({ path: screenshot, fullPage: true });
+    await testInfo.attach(`status-${theme}`, { path: screenshot, contentType: "image/png" });
+  });
 }

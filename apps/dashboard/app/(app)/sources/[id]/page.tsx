@@ -26,7 +26,6 @@ import {
 import { TransientModeEditor } from "./TransientModeEditor";
 import { PullSourceSyncPanel } from "./PullSourceSyncPanel";
 import { SendTestEventDialog } from "./SendTestEventDialog";
-import { type SourceTab, type SourceTabKey } from "./SourceTabs";
 import { SourceTokenPanel } from "./SourceTokenPanel";
 import { db } from "../../../../lib/db";
 import {
@@ -104,6 +103,8 @@ interface PullSyncRunRow {
   error_message: string | null;
 }
 
+type SourceTabKey = "overview" | "contract" | "ingest" | "sync" | "settings";
+
 const TAB_KEYS: SourceTabKey[] = ["overview", "contract", "ingest", "sync", "settings"];
 
 function resolveActiveTab(raw: string | string[] | undefined): SourceTabKey {
@@ -158,7 +159,7 @@ export default async function SourceDetailPage({
         LIMIT 1`,
       [id, workspaceId],
     ),
-    listUnresolvedDriftForSource(workspaceId, id),
+    activeTab === "contract" ? listUnresolvedDriftForSource(workspaceId, id) : Promise.resolve([]),
   ]);
   const source = sourceResult.rows[0];
   if (!source) notFound();
@@ -172,20 +173,6 @@ export default async function SourceDetailPage({
 
   const ingestUrl = `${resolveIngestBaseUrl(process.env)}/in/${source.id}`;
 
-  const _tabs: SourceTab[] = [
-    { key: "overview", label: "Overview" },
-    {
-      key: "contract",
-      label: "Contract",
-      ...(driftRows.length > 0
-        ? { hint: `${driftRows.length} drift`, intent: "warning" as const }
-        : {}),
-    },
-    isWebhook
-      ? { key: "ingest" as const, label: "Ingest" }
-      : { key: "sync" as const, label: "Sync" },
-    { key: "settings", label: "Settings" },
-  ];
 
   return (
     <>
@@ -195,7 +182,6 @@ export default async function SourceDetailPage({
         canMutate={canMutate}
       />
 
-      {/* SourceTabs replaced by the AppNav sidebar subnav. */}
 
       {resolvedTab === "overview" ? (
         <OverviewTab

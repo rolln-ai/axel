@@ -1,7 +1,7 @@
 import "server-only";
 import pg from "pg";
 import { controlPlanePgSslOption } from "@axel/shared";
-import { isTransientPostgresError } from "@axel/observability";
+import { isPoolAcquireTimeout, isTransientPostgresError } from "@axel/observability";
 
 const { Pool } = pg;
 
@@ -27,7 +27,6 @@ function sleep(ms: number): Promise<void> {
 }
 
 const IS_VERCEL = Boolean(process.env.VERCEL);
-const TRANSIENT_QUERY_ATTEMPTS = IS_VERCEL ? 2 : 8;
 const TRANSIENT_CONNECT_ATTEMPTS = IS_VERCEL ? 2 : 8;
 
 export function db(): pg.Pool {
@@ -57,55 +56,55 @@ export function db(): pg.Pool {
       // unhandled 'error' event from crashing the worker.
       console.error("[db] idle client error");
     });
-    // Wrap pool.query with bounded retries on transient connection errors.
-    // When a Vercel function instance resumes from suspension, sockets in the
-    // pool may already be dead; during Supabase pooler restarts, fresh dials can
-    // also fail briefly. pg evicts bad clients, so a short retry loop lets the
-    // next attempt pull a healthy connection instead of surfacing a route error.
-    const originalQuery = pool.query.bind(pool) as pg.Pool["query"];
-    pool.query = (async (...args: unknown[]) => {
-      for (let attempt = 0; attempt < TRANSIENT_QUERY_ATTEMPTS; attempt++) {
+    // Retry only connection acquisition, before pg sends any SQL. Retrying
+    // pool.query after a lost response could repeat an already-committed write.
+    // Preserve both connect overloads: pg's own pool.query uses the callback
+    // form, while transactions use the Promise form.
+    const originalConnect = pool.connect.bind(pool);
+    const acquire = async (): Promise<pg.PoolClient> => {
+      for (let attempt = 0; attempt < TRANSIENT_CONNECT_ATTEMPTS; attempt++) {
         try {
-          return await (originalQuery as (...a: unknown[]) => Promise<unknown>)(...args);
+          return await originalConnect();
         } catch (err) {
-          if (!isTransientPostgresError(err) || attempt === TRANSIENT_QUERY_ATTEMPTS - 1) {
+          if (isPoolAcquireTimeout(err) || !isTransientPostgresError(err) || attempt === TRANSIENT_CONNECT_ATTEMPTS - 1) {
             throw err;
           }
           await sleep(transientBackoffMs(attempt));
         }
       }
-      throw new Error("unreachable query retry state");
-    }) as pg.Pool["query"];
+      throw new Error("unreachable connect retry state");
+    };
+    pool.connect = ((callback?: (err: Error | undefined, client?: pg.PoolClient, release?: pg.PoolClient["release"]) => void) => {
+      const connection = acquire();
+      if (!callback) return connection;
+      void connection.then(
+        (client) => callback(undefined, client, client.release),
+        (err) => callback(err),
+      );
+    }) as pg.Pool["connect"];
     globalThis.__axelDashboardPoolV2 = pool;
   }
   return globalThis.__axelDashboardPoolV2;
 }
 
-async function connectWithRetry(): Promise<pg.PoolClient> {
-  for (let attempt = 0; attempt < TRANSIENT_CONNECT_ATTEMPTS; attempt++) {
-    try {
-      return await db().connect();
-    } catch (err) {
-      if (!isTransientPostgresError(err) || attempt === TRANSIENT_CONNECT_ATTEMPTS - 1) {
-        throw err;
-      }
-      await sleep(transientBackoffMs(attempt));
-    }
-  }
-  throw new Error("unreachable connect retry state");
-}
-
 export async function withTransaction<T>(fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {
-  const client = await connectWithRetry();
+  const client = await db().connect();
+  let discard = false;
   try {
     await client.query("BEGIN");
     const value = await fn(client);
     await client.query("COMMIT");
     return value;
   } catch (err) {
-    await client.query("ROLLBACK");
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Keep the original failure and evict a client whose transaction state
+      // could not be cleared. Never return it to another request.
+      discard = true;
+    }
     throw err;
   } finally {
-    client.release();
+    client.release(discard);
   }
 }

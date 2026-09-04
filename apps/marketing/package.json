@@ -8,7 +8,6 @@
   "scripts": {
     "build": "next build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "echo 'marketing has no tests yet' && exit 0",
     "seo": "node scripts/seo-benchmark.mjs",
     "dev": "next dev"
   },

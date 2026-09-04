@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { Suspense, type ReactNode } from "react";
-import { AlertTriangle } from "lucide-react";
+import { Activity, AlertTriangle } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { loadInboxGroups } from "../lib/inbox";
 import { countUnreadBillingNotifications } from "../lib/notifications";
@@ -21,13 +21,19 @@ export function AppShell({ session, children }: {
 
   return (
     <div className="flex min-h-svh bg-background text-foreground">
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-md focus:bg-background focus:px-4 focus:py-2 focus:text-sm focus:text-foreground focus:ring-2 focus:ring-ring"
+      >
+        Skip to content
+      </a>
       <aside className="hidden md:sticky md:top-0 md:flex md:h-svh md:w-64 md:shrink-0 md:flex-col md:self-start md:border-r md:border-border md:bg-sidebar md:text-sidebar-foreground">
         {sidebar}
       </aside>
 
       <MobileSidebar>{sidebar}</MobileSidebar>
 
-      <main className="flex min-w-0 flex-1 flex-col overflow-x-hidden">
+      <main id="main-content" tabIndex={-1} className="flex min-w-0 flex-1 flex-col overflow-x-hidden">
         <div className="flex-1 px-4 py-4 pt-14 md:px-8 md:py-6 md:pt-6">
           {children}
         </div>
@@ -81,8 +87,8 @@ function SidebarContent({ session }: { session: CurrentSession }) {
             className="flex items-center gap-2 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
             aria-label="View system status (opens in new tab)"
           >
-            <span className="size-1.5 rounded-full bg-emerald-500/80" />
-            All systems operational
+            <Activity className="size-3" aria-hidden="true" />
+            System status
           </a>
           <div className="flex items-center gap-1">
             <Suspense fallback={<InboxFooterLink count={0} />}>

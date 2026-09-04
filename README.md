@@ -37,7 +37,7 @@ request header. Ingest rejects source credentials in URL query parameters.
 Stripe, GitHub, Shopify, and Chargebee sources use their provider-native
 authentication without an Axel source token.
 
-Design notes live in [`docs/adr-0001-architecture.md`](docs/adr-0001-architecture.md)
+Current runtime boundaries are in [`docs/adr-0002-current-runtime.md`](docs/adr-0002-current-runtime.md)
 and [`docs/production-scale.md`](docs/production-scale.md).
 
 ## Repo layout
@@ -72,7 +72,14 @@ pnpm build       # builds workspace packages (required before tests)
 pnpm test
 pnpm lint
 pnpm typecheck
+
+# Full local verification, including disposable ClickHouse and browser checks:
+pnpm exec playwright install chromium
+pnpm verify
 ```
+
+The full verification command also requires Docker. See [AGENTS.md](AGENTS.md)
+for focused checks, isolated worktrees, and separate browser-test ports.
 
 Raw local backing stores for database-specific development:
 
