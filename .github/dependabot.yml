@@ -26,7 +26,9 @@ updates:
           - "@biomejs/*"
           - vitest
           - typescript
-    open-pull-requests-limit: 10
+    # Paused while private Git history is rewritten for customer-data removal.
+    # Restore the normal limit in the public release commit.
+    open-pull-requests-limit: 0
     labels:
       - area/infra
       - type/chore
@@ -38,6 +40,7 @@ updates:
       day: monday
       time: "09:30"
       timezone: America/Denver
+    open-pull-requests-limit: 0
     labels:
       - area/infra
       - type/chore
@@ -49,6 +52,7 @@ updates:
       day: monday
       time: "10:00"
       timezone: America/Denver
+    open-pull-requests-limit: 0
     labels:
       - area/infra
       - type/chore
