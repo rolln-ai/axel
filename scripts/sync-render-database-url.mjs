@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { pathToFileURL } from "node:url";
+import { renderServiceInstanceCount } from "./render-service-metadata.mjs";
 
 const API_BASE = "https://api.render.com/v1";
 export const TARGET_SERVICE_NAMES = Object.freeze([
@@ -211,7 +212,7 @@ async function resolveTargetServiceId(
         service.type !== expectation.type
         || (
           expectation.numInstances !== undefined
-          && service.numInstances !== expectation.numInstances
+          && renderServiceInstanceCount(service) !== expectation.numInstances
         )
       ) {
         fail("render_service_metadata_mismatch");

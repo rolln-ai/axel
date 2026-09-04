@@ -30,7 +30,7 @@ function entry(name, cursor, id = SERVICE_IDS[name] ?? "srv-unrelated_000", patc
       name,
       ownerId: OWNER_ID,
       type: SERVICE_TYPES[name] ?? "web_service",
-      ...(name === "axel-delivery-workers" ? { numInstances: 1 } : {}),
+      ...(name === "axel-delivery-workers" ? { serviceDetails: { numInstances: 1 } } : {}),
       ...patch,
     },
   };
@@ -159,6 +159,8 @@ test("wrong workspace, service type, or singleton count fails before the first w
     { ownerId: "tea-wrong_456" },
     { type: "web_service" },
     { numInstances: 2 },
+    { serviceDetails: { numInstances: 2 } },
+    { serviceDetails: { numInstances: 1, autoscaling: { enabled: true } } },
   ]) {
     let writeCount = 0;
     const fetchImpl = async (_input, init = {}) => {

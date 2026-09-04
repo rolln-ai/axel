@@ -98,10 +98,11 @@ patch_count="$(awk -F '\t' '$1 == "PATCH" { count++ } END { print count + 0 }' "
 [[ "$patch_count" == "0" ]]
 [[ "$output" != *"$RENDER_API_KEY"* ]]
 
-run_dir="${test_root}/wrong-count"
+for scenario in wrong-count-harden conflicting-count-harden autoscaling-harden; do
+run_dir="${test_root}/${scenario}"
 mkdir -p "$run_dir"
 export MOCK_RENDER_DIR="$run_dir"
-export MOCK_RENDER_SCENARIO=wrong-count-harden
+export MOCK_RENDER_SCENARIO="$scenario"
 
 if output="$(bash "${repo_root}/scripts/harden-render-auto-deploy.sh" 2>&1)"; then
   echo "non-singleton delivery worker unexpectedly passed Render hardening" >&2
@@ -110,5 +111,6 @@ fi
 patch_count="$(awk -F '\t' '$1 == "PATCH" { count++ } END { print count + 0 }' "${run_dir}/calls.tsv")"
 [[ "$patch_count" == "0" ]]
 [[ "$output" != *"$RENDER_API_KEY"* ]]
+done
 
 echo "Render auto-deploy hardening tests passed"

@@ -76,7 +76,7 @@ function serviceEntries() {
       id,
       ownerId: OWNER_ID,
       type: SERVICE_TYPES[name],
-      ...(name === "axel-delivery-workers" ? { numInstances: 1 } : {}),
+      ...(name === "axel-delivery-workers" ? { serviceDetails: { numInstances: 1 } } : {}),
     })),
   ];
 }
@@ -302,6 +302,8 @@ test("wrong workspace, service type, or singleton count fails before mutation", 
     { ownerId: "tea-wrong_456" },
     { type: "web_service" },
     { numInstances: 2 },
+    { serviceDetails: { numInstances: 2 } },
+    { serviceDetails: { numInstances: 1, autoscaling: { enabled: true } } },
   ]) {
     const services = serviceEntries().map((service) =>
       service.name === "axel-delivery-workers"

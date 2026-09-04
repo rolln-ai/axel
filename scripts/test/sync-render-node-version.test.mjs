@@ -32,7 +32,7 @@ function entry(name, cursor, id = SERVICE_IDS[name] ?? "srv-unrelated_test", pat
       name,
       ownerId: OWNER_ID,
       type: SERVICE_TYPES[name] ?? "web_service",
-      ...(name === "axel-delivery-workers" ? { numInstances: 1 } : {}),
+      ...(name === "axel-delivery-workers" ? { serviceDetails: { numInstances: 1 } } : {}),
       ...patch,
     },
   };
@@ -199,6 +199,8 @@ test("wrong owner, service type, or singleton count fails before any write", asy
     { ownerId: "tea-wrong_workspace" },
     { type: "web_service" },
     { numInstances: 2 },
+    { serviceDetails: { numInstances: 2 } },
+    { serviceDetails: { numInstances: 1, autoscaling: { enabled: true } } },
   ]) {
     const provider = createSinglePageProvider({
       entries: [entry("axel-delivery-workers", "cursor-workers", undefined, patch)],
