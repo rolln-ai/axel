@@ -142,6 +142,7 @@ jobs:
           : "${VERCEL_TOKEN:?VERCEL_TOKEN is required}"
           : "${VERCEL_ORG_ID:?VERCEL_ORG_ID is required}"
           : "${VERCEL_PROJECT_ID_DASHBOARD:?VERCEL_PROJECT_ID_DASHBOARD is required}"
+          export VERCEL_PROJECT_ID="$VERCEL_PROJECT_ID_DASHBOARD"
           mkdir -p .vercel
           jq -n --arg org "$VERCEL_ORG_ID" --arg project "$VERCEL_PROJECT_ID_DASHBOARD" \
             '{orgId:$org,projectId:$project}' > .vercel/project.json
