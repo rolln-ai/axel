@@ -1,4 +1,5 @@
 import { SiteFooter, SiteHeader } from "./_components/SiteChrome";
+import { sourceReleasePublished } from "../lib/source-release";
 import { JsonLd } from "./_components/JsonLd";
 import { DashboardMock, PipelineMock, RouteMock, SourceMock } from "./_components/ProductMocks";
 import { breadcrumbLd, type FaqItem, faqPageLd, softwareApplicationLd } from "../lib/structured-data";
@@ -92,8 +93,8 @@ export default function Page() {
         <div className="container heroInner">
           <div>
             <span className="heroBadge">
-              <strong>Open source</strong>
-              Run it yourself, or let Axel Cloud run it for you
+              <strong>{sourceReleasePublished ? "Open source" : "Source release"}</strong>
+              {sourceReleasePublished ? "Run it yourself, or let Axel Cloud run it for you" : "Coming soon. Axel Cloud is available now."}
             </span>
             <h1 className="heroTitle">
               Capture webhooks and deliver them to <em>your data stack</em>.
@@ -107,7 +108,7 @@ export default function Page() {
               <a className="btn" href="https://app.axelapp.ai/signup">
                 Start on Axel Cloud <span className="arrow">→</span>
               </a>
-              <a className="btn ghost" href="/docs#self-hosting">Self-host Axel</a>
+              <a className="btn ghost" href="/docs#self-hosting">{sourceReleasePublished ? "Self-host Axel" : "About self-hosting"}</a>
             </div>
             <div className="heroMeta">
               <span className="dot" aria-hidden="true" />
