@@ -135,6 +135,20 @@ export function overallStatus(items: ReadonlyArray<ComponentHealth>): ComponentS
   return "green";
 }
 
+/** Missing evidence cannot establish health, even when every HTTP probe passes. */
+export function combineHealthStatus(
+  probes: ReadonlyArray<{ ok: boolean }>,
+  heartbeatStatus: ComponentStatus,
+): "operational" | "degraded" | "outage" {
+  if (heartbeatStatus === "red" || (probes.length > 0 && probes.every((probe) => !probe.ok))) {
+    return "outage";
+  }
+  if (heartbeatStatus !== "green" || probes.length === 0 || probes.some((probe) => !probe.ok)) {
+    return "degraded";
+  }
+  return "operational";
+}
+
 /**
  * 7-day uptime history per component. Returns one row per (component,
  * hour bucket) for the last 7×24 = 168 buckets. Buckets that have no

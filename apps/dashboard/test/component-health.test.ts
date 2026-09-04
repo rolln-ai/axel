@@ -1,9 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { deriveStatus, describeStatus, overallStatus, uptimePercent, type ComponentHealth, type UptimeBucket } from "../lib/component-health";
+import { combineHealthStatus, deriveStatus, describeStatus, overallStatus, uptimePercent, type ComponentHealth, type UptimeBucket } from "../lib/component-health";
 
 function bucket(status: UptimeBucket["status"]): UptimeBucket {
   return { bucket_start: "2026-05-18T00:00:00Z", status };
 }
+
+describe("combined health", () => {
+  it.each([
+    [[], "green", "degraded"],
+    [[{ ok: true }], "unknown", "degraded"],
+    [[{ ok: true }], "yellow", "degraded"],
+    [[{ ok: true }], "red", "outage"],
+    [[{ ok: false }], "green", "outage"],
+    [[{ ok: true }, { ok: false }], "green", "degraded"],
+    [[{ ok: true }, { ok: true }], "green", "operational"],
+  ] as const)("combines probes %j and heartbeat %s as %s", (probes, heartbeat, expected) => {
+    expect(combineHealthStatus(probes, heartbeat)).toBe(expected);
+  });
+});
 
 describe("deriveStatus", () => {
   it("returns unknown when staleness is null", () => {

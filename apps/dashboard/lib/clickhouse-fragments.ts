@@ -22,9 +22,10 @@ import "server-only";
  * summary's raw fallback, and destination metrics had neither dedup nor the
  * already_delivered exclusion).
  *
- * Query-shape notes (see ROL-629): GROUP BY + argMax is used instead of
- * FINAL — same latest-row-per-key semantics without the merge-on-read over
- * every part. Only the LOWER time bound is pushed into the inner scan: a
+ * The rollup is a ReplacingMergeTree ordered by the complete outcome key.
+ * FINAL merges its sorted rows without building an aggregate state per event.
+ * The raw attempts fallback still needs GROUP BY + argMax because retries and
+ * replays are separate log rows. Only the LOWER time bound goes into the scan: a
  * key's latest activity timestamp only grows, so the max row always survives
  * the pushdown. Any UPPER bound must stay in the OUTER query (on
  * `outcome_at`) so a key replayed after the window is excluded, not counted
@@ -116,13 +117,12 @@ export function latestOutcomesCTE(options: LatestOutcomesOptions): string {
     return `SELECT base_event_id,
                   route_id,
                   destination_id,
-                  argMax(latest_status, latest_at)   AS outcome_status,
-                  argMax(latest_response, latest_at) AS outcome_response,
-                  max(latest_at)                     AS outcome_at
-             FROM delivery_base_latest_outcomes
+                  latest_status   AS outcome_status,
+                  latest_response AS outcome_response,
+                  latest_at       AS outcome_at
+             FROM delivery_base_latest_outcomes FINAL
             WHERE workspace_id = {workspace_id:String}
-              AND latest_at >= parseDateTime64BestEffort({start:String}, 3)${destinationPredicate}
-            GROUP BY base_event_id, route_id, destination_id`;
+              AND latest_at >= parseDateTime64BestEffort({start:String}, 3)${destinationPredicate}`;
   }
 
   const destinationPredicate = scope.destination

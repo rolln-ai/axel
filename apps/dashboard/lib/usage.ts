@@ -3,7 +3,7 @@ import { unstable_cache } from "next/cache";
 import { cache } from "react";
 import { sanitizeDeliveryAttemptResponseForStorage } from "@axel/shared";
 import type { ClickhouseQueryable } from "./clickhouse";
-import { clickhouse, hasClickhouseUrl } from "./clickhouse";
+import { clickhouse, ClickhouseQueryError, hasClickhouseUrl } from "./clickhouse";
 import {
   SUCCESS_PREDICATE,
   TERMINAL_FAILURE_PREDICATE,
@@ -121,6 +121,7 @@ async function queryWithRollupFallback<T>(
 }
 
 function isMissingClickhouseRollup(err: unknown): boolean {
+  if (err instanceof ClickhouseQueryError) return err.code === 60; // UNKNOWN_TABLE
   const message = err instanceof Error ? err.message : String(err);
   return /UNKNOWN_TABLE|does(?:\s+not|n't)\s+exist|Unknown table|Table .* not found/i.test(message);
 }
@@ -749,7 +750,7 @@ export async function getDailyDeliveryStats(
       dead: string | number;
     }>(
       // This is the overview page's hottest ClickHouse query — see
-      // lib/clickhouse-fragments for the argMax-over-FINAL rationale (ROL-629).
+      // lib/clickhouse-fragments for the sorted rollup and raw fallback.
       dailyDeliverySql(latestOutcomesCTE({ source: "rollup" })),
       { workspace_id: workspaceId, start, timezone },
     ),

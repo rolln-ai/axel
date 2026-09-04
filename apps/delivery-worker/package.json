@@ -10,10 +10,8 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "build": "echo 'delivery-worker is typecheck-only — no build artifacts' && exit 0",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run",
-    "dev": "echo 'delivery worker uses processDeliveryMessage in local harnesses'"
+    "test": "vitest run"
   },
   "dependencies": {
     "@axel/connectors": "workspace:*",

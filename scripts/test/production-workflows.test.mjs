@@ -536,13 +536,18 @@ test("scheduled operations do not share the reviewer-gated deploy environment", 
   assert.match(read(".github/workflows/clickhouse-backup.yml"), /environment: Backup/);
 });
 
-test("delivery canary workflow is a pinned manual or best-effort fallback", () => {
+test("delivery monitoring runs independently of an optional release observation", () => {
   const workflow = read(".github/workflows/delivery-canary.yml");
   assert.match(workflow, /cron: "7,22,37,52 \* \* \* \*"/);
   assert.match(workflow, /^  queue: max$/m);
   assert.match(workflow, /^  cancel-in-progress: false$/m);
   assert.match(workflow, /AXEL_SOAK_CANDIDATE_SHA/);
   assert.match(workflow, /test "\$\{AXEL_SOAK_CANDIDATE_SHA\}" = "\$\{GITHUB_SHA\}"/);
+  const [monitoring, observation] = workflow.split("  soak-candidate:");
+  assert.match(monitoring, /node scripts\/delivery-canary\.mjs/);
+  assert.doesNotMatch(monitoring, /AXEL_SOAK_CANDIDATE_SHA|needs:/);
+  assert.match(observation, /vars\.AXEL_SOAK_CANDIDATE_SHA != ''/);
+  assert.doesNotMatch(observation, /continue-on-error|needs:/);
   assert.doesNotMatch(workflow, /sentry-cron-checkin\.sh/);
   assert.match(workflow, /authoritative 15-minute cadence runs/);
 });

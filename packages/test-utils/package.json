@@ -10,7 +10,6 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "build": "echo 'test-utils is consumed from src — no bundle step' && exit 0",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },

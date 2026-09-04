@@ -10,10 +10,8 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "build": "echo 'router is typecheck-only — no build artifacts' && exit 0",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run",
-    "dev": "echo 'library package — no dev server (consumed by @axel/delivery-service)'"
+    "test": "vitest run"
   },
   "dependencies": {
     "@axel/shared": "workspace:*"
