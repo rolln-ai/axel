@@ -7,3 +7,7 @@ useDefault = true
 description = "Allow public docs placeholder for Axel ingest token"
 paths = ['''apps/marketing/app/docs/page\.tsx''']
 regexes = ['''axel_tok_\.\.\.''']
+
+[[allowlists]]
+description = "Allow deterministic cryptographic golden vectors documented as test-only data"
+paths = ['''packages/shared/src/credential-test-vectors\.ts''']
