@@ -6,6 +6,7 @@ import pg from "pg";
 import {
   APPLICATION_SEQUENCES,
   APPLICATION_TABLES,
+  DASHBOARD_DATABASE_ROUTINES,
   databaseServiceAccessProfile,
 } from "../database-service-access-profiles.mjs";
 
@@ -796,6 +797,7 @@ function expectedPrivilegeSet(profile) {
 
 async function inspectServicePrivileges(client, { profile: profileName, capability, login }) {
   const profile = selfHostDatabaseAccessProfile(profileName);
+  const allowedRoutines = profileName === "dashboard" ? DASHBOARD_DATABASE_ROUTINES : [];
   const tableResult = await client.query(`
     SELECT relation.relname, privilege,
            has_table_privilege($1, relation.oid, privilege) AS allowed
@@ -848,8 +850,9 @@ async function inspectServicePrivileges(client, { profile: profileName, capabili
              WHERE namespace.nspname !~ '^pg_'
                AND namespace.nspname <> 'information_schema'
                AND has_function_privilege($1, routine.oid, 'EXECUTE')
+               AND routine.oid <> ALL(ARRAY(SELECT to_regprocedure(name)::oid FROM unnest($2::text[]) name))
            ) AS routines_denied
-  `, [login]);
+  `, [login, allowedRoutines]);
   const row = boundary.rows[0];
   if (
     row?.db_connect !== true
@@ -861,6 +864,10 @@ async function inspectServicePrivileges(client, { profile: profileName, capabili
     || row.routines_denied !== true
   ) {
     throw fixedError("self_host_database_service_boundary_invalid");
+  }
+  for (const routine of allowedRoutines) {
+    const allowed = await client.query("SELECT has_function_privilege($1, to_regprocedure($2), 'EXECUTE') AS allowed", [login, routine]);
+    if (allowed.rows[0]?.allowed !== true) throw fixedError("self_host_database_required_routine_missing");
   }
 
   const directAcl = await client.query(`
@@ -976,6 +983,9 @@ async function inspectRawAclBoundary(client) {
         WHERE namespace.nspname !~ '^pg_'
           AND namespace.nspname <> 'information_schema'
           AND acl.grantee <> (SELECT oid FROM pg_roles WHERE rolname = $1)
+          AND NOT (acl.grantee = (SELECT oid FROM pg_roles WHERE rolname = $2)
+            AND NOT acl.is_grantable AND acl.privilege_type = 'EXECUTE'
+            AND routine.oid = ANY(ARRAY(SELECT to_regprocedure(name)::oid FROM unnest($3::text[]) name)))
       ) OR EXISTS (
         SELECT 1 FROM pg_default_acl defaults
         JOIN pg_roles owner_role ON owner_role.oid = defaults.defaclrole
@@ -983,7 +993,7 @@ async function inspectRawAclBoundary(client) {
         WHERE owner_role.rolname !~ '^pg_' AND acl.grantee <> owner_role.oid
       )
     ) AS present
-  `, [roles.owner]);
+  `, [roles.owner, roles.dashboardCapability, DASHBOARD_DATABASE_ROUTINES]);
   if (unexpectedAcl.rows[0]?.present !== false) {
     throw fixedError("self_host_database_unexpected_acl_present");
   }
@@ -1113,6 +1123,11 @@ async function requireFinalAclBoundary(client) {
 
 async function grantProfile(client, capability, profileName) {
   const profile = selfHostDatabaseAccessProfile(profileName);
+  if (profileName === "dashboard") {
+    for (const routine of DASHBOARD_DATABASE_ROUTINES) {
+      await client.query(`GRANT EXECUTE ON FUNCTION ${routine} TO ${quoteIdentifier(capability)}`);
+    }
+  }
   for (const [table, privileges] of Object.entries(profile.tables)) {
     await client.query(
       `GRANT ${privileges.join(", ")} ON TABLE public.${quoteIdentifier(table)}`

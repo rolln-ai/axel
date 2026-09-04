@@ -251,6 +251,13 @@ test("self-host database bootstrap gives dashboard and delivery independent prof
     await expectDenied(delivery, "CREATE TEMP TABLE delivery_temp(id integer)");
     await expectDenied(delivery, `SET ROLE ${SELF_HOST_DATABASE_ROLES.owner}`);
 
+    phase = "data_contract_privacy_trigger";
+    await dashboard.query("INSERT INTO sources(id,workspace_id,name,secret_token_hash,status) VALUES ('contract-source','workspace-self-host','source','synthetic','active')");
+    await dashboard.query("INSERT INTO data_contracts(id,workspace_id,source_id,name) VALUES ('contract','workspace-self-host','contract-source','contract')");
+    const contract = await dashboard.query(`INSERT INTO data_contract_versions(id,data_contract_id,workspace_id,version_number,inferred_schema)
+      VALUES ('contract-v1','contract','workspace-self-host',1,'{"type":"object","examples":["private-value"]}') RETURNING inferred_schema`);
+    assert.equal(JSON.stringify(contract.rows).includes("private-value"), false);
+
     phase = "future_relations_denied";
     await migration.query("BEGIN");
     await migration.query(`SET LOCAL ROLE ${SELF_HOST_DATABASE_ROLES.owner}`);

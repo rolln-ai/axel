@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { pathToFileURL } from "node:url";
+import { readFileSync } from "node:fs";
 import pg from "pg";
 import {
   APPLICATION_SEQUENCES,
@@ -10,6 +11,7 @@ import {
 } from "./database-service-access-profiles.mjs";
 import { controlPlanePgSslOption } from "./control-plane-pg.mjs";
 import { HOSTED_CANARY_POLICY } from "./hosted-database-policy.mjs";
+import { DASHBOARD_DATABASE_ROUTINES } from "./database-service-access-profiles.mjs";
 
 const { Client } = pg;
 const ROLE_NAME = /^[a-z][a-z0-9_]{2,62}$/;
@@ -169,7 +171,8 @@ export function validateDatabaseServiceRoleOptions(rawOptions) {
       ...registry[profileName].existingLoginRoles,
     ]),
   ];
-  if (new Set(allNames).size !== allNames.length || migrationLoginRoles.length === 0) {
+  if (new Set(allNames).size !== allNames.length
+    || (rawOptions.managedOwnerLogin === true ? migrationLoginRoles.length !== 0 : migrationLoginRoles.length === 0)) {
     throw fixedError("database_service_role_names_must_be_distinct");
   }
   if (allNames.includes(legacyCapabilityRole)) {
@@ -203,12 +206,31 @@ export function validateDatabaseServiceRoleOptions(rawOptions) {
     requireCompleteRegistry: rawOptions.requireCompleteRegistry !== false,
     requireIdentity,
     expectedConnectionRole,
+    managedOwnerLogin: rawOptions.managedOwnerLogin === true,
   };
 }
 
 export function databaseServiceRoleOptionsFromEnv(env = process.env) {
+  if (env.DATABASE_ACCESS_MODE && !["strict", "render"].includes(env.DATABASE_ACCESS_MODE)) {
+    throw fixedError("database_access_mode_invalid");
+  }
   if (!new Set(["0", "1"]).has(env.DATABASE_SERVICE_REQUIRE_FINAL_STATE)) {
     throw fixedError("database_service_final_state_flag_required");
+  }
+  if (env.DATABASE_ACCESS_MODE === "render") {
+    const config = JSON.parse(readFileSync(new URL("../infra/postgres/hosted-access.json", import.meta.url), "utf8"));
+    return validateDatabaseServiceRoleOptions({
+      ...config,
+      profile: env.DATABASE_SERVICE_PROFILE ?? "dashboard",
+      ownerRole: env.DATABASE_MIGRATION_ROLE,
+      migrationLoginRoles: [],
+      ownerParentRoles: [HOSTED_CANARY_POLICY.role, config.verifyCapabilityRole,
+        ...config.verifyLoginRoles,
+        ...Object.values(config.registry).flatMap((entry) => [entry.capabilityRole, entry.loginRole, ...(entry.existingLoginRoles ?? [])])],
+      managedOwnerLogin: true,
+      requireFinalState: env.DATABASE_SERVICE_REQUIRE_FINAL_STATE === "1",
+      expectedConnectionRole: env.DATABASE_SERVICE_EXPECTED_CONNECTION_ROLE,
+    });
   }
   const registry = {};
   for (const profileName of DATABASE_SERVICE_PROFILE_NAMES) {
@@ -241,7 +263,7 @@ export function databaseServiceRoleOptionsFromEnv(env = process.env) {
   });
 }
 
-async function inspectRelations(client) {
+async function inspectRelations(client, options) {
   const relations = await client.query(`
     SELECT relation.relname, relation.relkind
       FROM pg_class relation
@@ -259,8 +281,8 @@ async function inspectRelations(client) {
     relations.rows.filter((row) => row.relkind === "S").map((row) => row.relname),
   );
   if (
-    !sameSet(tables, new Set(APPLICATION_TABLES))
-    || !sameSet(sequences, new Set(APPLICATION_SEQUENCES))
+    !(options.managedOwnerLogin ? APPLICATION_TABLES.every((table) => tables.has(table)) : sameSet(tables, new Set(APPLICATION_TABLES)))
+    || !(options.managedOwnerLogin ? APPLICATION_SEQUENCES.every((sequence) => sequences.has(sequence)) : sameSet(sequences, new Set(APPLICATION_SEQUENCES)))
     || !relations.rows.some((row) => row.relname === "schema_migrations" && row.relkind === "r")
   ) {
     throw fixedError("database_service_schema_inventory_mismatch");
@@ -330,7 +352,8 @@ async function inspectPublicOwnership(client, ownerRole) {
   }
 }
 
-async function inspectEffectivePrivileges(client, expectedRole, profile) {
+async function inspectEffectivePrivileges(client, expectedRole, profile, options, profileName) {
+  const allowedRoutines = profileName === "dashboard" ? DASHBOARD_DATABASE_ROUTINES : [];
   const tableResult = await client.query(`
     SELECT relation.relname,
            privilege,
@@ -376,6 +399,9 @@ async function inspectEffectivePrivileges(client, expectedRole, profile) {
               WHERE database.datallowconn
                 AND NOT database.datistemplate
                 AND database.datname <> current_database()
+                AND NOT ($2::boolean AND database.datname = 'postgres'
+                  AND database.datdba = (SELECT oid FROM pg_roles WHERE rolname = 'postgres')
+                  AND NOT has_database_privilege($1, database.oid, 'CREATE'))
                 AND (
                   has_database_privilege($1, database.oid, 'CONNECT')
                   OR has_database_privilege($1, database.oid, 'CREATE')
@@ -391,8 +417,9 @@ async function inspectEffectivePrivileges(client, expectedRole, profile) {
               WHERE namespace.nspname !~ '^pg_'
                 AND namespace.nspname <> 'information_schema'
                 AND has_function_privilege($1, routine.oid, 'EXECUTE')
+                AND routine.oid <> ALL(ARRAY(SELECT to_regprocedure(name)::oid FROM unnest($3::text[]) name))
            ) AS routines_denied
-  `, [expectedRole]);
+  `, [expectedRole, options.managedOwnerLogin, allowedRoutines]);
   const row = boundaries.rows[0];
   if (
     row?.database_connect !== true
@@ -404,6 +431,10 @@ async function inspectEffectivePrivileges(client, expectedRole, profile) {
     || row.routines_denied !== true
   ) {
     throw fixedError("database_service_effective_boundary_privilege_mismatch");
+  }
+  for (const routine of allowedRoutines) {
+    const allowed = await client.query("SELECT has_function_privilege($1, to_regprocedure($2), 'EXECUTE') AS allowed", [expectedRole, routine]);
+    if (allowed.rows[0]?.allowed !== true) throw fixedError("database_service_required_routine_missing");
   }
 }
 
@@ -418,6 +449,9 @@ async function inspectVerifyPrivileges(client, options) {
               WHERE database.datallowconn
                 AND NOT database.datistemplate
                 AND database.datname <> current_database()
+                AND NOT ($2::boolean AND database.datname = 'postgres'
+                  AND database.datdba = (SELECT oid FROM pg_roles WHERE rolname = 'postgres')
+                  AND NOT has_database_privilege($1, database.oid, 'CREATE'))
                 AND (
                   has_database_privilege($1, database.oid, 'CONNECT')
                   OR has_database_privilege($1, database.oid, 'CREATE')
@@ -461,7 +495,7 @@ async function inspectVerifyPrivileges(client, options) {
                AND namespace.nspname <> 'information_schema'
                AND has_function_privilege($1, routine.oid, 'EXECUTE')
            ) AS routines_denied
-  `, [verifyRole]);
+  `, [verifyRole, options.managedOwnerLogin]);
   const row = result.rows[0];
   if (
     row?.database_connect !== true
@@ -541,7 +575,7 @@ async function inspectRoleTopology(client, options) {
     && !owner.rolreplication
     && !owner.rolbypassrls
     && owner.rolconfig === null;
-  const ownerTransitionalSafe = options.transitionalOwnerLoginRole === options.ownerRole
+  const ownerTransitionalSafe = (options.managedOwnerLogin || options.transitionalOwnerLoginRole === options.ownerRole)
     && owner
     && !owner.rolsuper
     && owner.rolinherit
@@ -926,8 +960,11 @@ async function inspectRawAclInventory(client, options) {
            AND grantee.rolname <> $1
          )
        )
+       AND NOT COALESCE(($2::boolean AND grantee.rolname = $3 AND NOT acl.is_grantable
+         AND acl.privilege_type = 'EXECUTE'
+         AND routine.oid = ANY(ARRAY(SELECT to_regprocedure(name)::oid FROM unnest($4::text[]) name))), false)
      LIMIT 1
-  `, [options.ownerRole]);
+  `, [options.ownerRole, true, options.registry.dashboard.capabilityRole, DASHBOARD_DATABASE_ROUTINES]);
   if (routineAcl.rows.length !== 0) throw fixedError("database_service_routine_acl_present");
 
   const defaultAcl = await client.query(`
@@ -990,7 +1027,7 @@ async function inspectRawAclInventory(client, options) {
 export async function verifyDatabaseServiceRole(client, rawOptions) {
   const options = validateDatabaseServiceRoleOptions(rawOptions);
   const profile = databaseServiceAccessProfile(options.profile);
-  await inspectRelations(client);
+  await inspectRelations(client, options);
   await inspectPublicOwnership(client, options.ownerRole);
   await inspectRoleTopology(client, options);
   await inspectRawAclInventory(client, options);
@@ -999,6 +1036,8 @@ export async function verifyDatabaseServiceRole(client, rawOptions) {
       client,
       options.registry[profileName].loginRole,
       databaseServiceAccessProfile(profileName),
+      options,
+      profileName,
     );
   }
   if (!options.requireFinalState) {
@@ -1011,6 +1050,7 @@ export async function verifyDatabaseServiceRole(client, rawOptions) {
         client,
         options.legacyCapabilityRole,
         LEGACY_RUNTIME_PROFILE,
+        options,
       );
     }
   }
@@ -1020,6 +1060,29 @@ export async function verifyDatabaseServiceRole(client, rawOptions) {
     tablePrivilegeCount: expectedPrivilegeSet(profile.tables).size,
     sequencePrivilegeCount: expectedPrivilegeSet(profile.sequences).size,
   };
+}
+
+export async function verifyRenderMaintenanceDatabase(connectionString, options) {
+  if (!options.managedOwnerLogin) return;
+  const url = new URL(connectionString);
+  url.pathname = "/postgres";
+  const client = new Client({ connectionString: url.href, ssl: controlPlanePgSslOption(url.href),
+    connectionTimeoutMillis: 10000, statement_timeout: 15000 });
+  const roles = [...options.verifyLoginRoles, options.canary.role,
+    ...Object.values(options.registry).flatMap((entry) => [entry.loginRole, ...entry.existingLoginRoles])];
+  try {
+    await client.connect();
+    await client.query("BEGIN READ ONLY");
+    const result = await client.query(`
+      SELECT NOT EXISTS (
+        SELECT 1 FROM pg_namespace namespace CROSS JOIN unnest($1::text[]) role_name
+        WHERE namespace.nspname !~ '^pg_temp_' AND namespace.nspname !~ '^pg_toast_temp_'
+          AND has_schema_privilege(role_name, namespace.oid, 'CREATE')
+      ) AS sealed
+    `, [roles]);
+    if (result.rows[0]?.sealed !== true) throw fixedError("database_service_maintenance_schema_writable");
+    await client.query("ROLLBACK");
+  } finally { await client.end().catch(() => {}); }
 }
 
 async function main() {
@@ -1042,6 +1105,7 @@ async function main() {
     await client.query("BEGIN READ ONLY");
     const result = await verifyDatabaseServiceRole(client, options);
     await client.query("ROLLBACK");
+    await verifyRenderMaintenanceDatabase(connectionString, options);
     process.stdout.write(
       `database_service_role_ready profile=${result.profile} table_privileges=${result.tablePrivilegeCount} sequence_privileges=${result.sequencePrivilegeCount}\n`,
     );

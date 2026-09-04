@@ -2,6 +2,7 @@
 
 import { createHash, createHmac, pbkdf2Sync, randomBytes } from "node:crypto";
 import { pathToFileURL } from "node:url";
+import { DASHBOARD_DATABASE_ROUTINES } from "./database-service-access-profiles.mjs";
 import pg from "pg";
 import {
   DATABASE_SERVICE_PROFILE_NAMES,
@@ -153,8 +154,8 @@ async function requireProvisioningAuthority(client, options, finalCheck) {
       JOIN pg_database database ON database.datname = current_database()
   `, [
     options.ownerRole,
-    options.migrationLoginRoles,
-    options.transitionalOwnerLoginRole === options.ownerRole,
+    options.managedOwnerLogin ? [options.ownerRole] : options.migrationLoginRoles,
+    options.managedOwnerLogin || options.transitionalOwnerLoginRole === options.ownerRole,
   ]);
   const row = result.rows[0];
   const checks = [
@@ -373,7 +374,7 @@ export async function provisionDatabaseServiceRoles(client, rawOptions) {
       BEGIN
         EXECUTE format('REVOKE ALL PRIVILEGES ON DATABASE %I FROM PUBLIC', current_database());
         EXECUTE format(
-          'GRANT CONNECT ON DATABASE %I TO ${options.migrationLoginRoles
+          'GRANT CONNECT ON DATABASE %I TO ${(options.managedOwnerLogin ? [options.ownerRole] : options.migrationLoginRoles)
             .map(quoteIdentifier)
             .join(", ")}',
           current_database()
@@ -429,6 +430,9 @@ export async function provisionDatabaseServiceRoles(client, rawOptions) {
         options.registry[profileName].capabilityRole,
         profileName,
       );
+    }
+    for (const routine of DASHBOARD_DATABASE_ROUTINES) {
+      await client.query(`GRANT EXECUTE ON FUNCTION ${routine} TO ${quoteIdentifier(options.registry.dashboard.capabilityRole)}`);
     }
 
     await requireProvisioningAuthority(client, options, true);

@@ -167,7 +167,7 @@ WITH owner_role AS (
       )
     ) acl
 ), public_routine_grants AS (
-  SELECT routine.proowner, acl.grantee, acl.privilege_type
+  SELECT routine.oid, routine.proowner, acl.grantee, acl.privilege_type, acl.is_grantable
     FROM public_routines routine
     CROSS JOIN LATERAL pg_catalog.aclexplode(
         COALESCE(
@@ -601,11 +601,22 @@ SELECT (
   )
   AND NOT EXISTS (
     SELECT 1 FROM public_routine_grants grant_state
-     WHERE grant_state.grantee = 0
+     WHERE (grant_state.grantee = 0
         OR (
           grant_state.grantee <> owner_role.oid
           AND grant_state.grantee <> grant_state.proowner
-        )
+        ))
+       AND NOT (
+         grant_state.grantee IN (SELECT oid FROM runtime_capability_roles WHERE oid IS NOT NULL)
+         AND grant_state.privilege_type = 'EXECUTE' AND NOT grant_state.is_grantable
+         AND COALESCE(grant_state.oid = ANY(ARRAY[
+           pg_catalog.to_regprocedure('public.axel_scrub_data_contract_schema_node(jsonb)'),
+           pg_catalog.to_regprocedure('public.axel_scrub_data_contract_schema(jsonb)'),
+           pg_catalog.to_regprocedure('public.axel_strip_data_contract_previews(jsonb)'),
+           pg_catalog.to_regprocedure('public.axel_generalize_data_contract_fixture(jsonb)'),
+           pg_catalog.to_regprocedure('public.axel_data_contract_json_allowlist(jsonb,text[])')
+         ]::oid[]), false)
+       )
   )
   AND (
     (

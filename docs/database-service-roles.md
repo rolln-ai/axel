@@ -1,5 +1,82 @@
 # Hosted PostgreSQL service roles
 
+## Render deployments
+
+Use `DATABASE_ACCESS_MODE=render` for the managed Render database. The provider's
+owner login stays in the protected migration environment. Each application uses
+its own restricted login. The owner does not enter an application deployment.
+This model works with Render's ordinary PostgreSQL 17 owner permissions and does
+not require a support ticket or a provider superuser.
+
+The checked-in `infra/postgres/hosted-access.json` names the five runtime
+capabilities, their replaceable logins, and the metadata verifier. Set
+`DATABASE_MIGRATION_ROLE` to the actual provider owner and
+`DATABASE_SERVICE_REQUIRE_FINAL_STATE=1`. The per-service grants still come from
+`scripts/database-service-access-profiles.mjs`. Verifiers check exact grants,
+membership, ownership, default privileges, and login identity. Runtime roles
+cannot migrate, create objects, grant privileges, or read the migration ledger.
+Existing owner-owned demo or retired-feature tables may remain in the managed
+database. Every service must have zero privileges on relations outside its
+profile; the verifier checks those relations too. The transition preserves their
+data and does not grant application roles access to them.
+
+The managed mode permits connections and temporary objects in Render's
+`postgres` maintenance database. Verification also connects there and rejects
+writable persistent schemas. This is a provider administration database, not a
+place for application data. Other databases remain inaccessible. Provider
+superusers remain trusted administrators. The application database itself denies
+runtime schema creation and temporary objects.
+
+Initial transition, using credentials supplied through a secret manager or the
+protected release environment:
+
+1. Keep the current owner credential as `DATABASE_MIGRATION_URL`. Generate and
+   retain independent passwords for the metadata verifier and five service logins.
+   Never place credentials in command arguments, source control, or CI artifacts.
+2. Run `node scripts/render-database-access.mjs prepare` with
+   `DATABASE_VERIFY_PASSWORD` and
+   `AXEL_HOSTED_DATABASE_BOOTSTRAP_CONFIRM=I_UNDERSTAND_THIS_CHANGES_DATABASE_ROLES`.
+   This creates the metadata roles and removes the unused `vector` and `pg_trgm`
+   extensions from the retired EDKG feature. `DROP EXTENSION ... RESTRICT` rolls
+   the transaction back if any application object still depends on either one.
+   This step is for initial setup; existing role names are a hard collision.
+3. Run `node scripts/provision-database-service-roles.mjs` with the five
+   `DATABASE_<SERVICE>_PASSWORD` values. It creates and grants the profiles in one
+   transaction and verifies them before committing. Service stems are `DASHBOARD`,
+   `DELIVERY_NATIVE`, `DELIVERY_WORKERS`, `PULL_WORKER`, and `DELIVERY_EDGE`.
+4. Store each URL in its matching protected service secret. Render services also
+   need an external preflight URL with the same login as the internal runtime URL.
+   Store `DATABASE_VERIFY_URL` and set `DATABASE_VERIFY_LOGIN_ROLE` to the first
+   verifier login in the registry. Use the existing credential-sync workflows,
+   one service at a time. Their checks use the checked-in registry in Render mode.
+5. Run the migration workflow, then deploy each application through its release
+   workflow. Check exact deployment URLs, production domains, and the delivery
+   canary. Keep old credentials valid until the rollout succeeds.
+6. Verify that every runtime uses its service login and old owner sessions have
+   drained. Rotate the owner password and update only the protected migration
+   secret. Retire old application deployments and credentials through the normal
+   provider controls. Restart the release observation window after mutations.
+
+For runtime rotation, change the registry's `loginRole`, retain the old name in
+`existingLoginRoles`, and provision with new passwords. Remove old login entries
+only after all consumers have moved and the old sessions have drained.
+
+The dashboard needs five pure JSON helper functions called by its data-contract
+privacy triggers. Both hosted and self-hosted provisioning grant those exact
+signatures to the dashboard capability. Other application functions stay denied;
+the grants do not give the dashboard any additional table access.
+
+Run `pnpm test:database` to verify the strict and Render paths against disposable
+Postgres 17. The Render case performs no superuser operations after creating the
+initial provider owner. It checks a real contract write, privacy scrubbing,
+forbidden SQL operations, unexpected grants, and incremental migrations followed
+by a no-op migration run. CI runs this command explicitly.
+
+The strict role model below remains available for installations where an
+administrator can manage cluster-wide roles and privileges. It is not a
+prerequisite for the Render path above.
+## Strict role model
+
 Hosted production does not share one database credential across runtimes. The
 checked-in profiles in `scripts/database-service-access-profiles.mjs` are the
 source of truth for table and sequence access.
