@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { COMMUNITY_SUPPORT_URL, SUPPORT_HREF } from "../../lib/contact";
 import { Logo } from "./Logo";
+import { sourceReleasePublished } from "../../lib/source-release";
 import { NewsletterSignup } from "./NewsletterSignup";
 
 export function SiteHeader() {
@@ -17,7 +18,7 @@ export function SiteHeader() {
     { href: "/pricing", label: "Pricing" },
     { href: "/docs", label: "Docs" },
     { href: "/security", label: "Security" },
-    { href: "https://github.com/rolln-ai/axel", label: "GitHub" },
+    ...(sourceReleasePublished ? [{ href: "https://github.com/rolln-ai/axel", label: "GitHub" }] : []),
   ] as const;
 
   useEffect(() => {
@@ -112,14 +113,16 @@ export function SiteFooter() {
           <Link href="/docs#self-hosting">Self-hosting</Link>
           <Link href="/pricing">Pricing</Link>
           <Link href="/security">Security</Link>
-          <a href="https://github.com/rolln-ai/axel">GitHub</a>
+          {sourceReleasePublished ? <a href="https://github.com/rolln-ai/axel">GitHub</a> : null}
           <Link href="/terms">Terms</Link>
           <Link href="/privacy">Privacy</Link>
           <Link href="/dpa">DPA</Link>
           <Link href="/legal">Legal</Link>
-          <a href={SUPPORT_HREF ?? COMMUNITY_SUPPORT_URL}>
-            {SUPPORT_HREF ? "Contact" : "Discussions"}
-          </a>
+          {SUPPORT_HREF || sourceReleasePublished ? (
+            <a href={SUPPORT_HREF ?? COMMUNITY_SUPPORT_URL}>
+              {SUPPORT_HREF ? "Contact" : "Discussions"}
+            </a>
+          ) : null}
         </nav>
         <span>© {new Date().getFullYear()} Axel</span>
       </div>
