@@ -97,7 +97,8 @@ through the authenticated delivery-service endpoint.
 Every profile has a `NOLOGIN`, `NOINHERIT` capability role and a replaceable
 `LOGIN`, `INHERIT` credential. A login inherits exactly one capability.
 Capability roles receive `CONNECT`, `USAGE` on `public`, and the explicit
-relations listed in the profile module. They receive no routine execution,
+relations listed in the profile module. The dashboard also receives the five
+JSON helper grants described above. Profiles receive no other routine execution,
 column ACL, default ACL, `schema_migrations` access, ownership, database create,
 temporary-table access, or future-table grant.
 They must also have no `CONNECT`, `CREATE`, or `TEMPORARY` privilege on any
