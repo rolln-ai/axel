@@ -909,6 +909,7 @@ test("database credential distribution is explicit, serialized, and value-safe",
     workflow.indexOf("- name: Save on the native delivery Render service"),
   );
   assert.match(vercel, /VERCEL_TOKEN: \$\{\{ secrets\.VERCEL_TOKEN \}\}/);
+  assert.match(vercel, /export VERCEL_PROJECT_ID="\$VERCEL_PROJECT_ID_DASHBOARD"/);
   assert.match(vercel, /VERCEL_PROJECT_ID_DASHBOARD/);
   assert.doesNotMatch(vercel, /VERCEL_PROJECT_ID_MARKETING|marketing/);
   assert.match(vercel, /> \.vercel\/project\.json/);

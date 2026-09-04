@@ -106,7 +106,15 @@ render_resolve_services() {
                 .[]
                 | .service
                 | select(.name as $name | $expected | map(.name) | index($name))
-                | {id, name, ownerId, type, numInstances}
+                | if (has("numInstances") and (.serviceDetails | type) == "object"
+                      and (.serviceDetails | has("numInstances"))
+                      and .numInstances != .serviceDetails.numInstances) then
+                    error("conflicting Render instance counts")
+                  else . end
+                | {id, name, ownerId, type, numInstances:
+                    (if (.serviceDetails | type) == "object" and (.serviceDetails | has("autoscaling"))
+                         and .serviceDetails.autoscaling.enabled != false
+                     then null else (.serviceDetails.numInstances // .numInstances) end)}
               ]
             }
           end

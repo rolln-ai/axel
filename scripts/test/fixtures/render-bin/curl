@@ -87,7 +87,10 @@ if [[ "$method" == "GET" && "$url" == "${services_url}"* ]]; then
               end
             )
           | if .service.name == "axel-delivery-workers"
-            then .service.numInstances = (if $scenario == "wrong-count-harden" then 2 else 1 end)
+            then .service.serviceDetails.numInstances = (if $scenario == "wrong-count-harden" then 2 else 1 end)
+              | if $scenario == "conflicting-count-harden" then .service.numInstances = 2
+                elif $scenario == "autoscaling-harden" then .service.serviceDetails.autoscaling.enabled = true
+                else . end
             else .
             end
         )
@@ -96,7 +99,7 @@ if [[ "$method" == "GET" && "$url" == "${services_url}"* ]]; then
 
   {
     case "$MOCK_RENDER_SCENARIO" in
-    harden|wrong-count-harden)
+    harden|wrong-count-harden|conflicting-count-harden|autoscaling-harden)
       printf '%s\n' '[
         {"cursor":"cursor-clickhouse","service":{"id":"srv-clickhouse","name":"axel-clickhouse"}},
         {"cursor":"cursor-delivery-native","service":{"id":"srv-delivery-native","name":"axel-delivery-native"}},

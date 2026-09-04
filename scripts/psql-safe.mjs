@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import path from "node:path";
+import { getCACertificates } from "node:tls";
 
 const SECRET_ENV_KEYS = [
   "DATABASE_URL",
@@ -225,6 +229,30 @@ childEnv.LC_MESSAGES = "C";
 childEnv.PGCONNECT_TIMEOUT = "10";
 if (password) childEnv.PGPASSWORD = password;
 else delete childEnv.PGPASSWORD;
+
+// libpq otherwise requires ~/.postgresql/root.crt even when Node successfully
+// verifies the same public certificate. Keep explicit/private CA configuration
+// intact; supply Node's trusted roots only when none was configured.
+const sslMode = url.searchParams.get("sslmode") || childEnv.PGSSLMODE;
+const defaultRoot = process.platform === "win32"
+  ? path.join(process.env.APPDATA || homedir(), "postgresql", "root.crt")
+  : path.join(homedir(), ".postgresql", "root.crt");
+if (["verify-ca", "verify-full"].includes(sslMode)
+  && !url.searchParams.has("sslrootcert")
+  && !childEnv.PGSSLROOTCERT
+  && !existsSync(defaultRoot)) {
+  let caDirectory;
+  try {
+    const certificates = getCACertificates("default");
+    if (certificates.length === 0) throw new Error("no_trusted_certificates");
+    caDirectory = mkdtempSync(path.join(tmpdir(), "axel-psql-ca-"));
+    process.once("exit", () => rmSync(caDirectory, { recursive: true, force: true }));
+    childEnv.PGSSLROOTCERT = path.join(caDirectory, "root.crt");
+    writeFileSync(childEnv.PGSSLROOTCERT, certificates.join("\n"), { mode: 0o600 });
+  } catch {
+    fail("psql_safe_certificate_setup_failed");
+  }
+}
 
 const psqlBin = process.env.AXEL_PSQL_BIN || "psql";
 let result;

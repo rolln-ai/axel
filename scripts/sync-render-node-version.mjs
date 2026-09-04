@@ -2,6 +2,7 @@
 
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
+import { renderServiceInstanceCount } from "./render-service-metadata.mjs";
 
 const API_BASE = "https://api.render.com/v1";
 const NODE_VERSION_FILE = new URL("../.node-version", import.meta.url);
@@ -232,7 +233,7 @@ async function resolveTargetServiceId(
         service.type !== expectation.type
         || (
           expectation.numInstances !== undefined
-          && service.numInstances !== expectation.numInstances
+          && renderServiceInstanceCount(service) !== expectation.numInstances
         )
       ) {
         fail("render_service_metadata_mismatch");
