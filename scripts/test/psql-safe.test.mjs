@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, chmodSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, chmodSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -107,6 +107,35 @@ test("passes a password-free URL in argv and the password only in child env", ()
   assert.equal(parsed.hasMigrationRole, false);
   assert.equal(parsed.hasMigrationOwnerParentRoles, false);
   assert.equal(parsed.input, "stdin-ok");
+});
+
+test("verified TLS uses trusted roots and removes the temporary certificate bundle", () => {
+  const bin = fakePsql(`
+    import { readFileSync } from "node:fs";
+    import { X509Certificate } from "node:crypto";
+    const bundle = readFileSync(process.env.PGSSLROOTCERT, "utf8");
+    const certificates = bundle.match(/-----BEGIN CERTIFICATE-----[\\s\\S]*?-----END CERTIFICATE-----/g);
+    for (const certificate of certificates) new X509Certificate(certificate);
+    process.stdout.write(JSON.stringify({ path: process.env.PGSSLROOTCERT, count: certificates.length }));
+  `);
+  const result = runWrapper({ bin, databaseUrl: "postgres://runtime:password@db.example.test/axel?sslmode=verify-full", env: { PGSSLROOTCERT: "" } });
+  assert.equal(result.status, 0, result.stderr);
+  const parsed = JSON.parse(result.stdout);
+  assert.ok(parsed.count > 0);
+  assert.equal(existsSync(parsed.path), false);
+});
+
+test("explicit certificate roots and unverified local connections are preserved", () => {
+  const bin = fakePsql(`process.stdout.write(JSON.stringify(process.env.PGSSLROOTCERT ?? null));`);
+  for (const [ssl, root, expected] of [
+    ["sslmode=verify-full", "/private/organization-ca.pem", "/private/organization-ca.pem"],
+    ["sslmode=verify-full&sslrootcert=/private/url-ca.pem", "", ""],
+    ["sslmode=disable", "", ""],
+  ]) {
+    const result = runWrapper({ bin, databaseUrl: `postgres://runtime:password@db.example.test/axel?${ssl}`, env: { PGSSLROOTCERT: root } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout), expected);
+  }
 });
 
 test("collapses command failures without forwarding query output or detail", () => {

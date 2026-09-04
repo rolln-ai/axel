@@ -8,6 +8,12 @@ its own restricted login. The owner does not enter an application deployment.
 This model works with Render's ordinary PostgreSQL 17 owner permissions and does
 not require a support ticket or a provider superuser.
 
+Use `sslmode=verify-full` on hosted URLs. For verified connections, the migration
+wrapper supplies Node's trusted CA certificates to `psql` when no libpq root
+certificate is configured. Explicit `sslrootcert`, `PGSSLROOTCERT`, and the
+standard `~/.postgresql/root.crt` take precedence. The temporary public CA bundle
+is removed when the wrapper exits; certificate and hostname checks remain enabled.
+
 The checked-in `infra/postgres/hosted-access.json` names the five runtime
 capabilities, their replaceable logins, and the metadata verifier. Set
 `DATABASE_MIGRATION_ROLE` to the actual provider owner and
