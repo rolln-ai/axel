@@ -47,11 +47,13 @@ protected release environment:
 4. Store each URL in its matching protected service secret. Render services also
    need an external preflight URL with the same login as the internal runtime URL.
    Store `DATABASE_VERIFY_URL` and set `DATABASE_VERIFY_LOGIN_ROLE` to the first
-   verifier login in the registry. Use the existing credential-sync workflows,
-   one service at a time. Their checks use the checked-in registry in Render mode.
-5. Run the migration workflow, then deploy each application through its release
-   workflow. Check exact deployment URLs, production domains, and the delivery
-   canary. Keep old credentials valid until the rollout succeeds.
+   verifier login in the registry.
+5. Run the migration workflow before credential sync. Then use the existing
+   credential-sync workflows, one service at a time. Render sync immediately
+   deploys the reviewed commit with the saved credential. Deploy Vercel and
+   Cloudflare through their release workflows after sync. Check exact deployment
+   URLs, production domains, and the delivery canary. Keep old credentials valid
+   until the rollout succeeds.
 6. Verify that every runtime uses its service login and old owner sessions have
    drained. Rotate the owner password and update only the protected migration
    secret. Retire old application deployments and credentials through the normal
