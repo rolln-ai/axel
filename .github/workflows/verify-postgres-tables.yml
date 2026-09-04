@@ -102,4 +102,6 @@ jobs:
       - name: Query catalog names only
         env:
           DATABASE_URL: ${{ secrets.DATABASE_VERIFY_URL }}
+          DATABASE_MIGRATION_ROLE: ""
+          DATABASE_MIGRATION_ROLE_REQUIRED: "0"
         run: node scripts/psql-safe.mjs -v ON_ERROR_STOP=1 -f "$RUNNER_TEMP/verify.sql"

@@ -65,7 +65,7 @@ async function main() {
   const options = databaseServiceRoleOptionsFromEnv(process.env);
   const connectionString = command === "verify-migration" ? process.env.DATABASE_URL : process.env.DATABASE_MIGRATION_URL;
   if (!connectionString) throw new Error("render_database_url_required");
-  const client = new pg.Client({ connectionString, ssl: controlPlanePgSslOption(connectionString),
+  const client = new pg.Client({ connectionString, ssl: controlPlanePgSslOption(connectionString, process.env.CONTROL_PLANE_DB_SSL_VERIFY),
     application_name: "axel-migration", connectionTimeoutMillis: 10000, statement_timeout: 30000 });
   try {
     await client.connect();
@@ -76,7 +76,7 @@ async function main() {
       await client.query("BEGIN READ ONLY");
       await verifyRenderMigration(client, options);
       await client.query("ROLLBACK");
-      await verifyRenderMaintenanceDatabase(connectionString, options);
+      await verifyRenderMaintenanceDatabase(connectionString, options, process.env.CONTROL_PLANE_DB_SSL_VERIFY);
     }
     console.log("render_database_access_ready");
   } finally { await client.end().catch(() => {}); }

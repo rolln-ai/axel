@@ -1062,11 +1062,11 @@ export async function verifyDatabaseServiceRole(client, rawOptions) {
   };
 }
 
-export async function verifyRenderMaintenanceDatabase(connectionString, options) {
+export async function verifyRenderMaintenanceDatabase(connectionString, options, verifyFlag) {
   if (!options.managedOwnerLogin) return;
   const url = new URL(connectionString);
   url.pathname = "/postgres";
-  const client = new Client({ connectionString: url.href, ssl: controlPlanePgSslOption(url.href),
+  const client = new Client({ connectionString: url.href, ssl: controlPlanePgSslOption(url.href, verifyFlag),
     connectionTimeoutMillis: 10000, statement_timeout: 15000 });
   const roles = [...options.verifyLoginRoles, options.canary.role,
     ...Object.values(options.registry).flatMap((entry) => [entry.loginRole, ...entry.existingLoginRoles])];
@@ -1105,7 +1105,7 @@ async function main() {
     await client.query("BEGIN READ ONLY");
     const result = await verifyDatabaseServiceRole(client, options);
     await client.query("ROLLBACK");
-    await verifyRenderMaintenanceDatabase(connectionString, options);
+    await verifyRenderMaintenanceDatabase(connectionString, options, process.env.CONTROL_PLANE_DB_SSL_VERIFY);
     process.stdout.write(
       `database_service_role_ready profile=${result.profile} table_privileges=${result.tablePrivilegeCount} sequence_privileges=${result.sequencePrivilegeCount}\n`,
     );
