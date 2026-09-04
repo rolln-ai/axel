@@ -83,16 +83,35 @@ export default function DocsPage() {
             Everything you need to <em>run webhooks</em> in production.
           </h1>
           <p className="heroLede">
-            Axel docs are split into four lanes: get started, primitives, operate, and reference. Each page is
-            short by design. If a page can&apos;t be skimmed in 60 seconds, it&apos;s split into smaller ones.
+            Start on Axel Cloud to use the managed service, or self-host the Apache-2.0
+            application. These guides cover sources, routing, delivery, and recovery.
           </p>
           <div className="heroActions">
             <a className="btn" href="https://app.axelapp.ai/signup">
-              Send your first webhook <span className="arrow">→</span>
+              Start on Axel Cloud <span className="arrow">→</span>
             </a>
-            <Link className="btn ghost" href="/pricing">
-              Pricing
+            <Link className="btn ghost" href="#self-hosting">
+              Self-hosting
             </Link>
+          </div>
+        </div>
+      </section>
+
+      <section className="feature" id="self-hosting">
+        <div className="container">
+          <div className="sectionHead">
+            <span className="kicker">Self-hosting</span>
+            <h2>Your infrastructure, the same application.</h2>
+            <p className="lede">
+              The small install runs Postgres, the dashboard, and delivery in Docker, with
+              Cloudflare Workers, Queues, and R2 for ingest. You maintain the host, backups,
+              and upgrades. Add ClickHouse for searchable event history and usage charts.
+              There is no Axel license fee. Provider charges depend on your traffic and setup.
+            </p>
+            <div className="heroActions">
+              <a className="btn" href="https://github.com/rolln-ai/axel/blob/main/docs/self-hosting.md">Installation guide <span className="arrow">→</span></a>
+              <a className="btn ghost" href="https://github.com/rolln-ai/axel">Browse the source</a>
+            </div>
           </div>
         </div>
       </section>

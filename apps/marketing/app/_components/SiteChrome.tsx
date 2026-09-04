@@ -109,6 +109,7 @@ export function SiteFooter() {
         </Link>
         <nav className="navLinks" aria-label="Footer">
           <Link href="/docs">Docs</Link>
+          <Link href="/docs#self-hosting">Self-hosting</Link>
           <Link href="/pricing">Pricing</Link>
           <Link href="/security">Security</Link>
           <a href="https://github.com/rolln-ai/axel">GitHub</a>

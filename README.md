@@ -4,14 +4,18 @@ Open-source webhook ingestion and event delivery platform. Capture webhooks
 from any source, filter and transform them with declarative routes, and
 deliver them to HTTP endpoints, Postgres, MongoDB, BigQuery, Databricks, or
 object storage, with retries, dead-lettering, replay, and delivery tracking.
-Axel Cloud includes 30 days of searchable event and delivery history. The
-small self-host profile omits ClickHouse, so analytics-backed search and usage
-views require you to provision and wire ClickHouse separately.
 
-Axel is the code behind [**Axel Cloud**](https://axelapp.ai), the hosted
-version for teams that do not want to run it themselves. Release workflows
-promote a reviewed `main` commit through the protected Production environment
-and apply pending migrations before application code.
+**[Start on Axel Cloud](https://app.axelapp.ai/signup)** to send your first
+webhook without deploying the stack. We run the infrastructure, updates, and
+delivery monitoring. Cloud includes 30 days of searchable event and delivery
+history. Start with 10,000 accepted inbound events per month free, then move to
+Pro with a $20 monthly usage credit. See [Cloud pricing](https://axelapp.ai/pricing).
+
+Prefer to run it yourself? The same application code is available under
+Apache-2.0, including the connectors, routing, retries, and replay. Follow the
+[self-hosting guide](docs/self-hosting.md) for the Docker and Cloudflare setup.
+You operate the infrastructure and upgrades. The small profile omits ClickHouse;
+add it when you need analytics-backed search and usage views.
 
 > Axel is pre-1.0. Expect configuration and API changes between minor releases.
 > Release notes will call out required migration steps.

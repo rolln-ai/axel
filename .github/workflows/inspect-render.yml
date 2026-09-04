@@ -1,0 +1,58 @@
+name: Inspect Render release access
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    environment: Production
+    timeout-minutes: 5
+    steps:
+      - name: Check configured production resources without reading credentials
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_OWNER_ID: ${{ vars.RENDER_OWNER_ID }}
+          RENDER_SERVICE_ID: ${{ vars.RENDER_DELIVERY_WORKERS_SERVICE_ID }}
+        run: |
+          node --input-type=module <<'JS'
+          const { RENDER_API_KEY: token, RENDER_OWNER_ID: owner, RENDER_SERVICE_ID: service } = process.env;
+          if (!token || !/^tea-[a-z0-9]+$/.test(owner ?? '') || !/^srv-[a-z0-9]+$/.test(service ?? '')) {
+            console.error('render_inspection_configuration_missing');
+            process.exit(1);
+          }
+          async function get(path) {
+            const response = await fetch(`https://api.render.com/v1${path}`, {
+              headers: { Authorization: `Bearer ${token}` },
+              signal: AbortSignal.timeout(15000),
+              redirect: 'error',
+            });
+            if (!response.ok) throw new Error(`render_inspection_http_${response.status}`);
+            return response.json();
+          }
+          try {
+            const result = await get(`/services/${service}`);
+            if (result.ownerId !== owner || result.name !== 'axel-delivery-workers' || result.type !== 'background_worker') {
+              throw new Error('render_inspection_target_mismatch');
+            }
+            console.log('Configured production worker: accessible');
+            const databases = await get(`/postgres?ownerId=${owner}&limit=100`);
+            if (!Array.isArray(databases) || databases.length >= 100) throw new Error('render_inspection_inventory_invalid');
+            for (const entry of databases) {
+              const db = entry.postgres;
+              if (db?.ownerId !== owner || !/^dpg-[a-z0-9]+$/.test(db.id ?? '')) {
+                throw new Error('render_inspection_database_mismatch');
+              }
+              // Only resource IDs are logged. Never print provider bodies or connection details.
+              console.log(`Production Postgres resource: ${db.id}`);
+            }
+            console.log(`Accessible production databases: ${databases.length}`);
+          } catch (error) {
+            console.error(/^render_inspection_[a-z0-9_]+$/.test(error.message ?? '') ? error.message : 'render_inspection_failed');
+            process.exitCode = 1;
+          }
+          JS

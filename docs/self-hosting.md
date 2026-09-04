@@ -5,6 +5,14 @@ server, lab machine, or existing VM. The public ingest and durable queues still
 use Cloudflare, while the control plane and all destination delivery run in
 Docker on your host.
 
+If you want to use Axel without operating the stack,
+[start on Axel Cloud](https://app.axelapp.ai/signup). Cloud runs the same
+application code with managed infrastructure, updates, delivery monitoring,
+and 30 days of searchable history. The free plan includes 10,000 accepted
+inbound events per month. [Cloud pricing](https://axelapp.ai/pricing) covers
+paid usage. Self-hosting has no Axel subscription or license fee; you pay your
+infrastructure providers and maintain the installation.
+
 ## What can actually be free
 
 Cloudflare Queues became available on the Workers Free plan in February 2026.
