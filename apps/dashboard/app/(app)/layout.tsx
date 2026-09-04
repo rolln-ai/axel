@@ -1,6 +1,6 @@
 import { Suspense, type ReactNode } from "react";
 import { AppShell } from "../AppShell";
-import { getAuthenticatedUser, getCurrentSession, type CurrentSession } from "../../lib/session";
+import { getAuthenticatedUser, getCurrentSession, loginRedirectPath, type CurrentSession } from "../../lib/session";
 import { PanelStackProvider } from "../_components/PanelStack";
 import { ToastProvider } from "../_components/Toast";
 import { CommandPaletteSetup } from "../_components/CommandPaletteSetup";
@@ -82,7 +82,7 @@ async function AuthenticatedShell({
     // their last one). Send the latter to onboarding to create a new workspace
     // instead of an unexplained bounce to /login.
     const auth = await getAuthenticatedUser();
-    redirect(auth ? "/welcome" : "/login");
+    redirect(auth ? "/welcome" : await loginRedirectPath());
   }
   return (
     <>

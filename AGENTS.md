@@ -33,14 +33,25 @@ and public browser suites require no production services.
 - UI: `AXEL_QA_PORT_BASE=34200 pnpm visual:smoke`. Reserve a different adjacent
   port pair per worktree. Inspect screenshots in `artifacts/visual-smoke` and
   the Playwright report. Check dark/light themes for dashboard changes.
+- Signed-in UI: `AXEL_QA_PORT_BASE=34200 pnpm test:dashboard`. The runner builds
+  the dashboard, seeds its own Docker Postgres, runs both themes and viewports,
+  and removes the database. It covers real sign-in, a persisted workspace
+  change, source isolation, keyboard focus, and sign-out. Pass Playwright options
+  to focus or repeat it, e.g. `pnpm test:dashboard --project=desktop-light --repeat-each=3 --workers=1`.
+  Sign-in throttling stays enabled; restart the disposable runner for longer batches.
+- Interactive QA: `AXEL_QA_PORT_BASE=34200 pnpm qa:dashboard`. Use the synthetic
+  login printed by the runner. Ctrl-C stops the server and removes its database.
 - Full local pass: `pnpm verify`. Requires Docker, jq, and Playwright Chromium.
   Install the browser once with `pnpm exec playwright install chromium`.
 
 The public browser suite checks marketing, authentication, public status, and
-protected-route redirects. It does not prove authenticated workspace flows.
-For those, use a disposable self-host install and synthetic data, then verify
-any production rollout using the existing protected smoke and canary workflows.
+protected-route redirects. The signed-in suite uses the real auth and Postgres
+paths with synthetic fixtures. It does not run ingestion or destination delivery;
+verify those using the existing protected smoke and canary workflows.
 Do not invent an auth bypass or record customer payloads in test artifacts.
+The signed-in runner rejects local Next environment files and does not inherit
+application credentials from the shell. Both browser suites use the same port
+pair, so run them sequentially within a worktree.
 
 ## Keep verification useful
 

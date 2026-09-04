@@ -1,12 +1,8 @@
 /**
  * Dot-notation column expansion for Postgres destinations.
  *
- * Shared, PURE (no I/O, no Node-only APIs — safe in a Cloudflare Worker) so the
- * live edge connector (postgres.js, apps/delivery-edge) and the Node reference
- * connector (pg, apps/delivery-service) compute identical column names + types
- * from the same payload. The number-one failure mode of "auto-expand columns"
- * is the ALTER and the INSERT disagreeing on a name — so the name is computed
- * ONCE here and both statements iterate the same `PgColumn[]`.
+ * Pure planning for the Node Postgres connector. Compute each column name
+ * once so ALTER and INSERT always agree.
  *
  * Behaviour (informed by Airbyte Typing&Deduping / Fivetran / Singer / ClickHouse):
  *   - Recurse plain objects to build dotted leaf keys (`{user:{email}}` →
@@ -262,18 +258,6 @@ export function mapInfoSchemaType(dataType: string): PgLeafType {
   }
 }
 
-/**
- * How jsonb-typed insert params must be encoded for the caller's driver:
- *   - "stringified" — node-pg (apps/delivery-service): pass an explicit JSON
- *     string with the `$n::jsonb` cast; node-pg does not reliably encode a
- *     plain object to jsonb otherwise.
- *   - "raw" — postgres.js (apps/delivery-edge): pass the RAW object/array with
- *     the `$n::jsonb` cast; postgres.js serialises it exactly once, and a
- *     pre-stringified value would double-encode into a quoted jsonb string
- *     (verified empirically).
- */
-export type PgJsonbParamEncoding = "stringified" | "raw";
-
 export interface DottedInsertPlan {
   /** Flattened leaf columns, in insert order. */
   columns: PgColumn[];
@@ -292,7 +276,7 @@ export interface DottedInsertPlan {
   /** Parameterised INSERT over all flattened columns (`$n::jsonb` casts on
    *  jsonb leaves). */
   insertSql: string;
-  /** Params matching `insertSql`, encoded per {@link PgJsonbParamEncoding}. */
+  /** Params matching `insertSql`; jsonb values are JSON strings for node-pg. */
   insertParams: unknown[];
 }
 
@@ -309,7 +293,6 @@ export function planDottedColumnInsert(
   table: string,
   payload: unknown,
   existingTypes: ReadonlyMap<string, PgLeafType>,
-  opts: { jsonbParams: PgJsonbParamEncoding },
 ): DottedInsertPlan | null {
   const columns = flattenPayloadToColumns(payload);
   if (columns.length === 0) return null;
@@ -350,7 +333,7 @@ export function planDottedColumnInsert(
     const type = effective.get(c.name)!;
     const { json, value } = coercePgValue(c.value, type);
     placeholders.push(json ? `$${i + 1}::jsonb` : `$${i + 1}`);
-    insertParams.push(json && opts.jsonbParams === "stringified" ? JSON.stringify(value) : value);
+    insertParams.push(json ? JSON.stringify(value) : value);
   });
   const insertSql = `INSERT INTO ${quotePgTable(table)} (${names}) VALUES (${placeholders.join(", ")})`;
 

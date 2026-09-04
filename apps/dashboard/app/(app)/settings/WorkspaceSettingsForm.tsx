@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { updateWorkspaceSettings } from "../../../lib/workspace-team-actions";
 import type { ActionState } from "../../../lib/action-data";
 import { WORKSPACE_TIMEZONE_OPTIONS } from "../../../lib/timezones";
@@ -27,17 +27,36 @@ export function WorkspaceSettingsForm({
   workspaceId: string;
   canEdit: boolean;
 }) {
-  const [state, action, pending] = useActionState<ActionState, FormData>(updateWorkspaceSettings, {});
+  const [state, setState] = useState<ActionState>({});
+  const [pending, setPending] = useState(false);
+  const [ready, setReady] = useState(false);
+  useEffect(() => setReady(true), []);
+
+  // Keep completion state outside the router's refresh transition. In production
+  // builds, useActionState could stay pending after the successful response arrived.
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (pending) return;
+    const formData = new FormData(event.currentTarget);
+    setPending(true);
+    try {
+      setState(await updateWorkspaceSettings({}, formData));
+    } catch {
+      setState({ error: "Could not confirm the update. Reload to check the saved settings." });
+    } finally {
+      setPending(false);
+    }
+  }
 
   return (
-    <form action={action} className="space-y-4">
+    <form onSubmit={save} className="space-y-4">
       <div className="space-y-1.5">
         <Label htmlFor="workspace-name">Name</Label>
         <Input
           id="workspace-name"
           name="workspaceName"
           defaultValue={name}
-          disabled={!canEdit || pending}
+          disabled={!ready || !canEdit || pending}
           minLength={2}
           maxLength={80}
         />
@@ -47,7 +66,7 @@ export function WorkspaceSettingsForm({
         <Select
           name="workspaceTimezone"
           defaultValue={timezone}
-          disabled={!canEdit || pending}
+          disabled={!ready || !canEdit || pending}
         >
           <SelectTrigger id="workspace-timezone" className="w-full">
             <SelectValue />
@@ -76,7 +95,7 @@ export function WorkspaceSettingsForm({
       {state.notice ? (
         <Alert><AlertDescription>{state.notice}</AlertDescription></Alert>
       ) : null}
-      <Button type="submit" disabled={!canEdit || pending}>
+      <Button type="submit" disabled={!ready || !canEdit || pending}>
         {pending ? "Saving…" : "Save workspace"}
       </Button>
     </form>

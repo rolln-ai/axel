@@ -97,8 +97,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm visual:smoke
+      - name: Verify signed-in workspace flows
+        run: pnpm test:dashboard
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        if: failure()
+        if: always()
         with:
           name: visual-smoke-artifacts
           retention-days: 7
@@ -106,6 +108,8 @@ jobs:
             artifacts/visual-smoke
             artifacts/playwright-report
             artifacts/playwright-results
+            artifacts/dashboard-report
+            artifacts/dashboard-results
 
   postgres-schema:
     # Keep this display name aligned with the protected-branch required check.

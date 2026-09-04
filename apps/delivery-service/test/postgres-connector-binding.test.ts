@@ -216,17 +216,7 @@ describe("postgres connector — dotted_columns mode", () => {
   });
 });
 
-/**
- * Shared dotted-columns planner (@axel/shared planDottedColumnInsert) — the
- * pure add/widen/ALTER/INSERT planning both drivers execute. Each case runs
- * in BOTH param encodings: "stringified" (node-pg, this service) and "raw"
- * (postgres.js, delivery-edge), pinning that the SQL is identical and only
- * the jsonb param encoding differs.
- */
-describe.each([
-  { jsonbParams: "stringified" as const, driver: "node-pg (delivery-service)" },
-  { jsonbParams: "raw" as const, driver: "postgres.js (delivery-edge)" },
-])("shared dotted-columns planner — $driver", ({ jsonbParams }) => {
+describe("dotted-columns planner", () => {
   const types = (entries: Record<string, PgLeafType>) => new Map(Object.entries(entries));
 
   it("plans ADDs for new leaf keys and an INSERT over quoted dot names", () => {
@@ -234,7 +224,6 @@ describe.each([
       "events_flat",
       { user: { email: "a@b.test", age: 30 }, kind: "signup", active: true },
       types({}),
-      { jsonbParams },
     );
     expect(plan).not.toBeNull();
     expect(plan!.addColumnsSql).toContain('ALTER TABLE "public"."events_flat"');
@@ -248,9 +237,7 @@ describe.each([
   });
 
   it("plans a WIDEN when an event's value type conflicts with the live column", () => {
-    const plan = planDottedColumnInsert("t", { score: "high" }, types({ score: "bigint" }), {
-      jsonbParams,
-    });
+    const plan = planDottedColumnInsert("t", { score: "high" }, types({ score: "bigint" }));
     expect(plan!.adds).toEqual([]);
     expect(plan!.widens).toEqual([{ name: "score", type: "text" }]);
     expect(plan!.widenColumnSql).toEqual([
@@ -258,19 +245,15 @@ describe.each([
     ]);
   });
 
-  it("encodes jsonb params per driver: JSON string for node-pg, raw value for postgres.js", () => {
-    const plan = planDottedColumnInsert("t", { tags: ["a", "b"] }, types({}), { jsonbParams });
+  it("encodes arrays as JSON strings for node-pg", () => {
+    const plan = planDottedColumnInsert("t", { tags: ["a", "b"] }, types({}));
     expect(plan!.insertSql).toContain("$1::jsonb");
-    expect(plan!.insertParams).toEqual(
-      jsonbParams === "stringified" ? ['["a","b"]'] : [["a", "b"]],
-    );
+    expect(plan!.insertParams).toEqual(['["a","b"]']);
   });
 
   it("stringifies a jsonb-vs-text conflict into the text column (never narrows)", () => {
     // Arrays are jsonb LEAVES (objects recurse into dotted columns).
-    const plan = planDottedColumnInsert("t", { meta: [1, 2] }, types({ meta: "text" }), {
-      jsonbParams,
-    });
+    const plan = planDottedColumnInsert("t", { meta: [1, 2] }, types({ meta: "text" }));
     // jsonb value into a text column → effective type stays text, value stringified.
     expect(plan!.widens).toEqual([]);
     expect(plan!.effective.get("meta")).toBe("text");
@@ -278,13 +261,11 @@ describe.each([
   });
 
   it("returns null for an empty payload (nothing to insert)", () => {
-    expect(planDottedColumnInsert("t", {}, types({}), { jsonbParams })).toBeNull();
+    expect(planDottedColumnInsert("t", {}, types({}))).toBeNull();
   });
 
   it("plans the 42703 stale-cache repair from the fresh schema", () => {
-    const plan = planDottedColumnInsert("t", { a: 1, b: "x" }, types({ a: "bigint", b: "text" }), {
-      jsonbParams,
-    });
+    const plan = planDottedColumnInsert("t", { a: 1, b: "x" }, types({ a: "bigint", b: "text" }));
     // Fresh read shows "b" was dropped externally — repair re-adds it with the
     // effective type; "a" survives so it isn't re-added.
     const repair = planColumnRepair("t", plan!, types({ a: "bigint" }));
