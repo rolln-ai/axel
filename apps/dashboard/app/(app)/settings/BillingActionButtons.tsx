@@ -35,8 +35,8 @@ export function BillingActionButtons({
       }
       window.location.href = body.url;
       return {};
-    } catch (err) {
-      return { error: err instanceof Error ? err.message : "Billing request failed" };
+    } catch {
+      return { error: "Billing request failed. Try again." };
     }
   });
   useActionStateToast({ error: billing.error });

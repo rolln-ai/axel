@@ -156,7 +156,7 @@ async function emitReplayJobCompleteNotification(
     // notifications table missing on an older deploy) is logged but never
     // allowed to break delivery.
     if (isDuplicateNotificationError(err)) return;
-    console.error("[replay-job] completion notification insert failed", err);
+    console.error("[replay-job] completion notification insert failed");
   }
 }
 
@@ -174,7 +174,7 @@ export async function advanceReplayJobOnTerminal(
   try {
     await bumpReplayJobCounter(pool, jobId, outcome);
     await finishReplayJobIfComplete(pool, jobId);
-  } catch (err) {
-    console.error("[replay-job] terminal advance failed", err);
+  } catch {
+    console.error("[replay-job] terminal advance failed");
   }
 }

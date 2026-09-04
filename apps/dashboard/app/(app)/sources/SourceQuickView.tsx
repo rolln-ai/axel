@@ -1,5 +1,6 @@
 "use client";
 
+import type { SourceProvider } from "@axel/shared";
 import { LocalTime } from "../../_components/LocalTime";
 import {
   QuickViewMeta,
@@ -7,6 +8,11 @@ import {
   QuickViewTrigger,
 } from "../../_components/QuickView";
 import { EntityStatusBadge } from "../../_components/StatusBadges";
+import {
+  sourceAuthenticationCopy,
+  sourceAuthHeaderExample,
+  sourceUsesAxelToken,
+} from "../../../lib/source-ingest-auth";
 
 export interface SourceQuickViewRow {
   id: string;
@@ -14,6 +20,7 @@ export interface SourceQuickViewRow {
   status: string;
   max_events_per_minute: number | null;
   created_at: string;
+  provider: SourceProvider;
 }
 
 export function SourceQuickView({
@@ -46,6 +53,8 @@ function SourcePanelBody({
   source: SourceQuickViewRow;
   ingestUrl: string;
 }) {
+  const authHeader = sourceAuthHeaderExample(source.provider);
+
   return (
     <div className="flex flex-col gap-5">
       <QuickViewMeta>
@@ -71,7 +80,7 @@ function SourcePanelBody({
         <h3 className="text-sm font-semibold">Ingest endpoint</h3>
         <pre className="overflow-x-auto rounded-md bg-muted p-3 font-mono text-[11px] leading-relaxed">
 {`POST ${ingestUrl}
-  x-axel-token: <token>
+  ${authHeader}
   content-type: application/json
 
   { "type": "...", ... }`}
@@ -79,10 +88,11 @@ function SourcePanelBody({
       </div>
 
       <div className="rounded-md border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
-        <strong className="text-foreground">How tokens work.</strong> Each source has a rotating token —
-        rotate from the source detail page if you suspect it leaked. Tokens
-        aren&apos;t recoverable after creation; only their last 4 chars and a
-        sha-256 fingerprint are stored.
+        <strong className="text-foreground">How authentication works.</strong>{" "}
+        {sourceAuthenticationCopy(source.provider)}
+        {sourceUsesAxelToken(source.provider)
+          ? " Rotate the token from the source detail page if you suspect exposure. Axel stores its hash, not the plaintext value."
+          : " Axel does not use a source token for this named-provider request."}
       </div>
     </div>
   );

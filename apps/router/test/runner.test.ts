@@ -122,7 +122,8 @@ describe("startPeriodicRunner", () => {
     expect(sink.events).toHaveLength(1);
     expect(sink.events[0]?.rule).toBe("periodic_job_failure");
     expect(sink.events[0]?.severity).toBe("warn");
-    expect(sink.events[0]?.summary).toContain("broken");
+    expect(sink.events[0]?.summary).toBe("Periodic background job failed.");
+    expect(JSON.stringify(sink.events[0])).not.toContain("boom");
     expect(handle.stats()["broken"]?.failures).toBe(1);
     expect(handle.stats()["broken"]?.runs).toBe(1);
 

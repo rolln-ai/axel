@@ -9,7 +9,7 @@
 # billing rollup. The dashboard renders empty states without it.
 services:
   postgres:
-    image: postgres:16
+    image: postgres:16@sha256:f1c3376c26f2609ab9f29f71f824103fe2fcd8ee0346485cb6122a4f93df6f94
     environment:
       POSTGRES_USER: axel
       POSTGRES_PASSWORD: axel
@@ -25,7 +25,7 @@ services:
       retries: 10
 
   clickhouse:
-    image: clickhouse/clickhouse-server:24.8
+    image: clickhouse/clickhouse-server:24.8@sha256:1ffa82edee000a42c09313bd9f1293d94c570aee74babc1b3ca9983a35fa597b
     environment:
       CLICKHOUSE_USER: axel
       CLICKHOUSE_PASSWORD: axel

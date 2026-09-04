@@ -8,11 +8,11 @@ import { breadcrumbLd, type FaqItem, faqPageLd } from "../../lib/structured-data
 const securityFaqs: FaqItem[] = [
   {
     q: "Is Axel secure?",
-    a: "Axel encrypts payloads in transit (TLS 1.2+) and at rest, stores ingest tokens as SHA-256 hashes, scopes data access by workspace_id, evaluates only declarative route rules, and records privileged actions in an append-only audit log.",
+    a: "Axel uses TLS 1.2 or newer at the edge, encrypts raw R2 objects at rest, stores source ingest tokens as SHA-256 hashes, scopes data access by workspace_id, and evaluates declarative route rules without eval.",
   },
   {
     q: "Is Axel SOC 2 compliant?",
-    a: "Axel is in a SOC 2 Type I observation period, with the Type I report planned for Q3 2026 and SOC 2 Type II plus ISO 27001 targeted for 2027. The underlying controls — encryption, tenant isolation, audit logging, and egress guards — are already in place.",
+    a: "Axel is in a SOC 2 Type I observation period, with the Type I report planned for Q3 2026 and SOC 2 Type II plus ISO 27001 targeted for 2027. Current product controls include edge TLS, source-token hashing, workspace scoping, and outbound request guards.",
   },
   {
     q: "How does Axel handle and store my data?",
@@ -37,13 +37,13 @@ export const metadata: Metadata = pageMetadata({
 
 const promises: Array<{ title: string; body: string; stat: string }> = [
   {
-    title: "Tokens never stored in plaintext",
-    body: "Source ingest tokens are stored as SHA-256 hashes. Validation is constant-time. Tokens are never written to logs or audit trails — only their hash prefix.",
+    title: "Source tokens hashed at rest",
+    body: "Axel stores custom-source ingest tokens as SHA-256 hashes and validates them with constant-time comparison. Custom sources require the x-axel-token request header, and Axel rejects source credentials in URL query parameters. Named-provider sources use the provider's signature or webhook Basic Auth instead of an Axel token.",
     stat: "SHA-256",
   },
   {
-    title: "Payloads encrypted in transit & at rest",
-    body: "TLS 1.2+ on the edge. Cloudflare R2 encrypts every object at rest. ClickHouse logs are stored in customer-managed encryption keys when self-hosted.",
+    title: "Raw payloads encrypted in transit and at rest",
+    body: "The edge requires TLS 1.2 or newer. Cloudflare R2 encrypts raw payload objects at rest. Self-host operators remain responsible for encryption of their Docker host, backups, and any optional data stores.",
     stat: "TLS 1.2+",
   },
   {
@@ -62,9 +62,9 @@ const promises: Array<{ title: string; body: string; stat: string }> = [
     stat: "30 days",
   },
   {
-    title: "Audit log on every privileged action",
-    body: "Workspace creation, member invites, role changes, source mutations and destination writes are all recorded with actor + timestamp in an append-only audit log.",
-    stat: "append-only",
+    title: "Audit records for administrative changes",
+    body: "Axel records supported administrative changes such as workspace creation, member invitations and role changes, source lifecycle changes, destination changes, and replay requests. Each record includes an actor and timestamp.",
+    stat: "actor + time",
   },
 ];
 
@@ -73,7 +73,7 @@ const roadmap: Array<{ when: string; title: string; status: "shipped" | "in-flig
   { when: "Shipped", title: "Per-source rate limits, body & depth caps, stable delivery IDs", status: "shipped" },
   { when: "Shipped", title: "Egress guards on every destination connector — private-network and SSRF targets rejected, including connection tests", status: "shipped" },
   { when: "Shipped", title: "Versioned signing secrets bound to their source, constant-time sign-in, fail-closed ingest", status: "shipped" },
-  { when: "Shipped", title: "Release gate: every version passes a deterministic check suite plus an adversarial audit before deploy", status: "shipped" },
+  { when: "Shipped", title: "Automated CI checks and protected production deployment workflows", status: "shipped" },
   { when: "In flight", title: "Self-serve GDPR erasure for data-subject requests", status: "in-flight" },
   { when: "Q3 2026", title: "SOC 2 Type I report (in observation now)", status: "planned" },
   { when: "Q4 2026", title: "BYO-cloud option for regulated workloads", status: "planned" },

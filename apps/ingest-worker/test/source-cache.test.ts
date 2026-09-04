@@ -67,8 +67,9 @@ describe("resolveSource", () => {
 });
 
 describe("kvSourceCache", () => {
-  it("writes JSON values with the expected TTL", async () => {
+  it("deletes instead of persisting positive source credentials", async () => {
     const calls: Array<{ key: string; value: string; ttl: number | undefined }> = [];
+    const deleted: string[] = [];
     const kv: KVNamespaceLike = {
       async get() {
         return null;
@@ -76,18 +77,14 @@ describe("kvSourceCache", () => {
       async put(key, value, options) {
         calls.push({ key, value, ttl: options?.expirationTtl });
       },
-      async delete() {},
+      async delete(key) {
+        deleted.push(key);
+      },
     };
     const cache = kvSourceCache(kv);
     await cache.put("src_1", { kind: "hit", source: SAMPLE }, 300);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.key).toBe("src:src_1");
-    expect(JSON.parse(calls[0]!.value)).toEqual({
-      kind: "hit",
-      source: SAMPLE,
-      cache_schema_version: 3,
-    });
-    expect(calls[0]?.ttl).toBe(300);
+    expect(calls).toHaveLength(0);
+    expect(deleted).toEqual(["src:src_1"]);
   });
 
   it("clamps the expirationTtl to KV's 60s minimum", async () => {

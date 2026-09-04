@@ -1,7 +1,13 @@
-import type { Source, SubjectKeyPath } from "@axel/shared";
+import {
+  readBoundedJsonResponse,
+  resolveInternalServiceEndpoint,
+  type Source,
+  type SubjectKeyPath,
+} from "@axel/shared";
 import { SourceLookupUnavailableError } from "./source-lookup-error.js";
 
 const SOURCE_LOOKUP_TIMEOUT_MS = 5_000;
+const SOURCE_LOOKUP_RESPONSE_MAX_BYTES = 1024 * 1024;
 
 export interface DeliverySourceLookupEnv {
   DELIVERY_SERVICE_URL?: string;
@@ -26,9 +32,17 @@ export async function lookupSourceFromDeliveryService(
   sourceId: string,
   fetchImpl: SourceLookupFetch = fetch,
 ): Promise<Source | null> {
-  const baseUrl = env.DELIVERY_SERVICE_URL?.trim();
   const sharedSecret = env.SOURCE_LOOKUP_SHARED_SECRET || env.DELIVERY_SHARED_SECRET;
-  if (!baseUrl || !sharedSecret) {
+  if (!env.DELIVERY_SERVICE_URL || !sharedSecret) {
+    throw new SourceLookupUnavailableError("delivery-service source lookup is not configured");
+  }
+  let endpoint: string;
+  try {
+    endpoint = resolveInternalServiceEndpoint(
+      env.DELIVERY_SERVICE_URL,
+      "/internal/source",
+    );
+  } catch {
     throw new SourceLookupUnavailableError("delivery-service source lookup is not configured");
   }
 
@@ -36,7 +50,7 @@ export async function lookupSourceFromDeliveryService(
   const timer = setTimeout(() => controller.abort(), SOURCE_LOOKUP_TIMEOUT_MS);
   let response: Response;
   try {
-    response = await fetchImpl(`${baseUrl.replace(/\/$/, "")}/internal/source`, {
+    response = await fetchImpl(endpoint, {
       method: "POST",
       redirect: "manual",
       headers: {
@@ -56,6 +70,7 @@ export async function lookupSourceFromDeliveryService(
   // must not be interpreted as an unknown source. Only a validated 200 body can
   // produce a cacheable miss.
   if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
     throw new SourceLookupUnavailableError(
       `delivery-service source lookup returned HTTP ${response.status}`,
     );
@@ -63,7 +78,7 @@ export async function lookupSourceFromDeliveryService(
 
   let payload: unknown;
   try {
-    payload = await response.json();
+    payload = await readBoundedJsonResponse(response, SOURCE_LOOKUP_RESPONSE_MAX_BYTES);
   } catch {
     throw new SourceLookupUnavailableError("delivery-service source lookup returned invalid JSON");
   }

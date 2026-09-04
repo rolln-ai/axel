@@ -4,6 +4,7 @@ import { FirstRunSetupFlow } from "../_components/FirstRunSetupFlow";
 import { listSourcesCached } from "../../../lib/repositories";
 import { requireSession } from "../../../lib/session";
 import { resolveIngestBaseUrl } from "@axel/shared";
+import type { SourceProvider } from "@axel/shared";
 
 export const dynamic = "force-dynamic";
 
@@ -27,7 +28,12 @@ export default async function SetupPage() {
   if (!canMutate) redirect("/dashboard");
 
   const ingestBase = resolveIngestBaseUrl(process.env);
-  let existingSource: { id: string; name: string; ingestUrl: string } | undefined;
+  let existingSource: {
+    id: string;
+    name: string;
+    ingestUrl: string;
+    provider: SourceProvider;
+  } | undefined;
   try {
     const sources = await listSourcesCached(session.activeWorkspace.workspace_id);
     // Newest webhook source (listSources is created_at DESC). Lets a reloaded
@@ -39,6 +45,7 @@ export default async function SetupPage() {
         id: latest.id,
         name: latest.name,
         ingestUrl: `${ingestBase}/in/${latest.id}`,
+        provider: latest.provider,
       };
     }
   } catch {

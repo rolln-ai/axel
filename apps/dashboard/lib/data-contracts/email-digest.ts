@@ -61,7 +61,12 @@ export interface DigestSummary {
   emails_skipped_empty: number;
   /** Recipients whose digest for today was already claimed by an earlier run. */
   emails_skipped_duplicate: number;
-  errors: Array<{ user_id: string; workspace_id: string; message: string }>;
+  errors: Array<{
+    code:
+      | "digest_claim_prune_failed"
+      | "digest_recipient_failed"
+      | "digest_send_failed";
+  }>;
   duration_ms: number;
 }
 
@@ -656,32 +661,20 @@ export async function runDigestJob(deps: DigestDeps = {}): Promise<DigestSummary
       if (result.ok) summary.emails_sent += 1;
       else {
         await releaseSend(r.workspace_id, r.user_id, claimedDate);
-        summary.errors.push({
-          user_id: r.user_id,
-          workspace_id: r.workspace_id,
-          message: result.error ?? "unknown send failure",
-        });
+        summary.errors.push({ code: "digest_send_failed" });
       }
-    } catch (err) {
+    } catch {
       if (claimedDate) {
         await releaseSend(r.workspace_id, r.user_id, claimedDate).catch(() => {});
       }
-      summary.errors.push({
-        user_id: r.user_id,
-        workspace_id: r.workspace_id,
-        message: err instanceof Error ? err.message : String(err),
-      });
+      summary.errors.push({ code: "digest_recipient_failed" });
     }
   }
 
   try {
     await pruneClaims();
-  } catch (err) {
-    summary.errors.push({
-      user_id: "",
-      workspace_id: "",
-      message: `digest claim prune failed: ${err instanceof Error ? err.message : String(err)}`,
-    });
+  } catch {
+    summary.errors.push({ code: "digest_claim_prune_failed" });
   }
 
   summary.duration_ms = Date.now() - start;

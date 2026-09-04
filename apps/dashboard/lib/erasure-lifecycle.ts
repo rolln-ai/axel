@@ -88,10 +88,10 @@ export async function processErasureRequest(
   let found: FindResult;
   try {
     found = await find(workspaceId, identifiers, {});
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "find_failed";
-    await failRequest(q, requestId, message);
-    return blank(requestId, "failed", message);
+  } catch {
+    const errorCode = "erasure_find_failed";
+    await failRequest(q, requestId, errorCode);
+    return blank(requestId, "failed", errorCode);
   }
 
   const matchedEventCount = found.matches.length;
@@ -138,11 +138,13 @@ export async function processErasureRequest(
   let result: ExecuteResult;
   try {
     result = await execute(workspaceId, found.matches, deps.env ? { env: deps.env } : {});
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "execute_failed";
-    await failRequest(q, requestId, message);
-    return blank(requestId, "failed", message, matchedEventCount, found.coverage);
+  } catch {
+    const errorCode = "erasure_execute_failed";
+    await failRequest(q, requestId, errorCode);
+    return blank(requestId, "failed", errorCode, matchedEventCount, found.coverage);
   }
+
+  const auditStoreResults = sanitizeErasureStoreResults(result.storeResults);
 
   // Terminal state. Gate off → `found` (located only, nothing erased). If any
   // store failed, the erasure is incomplete → `failed`, but we STILL persist the
@@ -153,7 +155,7 @@ export async function processErasureRequest(
   // was NOT erased — treat it as a failure, not silently as 'partial' (audit: a
   // skipped R2 store masked un-erased raw payloads). out_of_scope is legitimately
   // not-in-scope, so it is NOT counted as incomplete.
-  const incompleteStores = result.storeResults.filter(
+  const incompleteStores = auditStoreResults.filter(
     (s) => s.status === "failed" || s.status === "skipped",
   );
   const terminal: "found" | "partial" | "failed" = result.dryRun
@@ -171,7 +173,7 @@ export async function processErasureRequest(
         SET state = $2, store_results = $3, deletion_manifest_hash = $4,
             error_message = $5, finished_at = now()
       WHERE id = $1`,
-    [requestId, terminal, JSON.stringify(result.storeResults), result.deletionManifestHash, errorMessage],
+    [requestId, terminal, JSON.stringify(auditStoreResults), result.deletionManifestHash, errorMessage],
   );
 
   return {
@@ -180,16 +182,30 @@ export async function processErasureRequest(
     matchedEventCount,
     coverage: found.coverage,
     executed: !result.dryRun,
-    storeResults: result.storeResults,
+    storeResults: auditStoreResults,
     deletionManifestHash: result.deletionManifestHash,
   };
 }
 
-async function failRequest(q: Queryable, requestId: string, message: string): Promise<void> {
+async function failRequest(q: Queryable, requestId: string, errorCode: string): Promise<void> {
   await q.query(
     `UPDATE erasure_requests SET state = 'failed', error_message = $2, finished_at = now() WHERE id = $1`,
-    [requestId, message.slice(0, 1000)],
+    [requestId, errorCode],
   );
+}
+
+function sanitizeErasureStoreResults(
+  storeResults: ExecuteResult["storeResults"],
+): ExecuteResult["storeResults"] {
+  return storeResults.map((result) => {
+    if (result.status !== "failed") return result;
+    return {
+      store: result.store,
+      status: result.status,
+      count: result.count,
+      detail: "store_operation_failed",
+    };
+  });
 }
 
 function blank(

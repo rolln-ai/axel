@@ -1,11 +1,15 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   invalidateEdgeSourceCache,
-  requireEdgeSourceCacheInvalidation,
+  requireEdgeSourceAuthoritySync,
+  requireEdgeSourceFence,
   rowToEdgePayload,
   type SourceDbRow,
 } from "../lib/edge-invalidation";
 import { encryptSourceSigningSecret } from "../lib/source-secret";
+
+const { dbQueryMock } = vi.hoisted(() => ({ dbQueryMock: vi.fn() }));
+vi.mock("../lib/db", () => ({ db: () => ({ query: dbQueryMock }) }));
 
 // Deterministic 32-byte dummy key for unit tests only — not a real secret. gitleaks:allow
 const MASTER_KEY = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"; // gitleaks:allow
@@ -101,28 +105,53 @@ describe("invalidateEdgeSourceCache", () => {
   });
 });
 
-describe("requireEdgeSourceCacheInvalidation", () => {
+describe("requireEdgeSourceFence", () => {
   it("rejects when the admin URL or token is missing", async () => {
-    await expect(requireEdgeSourceCacheInvalidation("src_x", { env: {} }))
+    await expect(requireEdgeSourceFence("src_x", { env: {} }))
       .rejects.toThrow(/not configured/);
-    await expect(requireEdgeSourceCacheInvalidation("src_x", {
+    await expect(requireEdgeSourceFence("src_x", {
       env: { INGEST_ADMIN_URL: "https://ingest.example.test" },
     })).rejects.toThrow(/not configured/);
+  });
+
+  it("uses the authority fence endpoint and returns a one-use token", async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const fakeFetch: typeof fetch = (async (url, init) => {
+      calls.push({
+        url: String(url),
+        body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+      });
+      return new Response(null, { status: 204 });
+    }) as typeof fetch;
+
+    const fence = await requireEdgeSourceFence("src_x", {
+      fetchImpl: fakeFetch,
+      env: {
+        INGEST_ADMIN_URL: "https://ingest.example.test/admin/source-authority/sync",
+        INGEST_ADMIN_TOKEN: "tk",
+      },
+    });
+
+    expect(calls[0]?.url).toBe("https://ingest.example.test/admin/source-authority/fence");
+    expect(calls[0]?.body.source_id).toBe("src_x");
+    expect(calls[0]?.body.fence_token).toMatch(/^[a-f0-9]{32}$/);
+    expect(fence).toEqual({ sourceId: "src_x", fenceToken: calls[0]?.body.fence_token });
   });
 
   it("propagates an admin non-2xx so auth mutations cannot commit", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const fakeFetch: typeof fetch = (async () => (
-      new Response('{"error":"cache_invalidation_failed"}', { status: 503 })
+      new Response('{"error":"provider-private-response"}', { status: 503 })
     )) as typeof fetch;
 
-    await expect(requireEdgeSourceCacheInvalidation("src_x", {
+    await expect(requireEdgeSourceFence("src_x", {
       fetchImpl: fakeFetch,
       env: {
         INGEST_ADMIN_URL: "https://ingest.example.test",
         INGEST_ADMIN_TOKEN: "tk",
       },
-    })).rejects.toThrow(/edge admin POST 503/);
+    })).rejects.toThrow(/edge_admin_http_503/);
+    expect(JSON.stringify(errorSpy.mock.calls)).not.toContain("provider-private-response");
     errorSpy.mockRestore();
   });
 
@@ -139,10 +168,62 @@ describe("requireEdgeSourceCacheInvalidation", () => {
       },
     };
 
-    await expect(requireEdgeSourceCacheInvalidation("src_x", options))
-      .rejects.toThrow(/required edge cache POST failed/);
+    await expect(requireEdgeSourceFence("src_x", options))
+      .rejects.toThrow(/edge_admin_transport_failed/);
     await expect(invalidateEdgeSourceCache("src_x", options)).resolves.toBeUndefined();
     errorSpy.mockRestore();
+  });
+});
+
+describe("requireEdgeSourceAuthoritySync", () => {
+  it("loads committed Postgres state before releasing the fence", async () => {
+    dbQueryMock.mockResolvedValueOnce({ rows: [sourceRow({ secret_token_hash: "committed-hash" })] });
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const fakeFetch: typeof fetch = (async (url, init) => {
+      calls.push({
+        url: String(url),
+        body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+      });
+      return new Response(null, { status: 204 });
+    }) as typeof fetch;
+
+    await requireEdgeSourceAuthoritySync(
+      { sourceId: "src_1", fenceToken: "fence_token_00000001" },
+      "ws_1",
+      {
+        fetchImpl: fakeFetch,
+        env: {
+          INGEST_ADMIN_URL: "https://ingest.example.test",
+          INGEST_ADMIN_TOKEN: "tk",
+        },
+      },
+    );
+
+    expect(calls[0]?.url).toBe("https://ingest.example.test/admin/source-authority/sync");
+    expect(calls[0]?.body).toMatchObject({
+      source_id: "src_1",
+      fence_token: "fence_token_00000001",
+      source: { source_id: "src_1", secret_token: "committed-hash" },
+    });
+  });
+
+  it("publishes null after a committed deletion", async () => {
+    dbQueryMock.mockResolvedValueOnce({ rows: [] });
+    let body: Record<string, unknown> | undefined;
+    const fakeFetch: typeof fetch = (async (_url, init) => {
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(null, { status: 204 });
+    }) as typeof fetch;
+
+    await requireEdgeSourceAuthoritySync(
+      { sourceId: "src_1", fenceToken: "fence_token_00000001" },
+      "ws_1",
+      {
+        fetchImpl: fakeFetch,
+        env: { INGEST_ADMIN_URL: "https://ingest.example.test", INGEST_ADMIN_TOKEN: "tk" },
+      },
+    );
+    expect(body?.source).toBeNull();
   });
 });
 
@@ -169,7 +250,7 @@ describe("rowToEdgePayload signing-secret fail-closed behavior", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     await expect(rowToEdgePayload(sourceRow({
       signing_secret_ciphertext: Buffer.alloc(8),
-    }))).rejects.toThrow(/configured but could not be decrypted|refusing to publish/);
+    }))).rejects.toThrow(/current_signing_secret_decrypt_failed/);
     errorSpy.mockRestore();
   });
 
@@ -180,7 +261,7 @@ describe("rowToEdgePayload signing-secret fail-closed behavior", () => {
       provider: "stripe",
       signing_secret_ciphertext: current.ciphertext,
       signing_secret_previous_ciphertext: Buffer.alloc(8),
-    }))).rejects.toThrow(/previous signing secret.*could not be decrypted/);
+    }))).rejects.toThrow(/previous_signing_secret_decrypt_failed/);
     errorSpy.mockRestore();
   });
 });

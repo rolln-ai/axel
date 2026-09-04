@@ -54,4 +54,18 @@ describe("markRouteErrored", () => {
       markRouteErrored({}, "ws-1", "rt-1", { reason: "r", message: "m" }),
     ).rejects.toThrow(/not configured/);
   });
+
+  it("rejects an unsafe service URL before sending the credential", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    await expect(markRouteErrored(
+      {
+        DELIVERY_SERVICE_URL: "https://user:password@delivery.example",
+        DELIVERY_SHARED_SECRET: "shh",
+      },
+      "ws-1",
+      "rt-1",
+      { reason: "r", message: "m" },
+    )).rejects.toThrow(/internal_service_url_invalid/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });

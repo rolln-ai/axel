@@ -7,5 +7,32 @@ allow_licenses:
   - ISC
   - 0BSD
   - CC0-1.0
+  - CC-BY-4.0
   - Unlicense
+  - MIT-0
+  - MIT OR Apache-2.0
+  - (MIT OR CC0-1.0)
+  - MIT AND ISC
+  - (Apache-2.0 WITH LLVM-exception)
+  - (AFL-2.1 OR BSD-3-Clause)
+  - (MPL-2.0 OR Apache-2.0)
+  - MPL-2.0
+  - LGPL-3.0-or-later
+  - Python-2.0
+  - BlueOak-1.0.0
+# These are locked, build-only provider CLIs. Sentry publishes one FSL package
+# per supported host platform; none is shipped in Axel runtimes. Vercel's
+# package includes Apache-2.0 text but omits the package.json license field, so
+# GitHub reports it as Unknown.
+allow_dependencies_licenses:
+  - pkg:npm/@sentry/cli
+  - pkg:npm/@sentry/cli-darwin
+  - pkg:npm/@sentry/cli-linux-arm
+  - pkg:npm/@sentry/cli-linux-arm64
+  - pkg:npm/@sentry/cli-linux-i686
+  - pkg:npm/@sentry/cli-linux-x64
+  - pkg:npm/@sentry/cli-win32-arm64
+  - pkg:npm/@sentry/cli-win32-i686
+  - pkg:npm/@sentry/cli-win32-x64
+  - pkg:npm/@vercel/cli-auth
 comment_summary_in_pr: always

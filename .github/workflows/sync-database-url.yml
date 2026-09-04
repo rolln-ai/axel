@@ -1,0 +1,280 @@
+name: Sync Production Database Credential
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: Non-secret change record; do not include credentials
+        required: true
+        type: string
+      target:
+        description: One production target to update
+        required: true
+        default: vercel-dashboard
+        type: choice
+        options:
+          - vercel-dashboard
+          - render-delivery-native
+          - render-delivery-workers
+          - render-pull-worker
+          - cloudflare-delivery-edge
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Save one database credential
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: Production
+    env:
+      RENDER_OWNER_ID: ${{ vars.RENDER_OWNER_ID }}
+      DATABASE_SERVICE_REQUIRE_FINAL_STATE: ${{ vars.DATABASE_SERVICE_REQUIRE_FINAL_STATE }}
+      DATABASE_LEGACY_RUNTIME_CAPABILITY_ROLE: ${{ vars.DATABASE_LEGACY_RUNTIME_CAPABILITY_ROLE }}
+      DATABASE_LEGACY_RUNTIME_LOGIN_ROLES: ${{ vars.DATABASE_LEGACY_RUNTIME_LOGIN_ROLES }}
+      DATABASE_DASHBOARD_CAPABILITY_ROLE: ${{ vars.DATABASE_DASHBOARD_CAPABILITY_ROLE }}
+      DATABASE_DASHBOARD_LOGIN_ROLE: ${{ vars.DATABASE_DASHBOARD_LOGIN_ROLE }}
+      DATABASE_DASHBOARD_EXISTING_LOGIN_ROLES: ${{ vars.DATABASE_DASHBOARD_EXISTING_LOGIN_ROLES }}
+      DATABASE_DELIVERY_NATIVE_CAPABILITY_ROLE: ${{ vars.DATABASE_DELIVERY_NATIVE_CAPABILITY_ROLE }}
+      DATABASE_DELIVERY_NATIVE_LOGIN_ROLE: ${{ vars.DATABASE_DELIVERY_NATIVE_LOGIN_ROLE }}
+      DATABASE_DELIVERY_NATIVE_EXISTING_LOGIN_ROLES: ${{ vars.DATABASE_DELIVERY_NATIVE_EXISTING_LOGIN_ROLES }}
+      DATABASE_DELIVERY_WORKERS_CAPABILITY_ROLE: ${{ vars.DATABASE_DELIVERY_WORKERS_CAPABILITY_ROLE }}
+      DATABASE_DELIVERY_WORKERS_LOGIN_ROLE: ${{ vars.DATABASE_DELIVERY_WORKERS_LOGIN_ROLE }}
+      DATABASE_DELIVERY_WORKERS_EXISTING_LOGIN_ROLES: ${{ vars.DATABASE_DELIVERY_WORKERS_EXISTING_LOGIN_ROLES }}
+      DATABASE_PULL_WORKER_CAPABILITY_ROLE: ${{ vars.DATABASE_PULL_WORKER_CAPABILITY_ROLE }}
+      DATABASE_PULL_WORKER_LOGIN_ROLE: ${{ vars.DATABASE_PULL_WORKER_LOGIN_ROLE }}
+      DATABASE_PULL_WORKER_EXISTING_LOGIN_ROLES: ${{ vars.DATABASE_PULL_WORKER_EXISTING_LOGIN_ROLES }}
+      DATABASE_DELIVERY_EDGE_CAPABILITY_ROLE: ${{ vars.DATABASE_DELIVERY_EDGE_CAPABILITY_ROLE }}
+      DATABASE_DELIVERY_EDGE_LOGIN_ROLE: ${{ vars.DATABASE_DELIVERY_EDGE_LOGIN_ROLE }}
+      DATABASE_DELIVERY_EDGE_EXISTING_LOGIN_ROLES: ${{ vars.DATABASE_DELIVERY_EDGE_EXISTING_LOGIN_ROLES }}
+      DATABASE_MIGRATION_ROLE: ${{ vars.DATABASE_MIGRATION_ROLE }}
+      DATABASE_MIGRATION_LOGIN_ROLE: ${{ vars.DATABASE_MIGRATION_LOGIN_ROLE }}
+      DATABASE_MIGRATION_EXISTING_LOGIN_ROLES: ${{ vars.DATABASE_MIGRATION_EXISTING_LOGIN_ROLES }}
+      DATABASE_MIGRATION_OWNER_PARENT_ROLES: ${{ vars.DATABASE_MIGRATION_OWNER_PARENT_ROLES }}
+      DATABASE_TRANSITIONAL_OWNER_LOGIN_ROLE: ${{ vars.DATABASE_TRANSITIONAL_OWNER_LOGIN_ROLE }}
+      DATABASE_VERIFY_CAPABILITY_ROLE: ${{ vars.DATABASE_VERIFY_CAPABILITY_ROLE }}
+      DATABASE_VERIFY_LOGIN_ROLE: ${{ vars.DATABASE_VERIFY_LOGIN_ROLE }}
+      DATABASE_VERIFY_EXISTING_LOGIN_ROLES: ${{ vars.DATABASE_VERIFY_EXISTING_LOGIN_ROLES }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 9.12.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Validate the bounded rotation request
+        shell: bash
+        env:
+          ROTATION_REASON: ${{ inputs.reason }}
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          test -n "${ROTATION_REASON//[[:space:]]/}"
+          case "$TARGET" in
+            vercel-dashboard|render-delivery-native|render-delivery-workers|render-pull-worker|cloudflare-delivery-edge) ;;
+            *) exit 1 ;;
+          esac
+
+      # Installation is secretless. Each candidate URL appears only on its
+      # target-specific verification or provider-save step below. Render uses
+      # an external preflight URL and an internal runtime URL for the same role.
+      - name: Install locked deployment dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify the dashboard database candidate
+        if: ${{ inputs.target == 'vercel-dashboard' }}
+        env:
+          DATABASE_SERVICE_URL: ${{ secrets.DATABASE_DASHBOARD_URL }}
+          DATABASE_SERVICE_PROFILE: dashboard
+        run: node scripts/verify-database-service-role.mjs
+
+      - name: Verify the native delivery database candidate
+        if: ${{ inputs.target == 'render-delivery-native' }}
+        env:
+          DATABASE_SERVICE_URL: ${{ secrets.DATABASE_DELIVERY_NATIVE_PREFLIGHT_URL }}
+          DATABASE_SERVICE_PROFILE: delivery-native
+        run: node scripts/verify-database-service-role.mjs
+
+      - name: Verify the delivery workers database candidate
+        if: ${{ inputs.target == 'render-delivery-workers' }}
+        env:
+          DATABASE_SERVICE_URL: ${{ secrets.DATABASE_DELIVERY_WORKERS_PREFLIGHT_URL }}
+          DATABASE_SERVICE_PROFILE: delivery-workers
+        run: node scripts/verify-database-service-role.mjs
+
+      - name: Verify the pull worker database candidate
+        if: ${{ inputs.target == 'render-pull-worker' }}
+        env:
+          DATABASE_SERVICE_URL: ${{ secrets.DATABASE_PULL_WORKER_PREFLIGHT_URL }}
+          DATABASE_SERVICE_PROFILE: pull-worker
+        run: node scripts/verify-database-service-role.mjs
+
+      - name: Verify the edge delivery database candidate
+        if: ${{ inputs.target == 'cloudflare-delivery-edge' }}
+        env:
+          DATABASE_SERVICE_URL: ${{ secrets.DATABASE_DELIVERY_EDGE_URL }}
+          DATABASE_SERVICE_PROFILE: delivery-edge
+        run: node scripts/verify-database-service-role.mjs
+
+      - name: Save on the Vercel dashboard project
+        if: ${{ inputs.target == 'vercel-dashboard' }}
+        shell: bash
+        env:
+          DATABASE_RUNTIME_URL: ${{ secrets.DATABASE_DASHBOARD_URL }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID_DASHBOARD: ${{ secrets.VERCEL_PROJECT_ID_DASHBOARD }}
+        run: |
+          set -euo pipefail
+          : "${DATABASE_RUNTIME_URL:?DATABASE_DASHBOARD_URL is required}"
+          : "${VERCEL_TOKEN:?VERCEL_TOKEN is required}"
+          : "${VERCEL_ORG_ID:?VERCEL_ORG_ID is required}"
+          : "${VERCEL_PROJECT_ID_DASHBOARD:?VERCEL_PROJECT_ID_DASHBOARD is required}"
+          mkdir -p .vercel
+          jq -n --arg org "$VERCEL_ORG_ID" --arg project "$VERCEL_PROJECT_ID_DASHBOARD" \
+            '{orgId:$org,projectId:$project}' > .vercel/project.json
+          printf '%s' "$DATABASE_RUNTIME_URL" \
+            | pnpm exec vercel env add DATABASE_URL production --sensitive --force --yes \
+              >/dev/null
+          echo "Saved DATABASE_URL on the Vercel dashboard production environment."
+
+      - name: Save on the native delivery Render service
+        id: render_native_secret
+        if: ${{ inputs.target == 'render-delivery-native' }}
+        shell: bash
+        env:
+          DATABASE_RUNTIME_URL: ${{ secrets.DATABASE_DELIVERY_NATIVE_URL }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_NAME: axel-delivery-native
+        run: |
+          set -euo pipefail
+          node scripts/sync-render-database-url.mjs
+          echo "saved=true" >> "$GITHUB_OUTPUT"
+
+      - name: Save on the delivery workers Render service
+        id: render_workers_secret
+        if: ${{ inputs.target == 'render-delivery-workers' }}
+        shell: bash
+        env:
+          DATABASE_RUNTIME_URL: ${{ secrets.DATABASE_DELIVERY_WORKERS_URL }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_NAME: axel-delivery-workers
+        run: |
+          set -euo pipefail
+          node scripts/sync-render-database-url.mjs
+          echo "saved=true" >> "$GITHUB_OUTPUT"
+
+      - name: Save on the pull worker Render service
+        id: render_pull_secret
+        if: ${{ inputs.target == 'render-pull-worker' }}
+        shell: bash
+        env:
+          DATABASE_RUNTIME_URL: ${{ secrets.DATABASE_PULL_WORKER_URL }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_NAME: axel-pull-worker
+        run: |
+          set -euo pipefail
+          node scripts/sync-render-database-url.mjs
+          echo "saved=true" >> "$GITHUB_OUTPUT"
+
+      - name: Activate the saved Render configuration
+        if: >-
+          ${{ startsWith(inputs.target, 'render-') &&
+              (steps.render_native_secret.outputs.saved == 'true' ||
+               steps.render_workers_secret.outputs.saved == 'true' ||
+               steps.render_pull_secret.outputs.saved == 'true') }}
+        shell: bash
+        env:
+          TARGET: ${{ inputs.target }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+            render-delivery-native) render_service=axel-delivery-native ;;
+            render-delivery-workers) render_service=axel-delivery-workers ;;
+            render-pull-worker) render_service=axel-pull-worker ;;
+            *) exit 1 ;;
+          esac
+          bash scripts/deploy-render-service.sh "$render_service" "$GITHUB_SHA" --force-redeploy
+
+      - name: Verify the activated Render runtime end to end
+        if: >-
+          ${{ startsWith(inputs.target, 'render-') &&
+              (steps.render_native_secret.outputs.saved == 'true' ||
+               steps.render_workers_secret.outputs.saved == 'true' ||
+               steps.render_pull_secret.outputs.saved == 'true') }}
+        run: bash scripts/smoke.sh
+        env:
+          AXEL_MARKETING_URL: ${{ vars.AXEL_MARKETING_URL || 'https://axelapp.ai' }}
+          AXEL_APP_URL: ${{ vars.AXEL_APP_URL || 'https://app.axelapp.ai' }}
+          AXEL_INGEST_URL: ${{ vars.AXEL_INGEST_URL || 'https://ingest.axelapp.ai' }}
+          AXEL_DELIVERY_URL: ${{ vars.AXEL_DELIVERY_URL || 'https://axel-delivery-native.onrender.com' }}
+          AXEL_REQUIRE_OPERATIONAL_STATUS: "1"
+          AXEL_OPS_TEST_TOKEN: ${{ secrets.OPS_TEST_TOKEN }}
+          AXEL_REQUIRE_SENTRY_TEST: "1"
+          AXEL_REQUIRE_DELIVERY_CANARY: "1"
+          AXEL_CANARY_INGEST_URL: ${{ secrets.AXEL_CANARY_INGEST_URL }}
+          AXEL_CANARY_INGEST_AUTH_HEADER: ${{ secrets.AXEL_CANARY_INGEST_AUTH_HEADER }}
+          AXEL_CANARY_INGEST_AUTH_VALUE: ${{ secrets.AXEL_CANARY_INGEST_AUTH_VALUE }}
+          AXEL_CANARY_RECEIPT_URL: ${{ secrets.AXEL_CANARY_RECEIPT_URL }}
+          AXEL_CANARY_RECEIPT_AUTH_HEADER: ${{ secrets.AXEL_CANARY_RECEIPT_AUTH_HEADER }}
+          AXEL_CANARY_RECEIPT_AUTH_VALUE: ${{ secrets.AXEL_CANARY_RECEIPT_AUTH_VALUE }}
+
+      - name: Save on the delivery edge Cloudflare Worker
+        id: cloudflare_secret
+        if: ${{ inputs.target == 'cloudflare-delivery-edge' }}
+        shell: bash
+        env:
+          DATABASE_RUNTIME_URL: ${{ secrets.DATABASE_DELIVERY_EDGE_URL }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          : "${DATABASE_RUNTIME_URL:?DATABASE_DELIVERY_EDGE_URL is required}"
+          printf '%s' "$DATABASE_RUNTIME_URL" \
+            | pnpm --dir apps/delivery-edge exec wrangler secret put DATABASE_URL \
+              >/dev/null
+          pnpm --dir apps/delivery-edge exec wrangler secret list --format json \
+            | node -e '
+                let source = "";
+                process.stdin.setEncoding("utf8");
+                process.stdin.on("data", (chunk) => { source += chunk; });
+                process.stdin.on("end", () => {
+                  const names = JSON.parse(source).map((entry) => entry.name);
+                  if (!names.includes("DATABASE_URL")) {
+                    throw new Error("DATABASE_URL is missing from the Worker secret-name list");
+                  }
+                });
+              '
+          echo "saved=true" >> "$GITHUB_OUTPUT"
+          echo "Saved DATABASE_URL and confirmed its binding on delivery-edge."
+
+      - name: Verify the activated Cloudflare runtime end to end
+        if: ${{ inputs.target == 'cloudflare-delivery-edge' && steps.cloudflare_secret.outputs.saved == 'true' }}
+        run: bash scripts/smoke.sh
+        env:
+          AXEL_MARKETING_URL: ${{ vars.AXEL_MARKETING_URL || 'https://axelapp.ai' }}
+          AXEL_APP_URL: ${{ vars.AXEL_APP_URL || 'https://app.axelapp.ai' }}
+          AXEL_INGEST_URL: ${{ vars.AXEL_INGEST_URL || 'https://ingest.axelapp.ai' }}
+          AXEL_DELIVERY_URL: ${{ vars.AXEL_DELIVERY_URL || 'https://axel-delivery-native.onrender.com' }}
+          AXEL_REQUIRE_OPERATIONAL_STATUS: "1"
+          AXEL_OPS_TEST_TOKEN: ${{ secrets.OPS_TEST_TOKEN }}
+          AXEL_REQUIRE_SENTRY_TEST: "1"
+          AXEL_REQUIRE_DELIVERY_CANARY: "1"
+          AXEL_CANARY_INGEST_URL: ${{ secrets.AXEL_CANARY_INGEST_URL }}
+          AXEL_CANARY_INGEST_AUTH_HEADER: ${{ secrets.AXEL_CANARY_INGEST_AUTH_HEADER }}
+          AXEL_CANARY_INGEST_AUTH_VALUE: ${{ secrets.AXEL_CANARY_INGEST_AUTH_VALUE }}
+          AXEL_CANARY_RECEIPT_URL: ${{ secrets.AXEL_CANARY_RECEIPT_URL }}
+          AXEL_CANARY_RECEIPT_AUTH_HEADER: ${{ secrets.AXEL_CANARY_RECEIPT_AUTH_HEADER }}
+          AXEL_CANARY_RECEIPT_AUTH_VALUE: ${{ secrets.AXEL_CANARY_RECEIPT_AUTH_VALUE }}

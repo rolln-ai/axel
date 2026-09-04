@@ -4,22 +4,17 @@ This public runbook covers the product-level order of operations. Axel Cloud
 resource names, credential locations, vendor account details, and emergency
 contacts belong in the private operations repository.
 
-## Deploy the existing Axel Cloud service
+## Keep database maintenance outside application releases
 
-The protected release workflow disables and reads back Render git auto-deploy
-for `axel-clickhouse` before it can deploy. The initial hardening merge must use
-Render's `[skip render]` commit guard so provider auto-deploy cannot race that
-first enforcement. When the Dockerfile, image, or server configuration changes,
-dispatch `Deploy Render Services` from protected `main` and select only
-`axel-clickhouse`. Check the latest backup first, then enter
-`deploy-stateful-clickhouse` in the confirmation field. The workflow deploys
-the selected commit SHA, waits until that exact deploy is live, and runs the
-production smoke and delivery canary.
+The protected application release workflow cannot deploy `axel-clickhouse`.
+Database container changes require a separate, explicitly reviewed maintenance
+procedure after the latest backup has been restored successfully. They must
+never share an application release path.
 
-The `all` option deliberately excludes ClickHouse. A ClickHouse deploy replaces
-the database container and causes a short restart. Render keeps the attached
-`clickhouse-data` disk, but that disk is not a backup. Use the separate
-`Migrate ClickHouse` workflow for schema changes.
+A ClickHouse container replacement causes a restart. An attached data disk is
+not a backup. Use the separate `Migrate ClickHouse` workflow for schema changes,
+and record the independent approval, backup, restore, and rollback evidence for
+any future database-container change in the private operations repository.
 
 ## Before the change
 

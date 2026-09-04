@@ -90,9 +90,9 @@ export async function proposeRouteArtifactsAction(
     samples = await sampleSourceEvents(workspaceId, map.source_id, {
       maxEvents: 30,
     });
-  } catch (err) {
+  } catch {
     return {
-      error: `Couldn't sample events for fixture generation: ${err instanceof Error ? err.message : String(err)}`,
+      error: "Couldn't sample events for fixture generation. Try again.",
     };
   }
   if (samples.length === 0) {
@@ -157,9 +157,9 @@ export async function attachToRouteAction(
     samples = await sampleSourceEvents(workspaceId, map.source_id, {
       maxEvents: 30,
     });
-  } catch (err) {
+  } catch {
     return {
-      error: `Couldn't sample events for fixture generation: ${err instanceof Error ? err.message : String(err)}`,
+      error: "Couldn't sample events for fixture generation. Try again.",
     };
   }
   if (samples.length === 0) {
@@ -289,9 +289,9 @@ export async function attachToRouteAction(
       version_id: result.version_id,
       fixture_result,
     };
-  } catch (err) {
+  } catch {
     return {
-      error: `Couldn't attach route: ${err instanceof Error ? err.message : String(err)}`,
+      error: "Couldn't attach the route. No changes were saved. Try again.",
     };
   }
 }

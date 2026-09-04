@@ -1,5 +1,6 @@
 "use client";
 
+import type { SourceProvider } from "@axel/shared";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { WEBHOOK_SOURCE_TYPE } from "../helpers";
@@ -13,9 +14,13 @@ import { InboundProviderFields, SyncBehaviorNotice } from "./shared";
 export function SourceStep({
   sourceName,
   onSourceNameChange,
+  provider,
+  onProviderChange,
 }: {
   sourceName: string;
   onSourceNameChange: (name: string) => void;
+  provider: SourceProvider;
+  onProviderChange: (provider: SourceProvider) => void;
 }) {
   return (
     <>
@@ -60,9 +65,9 @@ export function SourceStep({
         />
       </div>
 
-      <InboundProviderFields />
+      <InboundProviderFields value={provider} onValueChange={onProviderChange} />
 
-      <SyncBehaviorNotice />
+      <SyncBehaviorNotice provider={provider} />
     </>
   );
 }

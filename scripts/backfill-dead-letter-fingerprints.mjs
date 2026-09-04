@@ -19,6 +19,7 @@ import { createRequire } from "node:module";
 import { parseArgs } from "node:util";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { controlPlanePgSslOption } from "./control-plane-pg.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
 
@@ -58,7 +59,13 @@ try {
 }
 if (typeof deadLetterFingerprint !== "function") fail("deadLetterFingerprint not exported from @axel/shared");
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: controlPlanePgSslOption(
+    process.env.DATABASE_URL,
+    process.env.CONTROL_PLANE_DB_SSL_VERIFY,
+  ),
+});
 
 let scanned = 0;
 let updated = 0;

@@ -237,8 +237,8 @@ export function parsePastedSample(raw: string): ParsedPaste {
   if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
     try {
       return { payload: JSON.parse(trimmed), headers: {}, parse_error: null };
-    } catch (err: unknown) {
-      return { payload: null, headers: {}, parse_error: `JSON parse failed: ${err instanceof Error ? err.message : String(err)}` };
+    } catch {
+      return { payload: null, headers: {}, parse_error: "JSON parse failed." };
     }
   }
 
@@ -259,8 +259,8 @@ export function parsePastedSample(raw: string): ParsedPaste {
     try {
       const payload = body.length > 0 ? JSON.parse(body) : null;
       return { payload, headers, parse_error: null };
-    } catch (err: unknown) {
-      return { payload: null, headers, parse_error: `Body wasn't JSON: ${err instanceof Error ? err.message : String(err)}` };
+    } catch {
+      return { payload: null, headers, parse_error: "Body wasn't valid JSON." };
     }
   }
 

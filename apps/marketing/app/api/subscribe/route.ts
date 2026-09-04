@@ -30,7 +30,7 @@ function resolveProvider(): Provider {
   return "kit";
 }
 
-async function subscribeKit(email: string): Promise<{ ok: boolean; status: number; detail: string }> {
+async function subscribeKit(email: string): Promise<{ ok: boolean; status: number }> {
   const apiKey = process.env.NEWSLETTER_API_KEY as string;
   const formId = process.env.NEWSLETTER_FORM_ID;
 
@@ -49,10 +49,10 @@ async function subscribeKit(email: string): Promise<{ ok: boolean; status: numbe
     body: JSON.stringify({ email_address: email }),
   });
 
-  return { ok: res.ok, status: res.status, detail: await res.text() };
+  return { ok: res.ok, status: res.status };
 }
 
-async function subscribeButtondown(email: string): Promise<{ ok: boolean; status: number; detail: string }> {
+async function subscribeButtondown(email: string): Promise<{ ok: boolean; status: number }> {
   const apiKey = process.env.NEWSLETTER_API_KEY as string;
 
   const res = await fetch("https://api.buttondown.com/v1/subscribers", {
@@ -68,11 +68,11 @@ async function subscribeButtondown(email: string): Promise<{ ok: boolean; status
   // we never leak list membership back to the caller.
   if (res.status === 400) {
     const body = await res.text();
-    if (body.includes("already")) return { ok: true, status: 200, detail: "already subscribed" };
-    return { ok: false, status: 400, detail: body };
+    if (body.includes("already")) return { ok: true, status: 200 };
+    return { ok: false, status: 400 };
   }
 
-  return { ok: res.ok, status: res.status, detail: await res.text() };
+  return { ok: res.ok, status: res.status };
 }
 
 export async function POST(request: Request) {
@@ -99,7 +99,7 @@ export async function POST(request: Request) {
   const provider = resolveProvider();
 
   if (provider === "console") {
-    console.info(`[newsletter] no provider configured; would subscribe ${normalized}`);
+    console.info("[newsletter] no provider configured; signup accepted as a no-op");
     return NextResponse.json({ ok: true });
   }
 
@@ -108,15 +108,15 @@ export async function POST(request: Request) {
       provider === "buttondown" ? await subscribeButtondown(normalized) : await subscribeKit(normalized);
 
     if (!result.ok) {
-      // Log the provider's reason, but never surface it — the response body can
+      // Keep the provider body out of both logs and the public response; it can
       // reveal whether an address is already on the list.
-      console.error(`[newsletter] ${provider} rejected signup (${result.status}): ${result.detail}`);
+      console.error(`[newsletter] ${provider} rejected signup (${result.status})`);
       return NextResponse.json({ error: "Something went wrong. Please try again." }, { status: 502 });
     }
 
     return NextResponse.json({ ok: true });
-  } catch (error) {
-    console.error("[newsletter] provider request failed", error);
+  } catch {
+    console.error("[newsletter] provider request failed");
     return NextResponse.json({ error: "Something went wrong. Please try again." }, { status: 502 });
   }
 }

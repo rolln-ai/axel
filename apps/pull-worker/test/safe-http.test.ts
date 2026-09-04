@@ -69,7 +69,7 @@ describe("pull-worker safe HTTP", () => {
       sink: new InMemoryPullRecordSink(),
     });
 
-    expect(summary.streams[0]).toMatchObject({ status: "failed", error: "HTTP 302" });
+    expect(summary.streams[0]).toMatchObject({ status: "failed", error: "http_error_302" });
     expect(cancel).toHaveBeenCalledOnce();
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(fetchImpl.mock.calls[0]?.[0]).toMatch(/^https:\/\/acme-test\.chargebee\.com\//);
@@ -109,7 +109,7 @@ describe("pull-worker safe HTTP", () => {
       sink: new InMemoryPullRecordSink(),
     });
 
-    expect(summary.streams[0]).toMatchObject({ status: "failed", error: "HTTP 302" });
+    expect(summary.streams[0]).toMatchObject({ status: "failed", error: "http_error_302" });
     expect(cancel).toHaveBeenCalledOnce();
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(fetchImpl.mock.calls[0]?.[0]).toMatch(/^https:\/\/acme-test\.myshopify\.com\//);
@@ -148,7 +148,7 @@ describe("pull-worker safe HTTP", () => {
       sink: new InMemoryPullRecordSink(),
     });
 
-    expect(summary.streams[0]).toMatchObject({ status: "failed", error: "HTTP 302" });
+    expect(summary.streams[0]).toMatchObject({ status: "failed", error: "http_error_302" });
     expect(cancel).toHaveBeenCalledOnce();
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(fetchImpl.mock.calls[0]?.[0]).toMatch(/^https:\/\/api\.stripe\.com\//);

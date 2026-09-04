@@ -25,7 +25,7 @@ export default function GlobalError({
 }) {
   useEffect(() => {
     Sentry.captureException(error);
-    console.error("[dashboard global]", error);
+    console.error("[dashboard global] route error");
   }, [error]);
 
   return (

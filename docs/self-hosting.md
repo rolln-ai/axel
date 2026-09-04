@@ -16,6 +16,14 @@ after each empty pull, and caps sustained-idle polling at 60 seconds. At that
 ceiling, an idle installation uses about 1,440 Queue reads per day, plus a few
 reads while the delay ramps up.
 
+Workers Free also limits each HTTP Worker request to 10 ms of CPU time. Network
+wait time does not count, but request validation, hashing, and payload parsing
+do. Cloudflare can terminate a request that repeatedly exceeds the limit with
+error 1102. Test the largest representative synthetic payload before relying
+on this profile. A sender must retry any request that does not receive Axel's
+202 response. Move to Workers Paid if normal ingest traffic cannot stay within
+the Free CPU limit.
+
 Axel normally uses about six additional Queue operations for one event routed
 to one destination. After sustained-idle polling, the remaining daily
 allowance is roughly 8,500 operations, or about 1,400 one-destination events
@@ -36,9 +44,11 @@ $0 guarantee.
 
 Official limits change over time. Check the current
 [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/),
+[Workers limits](https://developers.cloudflare.com/workers/platform/limits/),
 [Queues pricing](https://developers.cloudflare.com/queues/platform/pricing/),
-and [R2 pricing](https://developers.cloudflare.com/r2/pricing/) before relying
-on a specific ceiling.
+[R2 pricing](https://developers.cloudflare.com/r2/pricing/), and
+[`workers.dev` guidance](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/)
+before relying on a specific ceiling or hostname.
 
 ## Small-install architecture
 
@@ -76,8 +86,10 @@ retention or indexed erasure is required.
 ## Requirements
 
 - Docker with the Compose plugin
-- Node 20 or newer and pnpm 9 for the pinned Cloudflare provisioning command
-- A Cloudflare account with a Workers subdomain enabled
+- Node 22.13 or newer on the Node 22 LTS line, and pnpm 9, for the pinned
+  Cloudflare provisioning command
+- A Cloudflare account with a `workers.dev` subdomain enabled, or an active
+  Cloudflare zone for a custom ingest domain
 - A provisioning-only Cloudflare API token that can edit Workers scripts,
   Queues, and R2 storage
 - A separate, account-restricted runtime Cloudflare token with Queues Edit and
@@ -105,11 +117,12 @@ container.
      ./scripts/axel-self-host init
    ```
 
-   This writes `.env.selfhost` with mode `0600` and generates independent
+   This writes `.env.selfhost` with mode `0600`. It generates independent
    256-bit values for credential encryption, internal service authentication,
-   ingest administration, and cron authentication. It also generates a random
-   resource-name suffix and an installation ID so two installs do not silently
-   claim the same Cloudflare resources. It will not overwrite an existing file.
+   ingest administration, cron authentication, and the three Postgres
+   identities. It also generates a random resource-name suffix and an
+   installation ID so two installs do not silently claim the same Cloudflare
+   resources. It will not overwrite an existing file.
 
 2. Add the operator-supplied Cloudflare values in `.env.selfhost`:
 
@@ -118,6 +131,20 @@ container.
    CLOUDFLARE_API_TOKEN=your-provisioning-token
    CLOUDFLARE_RUNTIME_API_TOKEN=your-runtime-token
    ```
+
+   For a new Cloudflare account, open Workers & Pages in the Cloudflare
+   dashboard once and confirm the account's `workers.dev` subdomain before
+   running `edge`. The non-interactive provisioner cannot accept Cloudflare's
+   first-use subdomain prompt. Cloudflare notes that a new `workers.dev`
+   hostname can return 523 for about a minute while it activates. Wait and
+   retry the health check before treating that first response as a failed
+   deployment.
+
+   The default ingest URL uses `workers.dev`, which Cloudflare describes as a
+   personal or hobby endpoint rather than a business-critical production
+   domain. To use a domain in an active Cloudflare zone, set
+   `AXEL_INGEST_DOMAIN=ingest.example.com` before running `edge`. Keep the
+   sender's retry policy enabled in either mode.
 
    The provisioning token deploys Workers and creates the installation's
    Queue and R2 bucket. It never enters an application container. The separate
@@ -150,7 +177,9 @@ container.
    ```
 
    On its first run, the helper installs the lockfile-pinned workspace tools if
-   they are not present. It does not use an arbitrary globally installed
+   they are not present. It does this with package lifecycle scripts disabled
+   and before loading `.env.selfhost`, so install hooks cannot inherit the
+   deployment secrets. It does not use an arbitrary globally installed
    Wrangler version. The command creates missing resources without deleting
    existing ones. It creates the ingress, delivery, and dead-letter Queues,
    enables HTTP pull, creates the private R2 bucket, adds a 30-day raw-payload
@@ -159,6 +188,16 @@ container.
    Before deploying, it verifies that the raw bucket has neither public r2.dev
    access nor a custom domain and that its expiry rule is enabled, covers every
    prefix, and is exactly 30 days.
+
+   Worker updates are staged before they receive traffic. The helper captures
+   both current deployment states before the first upload and requires every
+   existing deployment to have one version serving 100% of traffic. It then
+   activates the two complete code-and-secret versions, applies triggers, and
+   reads the final deployments back. An activation, trigger, or readback failure
+   restores every prior active deployment that may have changed. If a first
+   installation had no prior deployment to restore, or Cloudflare rejects a
+   rollback, the command fails loudly and requires inspection of both Workers
+   before it may be retried.
 
    Created resources are recorded in `.selfhost/ownership.env`. If that local
    proof is missing, the helper refuses to attach to same-named queues or an R2
@@ -179,6 +218,23 @@ container.
    ./scripts/axel-self-host status
    ```
 
+   `up` builds a migration image from this checkout and runs the full database
+   setup before starting the application containers. The bootstrap account
+   creates a stable `NOLOGIN` owner. A separate migration login can use that
+   owner only through `SET ROLE`, and owns no database objects itself. The
+   dashboard and delivery containers receive independent DSNs. Dashboard uses
+   the reviewed `dashboard` profile. The single `DELIVERY_ROLE=all` container
+   uses the exact union of `delivery-native` and `delivery-workers`; the
+   optional Parquet delivery queue remains disabled. Neither login
+   can create tables, use `schema_migrations`, execute database routines, or
+   switch to the owner. The setup job removes the former shared `axel_app` and
+   `axel_runtime` roles after revoking their grants. Existing installations
+   can keep its existing `POSTGRES_PASSWORD` as the admin credential, or rename
+   it to `POSTGRES_ADMIN_PASSWORD`, and must replace
+   `POSTGRES_RUNTIME_PASSWORD` with distinct
+   `POSTGRES_DASHBOARD_PASSWORD` and `POSTGRES_DELIVERY_PASSWORD` values before
+   the first upgrade using this release.
+
    Caddy uses ports 80 and 443 for a public hostname. The default localhost
    configuration uses port 8080 instead and binds it only to `127.0.0.1`.
    Change `AXEL_HTTP_PORT`, `AXEL_HTTPS_PORT`, or `AXEL_LOCAL_PORT` in
@@ -187,10 +243,14 @@ container.
    HTTP listener reachable from other machines; public deployments should use
    Caddy's HTTPS listener instead.
 
-   The generated `AXEL_PUBLISH_PUBLIC_PORTS` is `0` for a loopback site and `1`
-   for a public hostname. The helper adds the public-port Compose override only
-   in the latter mode, so a local install does not reserve or expose host ports
-   80 and 443.
+The generated `AXEL_PUBLISH_PUBLIC_PORTS` is `0` for a loopback site and `1`
+for a public hostname. The helper adds the public-port Compose override only
+in the latter mode, so a local install does not reserve or expose host ports
+80 and 443.
+
+The generated `ORDERING_KEY_HMAC_SECRET` is installed only on the ingest
+Worker. It pseudonymizes low-entropy FIFO keys before they enter Queue or
+Durable Object state. Keep it private and stable across Worker releases.
 
 5. Inspect logs or stop the stack without deleting data:
 
@@ -198,6 +258,28 @@ container.
    ./scripts/axel-self-host logs
    ./scripts/axel-self-host down
    ```
+
+## Rotate internal service credentials without downtime
+
+The delivery container accepts temporary previous values for both internal
+bearers. The Workers receive only the current values; neither previous value is
+uploaded to Cloudflare. To rotate either bearer:
+
+1. In `.env.selfhost`, move the known old value to the matching
+   `DELIVERY_SHARED_SECRET_PREVIOUS` or
+   `SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS` entry, then replace the current value
+   with a distinct random value of at least 32 characters.
+2. Run `./scripts/axel-self-host up` first so the delivery service accepts both
+   generations.
+3. Run `./scripts/axel-self-host edge`. Stop if activation or its compensating
+   rollback reports a failure, and inspect both Worker deployments before
+   retrying.
+4. Prove ingest, routing, source lookup, and delivery, then clear the previous
+   value and run `./scripts/axel-self-host up` again.
+
+The helper rejects a previous value that is short or equal to its current
+value. Do not reverse steps 2 and 3: an old Worker and a server that accepts only
+the new credential create an avoidable authentication outage.
 
 When signing the CLI into this installation, keep the PAT on your self-hosted
 origin by passing the dashboard URL explicitly. The npm package is not
@@ -221,6 +303,13 @@ an explicit Cloudflare console or Wrangler operation.
 ## Security defaults in this profile
 
 - Postgres is reachable only on the Compose network.
+- Postgres bootstrap and migration credentials are confined to Postgres and the
+  one-shot migration job. The dashboard and delivery containers each receive
+  only their own restricted DSN. The database grants enumerate current tables
+  and sequences explicitly, with no default access to future relations.
+- Schema objects belong to a stable owner that cannot log in. The migration
+  login owns nothing and receives a `SET ROLE` membership with inheritance and
+  administration disabled.
 - The development Compose file binds Postgres and ClickHouse to loopback only.
 - Caddy exposes only dashboard traffic, delivery health, authenticated internal
   delivery routes, and PAT-authenticated CLI routes.

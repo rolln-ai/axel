@@ -43,13 +43,13 @@ export async function seedSampleEvents(
     let ingestBase: string;
     try {
       ingestBase = resolveIngestBaseUrl(process.env);
-    } catch (err) {
-      return { error: err instanceof Error ? err.message : "Invalid ingest configuration." };
+    } catch {
+      return { error: "Sample-event service is not configured." };
     }
     const adminToken = process.env.INGEST_ADMIN_TOKEN;
     if (!adminToken) {
       return {
-        error: "INGEST_ADMIN_TOKEN is not configured on the dashboard — can't seed.",
+        error: "Sample-event service is not configured.",
       };
     }
 
@@ -100,17 +100,17 @@ export async function seedSampleEvents(
       targetType: "source",
       targetId: sourceId,
       metadata: { sent, failed, took_ms: took, presets: presets.length },
-  });
+    });
 
-  if (sent === 0) {
+    if (sent === 0) {
+      return {
+        error: `Could not seed sample events. ${failed} requests failed. Check the ingest service and try again.`,
+      };
+    }
+    const failureNote = failed > 0 ? ` (${failed} failed)` : "";
     return {
-      error: `Couldn't seed any samples (${failed} failed). Check INGEST_ADMIN_TOKEN + the ingest worker is reachable.`,
+      notice: `Seeded ${sent} sample events into the source in ${took}ms${failureNote}. Click "Refresh now" on the Data Contract to pick them up.`,
+      data: { sent, failed },
     };
-  }
-  const failureNote = failed > 0 ? ` (${failed} failed)` : "";
-  return {
-    notice: `Seeded ${sent} sample events into the source in ${took}ms${failureNote}. Click "Refresh now" on the Data Contract to pick them up.`,
-    data: { sent, failed },
-  };
   });
 }

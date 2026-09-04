@@ -29,11 +29,11 @@ export async function POST(request: Request): Promise<Response> {
   let event: ReturnType<ReturnType<typeof stripeClient>["webhooks"]["constructEvent"]>;
   try {
     event = stripeClient().webhooks.constructEvent(body, sig, stripeWebhookSecret());
-  } catch (err) {
+  } catch {
     // Signature failure or malformed payload — never journal these
     // (they're often probes). Return 400 so Stripe stops retrying.
     return Response.json(
-      { ok: false, error: err instanceof Error ? err.message : "invalid_signature" },
+      { ok: false, error: "invalid_signature" },
       { status: 400 },
     );
   }
@@ -41,12 +41,12 @@ export async function POST(request: Request): Promise<Response> {
   try {
     const result = await processStripeWebhook(event);
     return Response.json({ ok: true, ...result });
-  } catch (err) {
-    await captureDashboardException(err, {
+  } catch {
+    await captureDashboardException(new Error("stripe_webhook_processing_failed"), {
       tags: { component: "stripe_webhook", event_id: event.id, event_type: event.type },
     });
     return Response.json(
-      { ok: false, error: err instanceof Error ? err.message : String(err) },
+      { ok: false, error: "stripe_webhook_processing_failed" },
       { status: 500 },
     );
   }

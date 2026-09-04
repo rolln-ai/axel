@@ -20,6 +20,7 @@ import { LimitsEditor } from "./LimitsEditor";
 import {
   resolveIngestBaseUrl,
   sanitizeConnectorDiagnosticForStorage,
+  type SourceProvider,
   type SubjectKeyPath,
 } from "@axel/shared";
 import { TransientModeEditor } from "./TransientModeEditor";
@@ -48,6 +49,10 @@ import {
 } from "../../../../lib/usage";
 import { fetchPayloadForR2Key, GENERIC_SAMPLE } from "../../../../lib/sample-payload";
 import { deploymentCapabilities } from "../../../../lib/deployment-capabilities";
+import {
+  sourceAuthenticationCopy,
+  sourceAuthHeaderExample,
+} from "../../../../lib/source-ingest-auth";
 import type { FieldSpec, InferredDataContract } from "../../../../lib/data-contracts/inference";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -78,7 +83,7 @@ interface SourceRow {
   field_selection: string[] | null;
   // AXE-23 — provider preset + signing-secret fingerprint for the
   // "signature verification" badge on the source detail page.
-  provider: "custom" | "stripe" | "github" | "shopify";
+  provider: SourceProvider;
   signing_secret_fingerprint: string | null;
   // AXE-34 — inbound IP allowlist (CIDRs); empty = accept any IP.
   inbound_ip_allowlist: string[];
@@ -138,7 +143,7 @@ export default async function SourceDetailPage({
               sources.max_body_depth,
               sources.created_at::text,
               sources.field_selection,
-              sources.provider,
+              COALESCE(sources.provider, 'custom') AS provider,
               sources.signing_secret_fingerprint,
               sources.inbound_ip_allowlist,
               sources.subject_key_paths,
@@ -299,8 +304,8 @@ async function OverviewTab({
         getSourceEventStats(workspaceId, source.id),
         getSourceDailyUsage(workspaceId, source.id, 14, { timezone }),
       ]);
-    } catch (err) {
-      clickhouseError = err instanceof Error ? err.message : "ClickHouse query failed.";
+    } catch {
+      clickhouseError = "Source analytics are temporarily unavailable.";
     }
   }
 
@@ -319,7 +324,7 @@ async function OverviewTab({
         <StatCard
           label="Events received (all time)"
           value={stats ? formatCount(stats.total_events) : "—"}
-          sub={stats?.first_seen ? `since ${stats.first_seen.slice(0, 10)}` : usageEnabled() ? "no events yet" : "ClickHouse not configured"}
+          sub={stats?.first_seen ? `since ${stats.first_seen.slice(0, 10)}` : usageEnabled() ? "no events yet" : "analytics unavailable"}
         />
         <StatCard
           label="Last 24h"
@@ -347,12 +352,12 @@ async function OverviewTab({
         {clickhouseError ? (
           <EmptyState
             title="Couldn't load events"
-            body={`ClickHouse query failed: ${clickhouseError}`}
+            body={clickhouseError}
           />
         ) : !usageEnabled() ? (
           <EmptyState
-            title="ClickHouse not configured"
-            body="Set CLICKHOUSE_URL on the dashboard to enable per-source event search."
+            title="Source analytics unavailable"
+            body="Per-source event search is unavailable for this deployment."
           />
         ) : events.length === 0 ? (
           <EmptyState
@@ -428,7 +433,11 @@ async function ContractTab({
   ]);
 
   const samplePayloadPromise: Promise<unknown> = recentEvents.length > 0
-    ? fetchPayloadForR2Key(recentEvents[0]!.r2_key)
+    ? fetchPayloadForR2Key(recentEvents[0]!.r2_key, {
+        workspaceId,
+        eventId: recentEvents[0]!.event_id,
+        sourceId: source.id,
+      })
         .then((p) => p ?? GENERIC_SAMPLE)
         .catch(() => GENERIC_SAMPLE)
     : Promise.resolve(GENERIC_SAMPLE);
@@ -521,13 +530,12 @@ function IngestTab({
   ingestUrl: string;
   canMutate: boolean;
 }) {
+  const authHeader = sourceAuthHeaderExample(source.provider);
+
   return (
     <Section title="Ingest endpoint" pill="production" className="first:mt-0">
       <p className="text-sm text-muted-foreground">
-        Producers POST events to this URL with the source token as{" "}
-        <code className="rounded-sm bg-muted px-1 font-mono text-xs">x-axel-token</code> header
-        (or <code className="rounded-sm bg-muted px-1 font-mono text-xs">?token=</code> query
-        string). The body is stored and forwarded{" "}
+        {sourceAuthenticationCopy(source.provider)} The body is stored and forwarded{" "}
         <strong className="text-foreground">verbatim</strong> — Axel doesn&apos;t require any
         particular JSON shape, top-level field, or even{" "}
         <code className="rounded-sm bg-muted px-1 font-mono text-xs">application/json</code>{" "}
@@ -535,7 +543,7 @@ function IngestTab({
       </p>
       <pre className="overflow-x-auto rounded-md bg-muted p-3 font-mono text-xs leading-relaxed">
 {`POST ${ingestUrl}
-  x-axel-token: <token>
+  ${authHeader}
   content-type: application/json   # any content-type accepted
 
   <any body up to the configured max size>`}
@@ -669,7 +677,7 @@ function SettingsTab({
   isWebhook: boolean;
 }) {
   return (
-    <Section title="Configuration" pill="edge cache: ~5min TTL" className="first:mt-0">
+    <Section title="Configuration" pill="strongly consistent edge auth" className="first:mt-0">
       {isWebhook ? (
         <SourceTokenPanel
           sourceId={source.id}

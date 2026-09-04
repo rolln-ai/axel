@@ -1,5 +1,5 @@
 /**
- * Value-level PII masking for free text that may echo customer data.
+ * Value-level privacy boundaries for text that may echo customer data.
  *
  * Two surfaces use this:
  *   - Database-connector error strings before they land in `dead_letters.message`
@@ -9,23 +9,15 @@
  *     offending value verbatim.
  *   - Payload excerpts sent to the OpenRouter LLM for failure/inference explain.
  *
- * This is best-effort masking of the obvious high-risk shapes (emails, long
- * digit runs, Postgres DETAIL value echoes), not a guarantee — it keeps the
- * error class/structure intact for debugging while dropping the raw values.
+ * `scrubConnectorError` remains a UI-only compatibility helper. Durable and
+ * external diagnostics use a fixed code projector because pattern matching
+ * cannot prove that an arbitrary string is not a webhook value.
  */
 
 const EMAIL_RE = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
 // 8+ digit runs (optionally space/hyphen grouped) — cards, SSNs, phone, account
 // and routing numbers. Anchored on a digit at each end so short IDs are kept.
 const LONG_DIGITS_RE = /\b\d(?:[\d -]{6,})\d\b/g;
-const AUTH_VALUE_RE = /\b(Bearer|Basic)\s+[^\s,;]+/gi;
-const TOKEN_VALUE_RE = /\b(?:axe_pat|whsec|sk|rk|ghp|github_pat)_[A-Za-z0-9_-]{8,}\b/gi;
-const URL_QUERY_VALUE_RE = /([?&][A-Za-z0-9_.~-]{1,128}=)[^&#\s]*/g;
-const URI_USERINFO_RE = /(\b[a-z][a-z0-9+.-]*:\/\/[^:\s/@]+:)[^@\s/]+@/gi;
-const HTTP_DIAGNOSTIC_DETAIL_RE = /(\b(?:HTTP\s+\d{3}|[A-Za-z0-9_-]+_http_\d{3}|delivery_service_\d{3})\s*:\s*)[\s\S]*/i;
-const SECRET_ASSIGNMENT_RE = /(\b(?:authorization|client[_ -]?secret|cookie|credential|password|passwd|private[_ -]?key|refresh[_ -]?token|secret|secret[_ -]?access[_ -]?key|signature|token|api[_ -]?key|access[_ -]?key)\b\s*(?:=|:|\bis\b)\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)/gi;
-const PAYLOAD_ASSIGNMENT_RE = /(\b(?:body|data|document|event|input|payload|raw|record|response[_ -]?body|row|value)\b\s*(?:=|:)\s*)(?:\{[^\r\n]{0,2000}\}|\[[^\r\n]{0,2000}\]|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)/gi;
-const PRIVATE_KEY_RE = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*/gi;
 const SENSITIVE_RESPONSE_FIELDS = new Set([
   "body",
   "body_excerpt",
@@ -74,9 +66,10 @@ export function sanitizeConnectorResponseForStorage(value: unknown): unknown {
 }
 
 /**
- * Scrub one free-text connector diagnostic before it reaches a database, log,
- * notification, or email. Connector and receiver errors are untrusted text.
- * They can echo a submitted row, URL credentials, or a secret-bearing header.
+ * Project one connector diagnostic to a fixed operational code before it
+ * reaches a database, log, notification, email, or telemetry provider.
+ * Connector and receiver errors are attacker-controlled and can echo any
+ * submitted value, so no free-form substring is retained.
  */
 export function sanitizeConnectorDiagnosticForStorage(
   input: unknown,
@@ -86,20 +79,71 @@ export function sanitizeConnectorDiagnosticForStorage(
   const limit = Number.isFinite(maxLength)
     ? Math.max(0, Math.min(4000, Math.floor(maxLength)))
     : 500;
-  const withoutReceiverDetail = text.replace(
-    HTTP_DIAGNOSTIC_DETAIL_RE,
-    "$1[REDACTED]",
-  );
-  return scrubConnectorError(withoutReceiverDetail.replace(URI_USERINFO_RE, "$1[REDACTED]@"))
-    .replace(PRIVATE_KEY_RE, "[REDACTED PRIVATE KEY]")
-    .replace(AUTH_VALUE_RE, "$1 [REDACTED]")
-    .replace(TOKEN_VALUE_RE, "[REDACTED]")
-    .replace(URL_QUERY_VALUE_RE, "$1[REDACTED]")
-    .replace(SECRET_ASSIGNMENT_RE, "$1[REDACTED]")
-    .replace(PAYLOAD_ASSIGNMENT_RE, "$1[REDACTED]")
-    .replace(/"(?:\\.|[^"\\])*"/g, '"[REDACTED]"')
-    .replace(/'(?:\\.|[^'\\])*'/g, "'[REDACTED]'")
-    .slice(0, limit);
+  return connectorDiagnosticCode(text).slice(0, limit);
+}
+
+const FIXED_DIAGNOSTIC_CODES = new Set([
+  "authorization_failed",
+  "circuit_breaker_open",
+  "connection_failed",
+  "constraint_violation",
+  "databricks_response_too_large",
+  "delivery_failed",
+  "destination_not_found",
+  "invalid_message",
+  "invalid_payload",
+  "invalid_signature",
+  "not_found",
+  "operation_failed",
+  "operation_timeout",
+  "payload_too_large",
+  "queue_overloaded",
+  "rate_limited",
+  "replay_payload_key_mismatch",
+  "route_not_found",
+  "source_not_found",
+  "ssrf_blocked",
+]);
+
+function connectorDiagnosticCode(text: string): string {
+  const normalized = text.trim().toLowerCase();
+  if (FIXED_DIAGNOSTIC_CODES.has(normalized)) return normalized;
+
+  const status = /\b(?:http\s+|[a-z0-9_-]+_)([1-5][0-9]{2})\b/iu.exec(text)?.[1]
+    ?? /\b(?:query failed|rejected)\s*\(([1-5][0-9]{2})\)/iu.exec(text)?.[1];
+  if (status === "401" || status === "403") return "authorization_failed";
+  if (status === "404") return "not_found";
+  if (status === "408" || status === "504") return "operation_timeout";
+  if (status === "413") return "payload_too_large";
+  if (status === "429") return "rate_limited";
+  if (status) return `http_error_${status}`;
+
+  if (/\b(?:10250|queue is overloaded|queue overload)\b/iu.test(text)) {
+    return "queue_overloaded";
+  }
+  if (/\b(?:breaker_open|circuit breaker)\b/iu.test(text)) {
+    return "circuit_breaker_open";
+  }
+  if (/\b(?:ssrf|unsafe endpoint|private address|loopback)\b/iu.test(text)) {
+    return "ssrf_blocked";
+  }
+  if (/\b(?:timed? out|timeout|aborterror)\b/iu.test(text)) {
+    return "operation_timeout";
+  }
+  if (/\b(?:econn|connection (?:ended|refused|reset|terminated)|socket hang up)\b/iu.test(text)) {
+    return "connection_failed";
+  }
+  if (/\b(?:duplicate key|unique constraint|constraint violation)\b/iu.test(text)) {
+    return "constraint_violation";
+  }
+  if (/\b(?:unauthorized|forbidden|authentication|authorization)\b/iu.test(text)) {
+    return "authorization_failed";
+  }
+  if (/\b(?:not found|missing object)\b/iu.test(text)) return "not_found";
+  if (/\b(?:invalid json|invalid payload|malformed payload)\b/iu.test(text)) {
+    return "invalid_payload";
+  }
+  return "operation_failed";
 }
 
 function sanitizeResponseValue(value: unknown, depth: number): unknown {

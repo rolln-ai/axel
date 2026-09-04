@@ -373,11 +373,11 @@ export async function testBigQueryConnection(
       maxResults: 1,
     });
     return { ok: true, latency_ms: Date.now() - started };
-  } catch (err: unknown) {
+  } catch {
     return {
       ok: false,
       reason: "connection_failed",
-      message: err instanceof Error ? err.message : String(err),
+      message: "connection_failed",
     };
   }
 }

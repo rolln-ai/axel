@@ -1,4 +1,5 @@
 import { SITE_NAME, SITE_URL } from "./seo";
+import { SUPPORT_EMAIL } from "./contact";
 
 /**
  * schema.org builders. Keep claims factual and consistent with the visible
@@ -19,7 +20,7 @@ export function organizationLd() {
     logo: `${SITE_URL}/icon.svg`,
     description:
       "Axel captures third-party webhooks, stores their original payloads before returning 202, and delivers them to databases, warehouses, object storage, and HTTP endpoints.",
-    email: "founders@axelapp.ai",
+    ...(SUPPORT_EMAIL ? { email: SUPPORT_EMAIL } : {}),
   };
 }
 

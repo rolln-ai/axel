@@ -18,7 +18,24 @@
  */
 
 import type pg from "pg";
+import { sanitizeConnectorDiagnosticForStorage } from "@axel/shared";
 import type { QueueConsumerMetrics } from "./queue-consumer-metrics.js";
+
+const SAFE_CIRCUIT_STATES = new Set([
+  "closed",
+  "disabled",
+  "half_open",
+  "open",
+]);
+const SAFE_QUEUE_FAILURE_CODES = new Set([
+  "body_not_object",
+  "invalid_base64",
+  "invalid_field",
+  "invalid_json",
+  "missing_field",
+  "unsupported_content_type",
+  "unsupported_version",
+]);
 
 export interface MetricsSnapshot {
   text: string;
@@ -41,11 +58,16 @@ export async function renderMetrics(
          FROM destinations
         GROUP BY circuit_state`,
     );
-    for (const row of circuit.rows) {
-      lines.push(`axel_destinations_circuit_state{state="${labelValue(row.circuit_state)}"} ${row.n}`);
+    for (const [state, count] of aggregateMetricRows(
+      circuit.rows,
+      (row) => SAFE_CIRCUIT_STATES.has(row.circuit_state)
+        ? row.circuit_state
+        : "unknown",
+    )) {
+      lines.push(`axel_destinations_circuit_state{state="${labelValue(state)}"} ${count}`);
     }
-  } catch (err) {
-    console.error("[metrics] circuit query failed", err);
+  } catch {
+    console.error("[metrics] circuit query failed");
   }
 
   // ---- delivery paused ---- //
@@ -56,8 +78,8 @@ export async function renderMetrics(
       `SELECT count(*)::int AS n FROM destinations WHERE delivery_paused`,
     );
     lines.push(`axel_destinations_delivery_paused ${paused.rows[0]?.n ?? 0}`);
-  } catch (err) {
-    console.error("[metrics] paused query failed", err);
+  } catch {
+    console.error("[metrics] paused query failed");
   }
 
   // ---- dead letters by reason (last 24h) ---- //
@@ -72,11 +94,14 @@ export async function renderMetrics(
         ORDER BY n DESC
         LIMIT 50`,
     );
-    for (const row of dlq.rows) {
-      lines.push(`axel_dead_letters_24h{reason="${labelValue(row.reason)}"} ${row.n}`);
+    for (const [reason, count] of aggregateMetricRows(
+      dlq.rows,
+      (row) => sanitizeConnectorDiagnosticForStorage(row.reason, 120),
+    )) {
+      lines.push(`axel_dead_letters_24h{reason="${labelValue(reason)}"} ${count}`);
     }
-  } catch (err) {
-    console.error("[metrics] dlq query failed", err);
+  } catch {
+    console.error("[metrics] dlq query failed");
   }
 
   lines.push(`# HELP axel_queue_quarantine_24h Malformed queue messages seen in the last 24 hours, grouped by validation reason.`);
@@ -90,13 +115,18 @@ export async function renderMetrics(
         ORDER BY n DESC
         LIMIT 20`,
     );
-    for (const row of quarantine.rows) {
-      lines.push(`axel_queue_quarantine_24h{reason="${labelValue(row.failure_code)}"} ${row.n}`);
+    for (const [reason, count] of aggregateMetricRows(
+      quarantine.rows,
+      (row) => SAFE_QUEUE_FAILURE_CODES.has(row.failure_code)
+        ? row.failure_code
+        : "invalid_message",
+    )) {
+      lines.push(`axel_queue_quarantine_24h{reason="${labelValue(reason)}"} ${count}`);
     }
-  } catch (err) {
+  } catch {
     // During a rolling deploy the service may start before migration 0070.
     // Runtime counters below still expose parser failures until the table lands.
-    console.error("[metrics] queue quarantine query failed", err);
+    console.error("[metrics] queue quarantine query failed");
   }
 
   // ---- pull-sync runs in flight ---- //
@@ -107,8 +137,8 @@ export async function renderMetrics(
       `SELECT count(*)::int AS n FROM pull_sync_runs WHERE status = 'running'`,
     );
     lines.push(`axel_pull_sync_runs_in_flight ${runs.rows[0]?.n ?? 0}`);
-  } catch (err) {
-    console.error("[metrics] pull runs query failed", err);
+  } catch {
+    console.error("[metrics] pull runs query failed");
   }
 
   // ---- replay queue depth ---- //
@@ -119,14 +149,28 @@ export async function renderMetrics(
       `SELECT count(*)::int AS n FROM replay_requests WHERE state = 'pending'`,
     );
     lines.push(`axel_replay_requests_pending ${replays.rows[0]?.n ?? 0}`);
-  } catch (err) {
-    console.error("[metrics] replays query failed", err);
+  } catch {
+    console.error("[metrics] replays query failed");
   }
 
   if (queueMetrics) lines.push(...queueMetrics.renderPrometheus());
 
   lines.push(`# Generated at ${now}`);
   return { text: lines.join("\n") + "\n", generatedAt: now };
+}
+
+function aggregateMetricRows<T extends { n: number }>(
+  rows: readonly T[],
+  codeFor: (row: T) => string,
+): Array<[string, number]> {
+  const totals = new Map<string, number>();
+  for (const row of rows) {
+    const count = Number(row.n);
+    if (!Number.isFinite(count) || count < 0) continue;
+    const code = codeFor(row) || "operation_failed";
+    totals.set(code, (totals.get(code) ?? 0) + count);
+  }
+  return [...totals].sort(([left], [right]) => left.localeCompare(right));
 }
 
 /**

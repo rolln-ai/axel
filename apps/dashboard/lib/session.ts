@@ -200,10 +200,10 @@ export const getCurrentSession = cache(async (): Promise<CurrentSession | null> 
   if (lastSeenStale) {
     void db()
       .query("UPDATE user_sessions SET last_seen_at = now() WHERE id = $1", [first.session_id])
-      .catch((err) => {
+      .catch(() => {
         // Best-effort. Log to stderr so Vercel/Render captures it but never
         // surface to the user.
-        console.error("[session] last_seen_at update failed:", err);
+        console.error("[session] last_seen_at update failed");
       });
   }
 

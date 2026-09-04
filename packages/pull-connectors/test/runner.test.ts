@@ -93,10 +93,12 @@ describe("pull runner safety caps", () => {
 
     expect(result.streams[0]).toMatchObject({
       status: "failed",
-      error: "HTTP 502: [REDACTED]",
+      error: "http_error_502",
     });
-    expect(JSON.stringify(result)).not.toContain("victim@example.com");
-    expect(JSON.stringify(result)).not.toContain("sk_live_response_secret");
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain("victim@example.com");
+    expect(serialized).not.toContain("sk_live_response_secret");
+    expect(serialized).not.toContain("HTTP 502");
   });
 
   it("omits customer cursor values from the persistence-safe summary", () => {
@@ -106,7 +108,7 @@ describe("pull runner safety caps", () => {
       started_at: fixedNow().toISOString(),
       finished_at: fixedNow().toISOString(),
       streams: [{
-        stream: "records",
+        stream: "customer_stream_private",
         records: 1,
         pages: 1,
         cursor: { value: "victim@example.com" },
@@ -119,8 +121,14 @@ describe("pull runner safety caps", () => {
     expect(serialized).not.toContain("victim@example.com");
     expect(serialized).not.toContain("hunter2");
     expect(stored).toMatchObject({
-      streams: [{ cursor_present: true, error: "HTTP 400: [REDACTED]" }],
+      streams: [{
+        stream: "pull_stream",
+        cursor_present: true,
+        error: "http_error_400",
+      }],
     });
+    expect(serialized).not.toContain("customer_stream_private");
+    expect(serialized).not.toContain("HTTP 400");
   });
 });
 

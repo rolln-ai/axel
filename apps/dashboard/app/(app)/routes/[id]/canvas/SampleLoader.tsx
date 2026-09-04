@@ -56,8 +56,8 @@ export function SampleLoader({ sourceId, onLoaded }: Props) {
     try {
       const parsed = JSON.parse(pasteText);
       onLoaded(parsed, "Pasted JSON");
-    } catch (err) {
-      setPasteError(err instanceof Error ? err.message : String(err));
+    } catch {
+      setPasteError("Invalid JSON. Check the sample and try again.");
     }
   }
 

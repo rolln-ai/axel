@@ -22,7 +22,7 @@ describe("dashboard Chargebee pull egress", () => {
       sourceId: "src_chargebee",
       workspaceId: "ws_1",
       actorUserId: "usr_1",
-    })).rejects.toThrow(/custom API domains are not supported/);
+    })).rejects.toThrow(/^operation_failed$/);
 
     expect(safeDashboardFetchMock).not.toHaveBeenCalled();
   });
@@ -38,7 +38,7 @@ describe("dashboard Chargebee pull egress", () => {
       sourceId: "src_chargebee",
       workspaceId: "ws_1",
       actorUserId: "usr_1",
-    })).rejects.toThrow(/Chargebee connection failed with HTTP 302/);
+    })).rejects.toThrow(/^http_error_302$/);
 
     expect(safeDashboardFetchMock).toHaveBeenCalledTimes(1);
     expect(safeDashboardFetchMock).toHaveBeenCalledWith(
@@ -93,7 +93,7 @@ describe("dashboard Chargebee pull egress", () => {
       message = error instanceof Error ? error.message : String(error);
     }
 
-    expect(message).toBe("Chargebee connection failed with HTTP 500.");
+    expect(message).toBe("http_error_500");
     expect(readBody).not.toHaveBeenCalled();
     expect(cancel).toHaveBeenCalledOnce();
     const persisted = JSON.stringify(
@@ -101,7 +101,8 @@ describe("dashboard Chargebee pull egress", () => {
         .filter(([sql]) => String(sql).includes("UPDATE pull_sync_runs"))
         .map(([, params]) => params),
     );
-    expect(persisted).toContain("Chargebee connection failed with HTTP 500.");
+    expect(persisted).toContain("http_error_500");
+    expect(persisted).not.toContain("Chargebee connection failed");
     expect(persisted).not.toContain("victim@example.com");
     expect(persisted).not.toContain("sk_live_response_secret");
   });

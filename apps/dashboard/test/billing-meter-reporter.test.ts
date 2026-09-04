@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { fakeClickhouse } from "@axel/test-utils";
 import type Stripe from "stripe";
 import { reportMeterEvents } from "../lib/billing/meter-reporter";
+import { publicBillingRollupCronSummary } from "../lib/billing/rollup";
 import type { ClickhouseQueryable } from "../lib/clickhouse";
 import type { Queryable } from "../lib/db";
 
@@ -166,8 +167,8 @@ describe("reportMeterEvents", () => {
     const summary = await reportMeterEvents({ stripe, pg, ch, now });
     expect(summary.reported).toBe(1);
     expect(calls.map((c) => c.identifier)).toContain("ws_good:2026-05-14");
-    // The failed workspace appears in events with an `:error:` tail
-    expect(summary.events.find((e) => e.workspaceId === "ws_bad")?.identifier).toMatch(/:error:/);
+    // The failed workspace appears in events with a stable error tail.
+    expect(summary.events.find((e) => e.workspaceId === "ws_bad")?.identifier).toMatch(/:error$/);
   });
 
   it("counts only deduped inbound events and never queries deliveries", async () => {
@@ -195,5 +196,39 @@ describe("reportMeterEvents", () => {
     expect(eventsSql).not.toMatch(/count\(/i);
 
     expect(deliverySql).toBeUndefined();
+  });
+});
+
+describe("publicBillingRollupCronSummary", () => {
+  it("returns aggregate counts and fixed codes without tenant or provider identifiers", () => {
+    const privateMarker = "private-workspace-provider-marker";
+    const summary = publicBillingRollupCronSummary({
+      summary: {
+        periodStart: privateMarker,
+        workspaceCount: 2,
+        ingestTasks: 30,
+        deliveryTasks: 40,
+        durationMs: 50,
+      },
+      meter: {
+        day: privateMarker,
+        reported: 1,
+        skipped: 2,
+        unbound: 3,
+        events: [
+          { workspaceId: privateMarker, tasks: 4, identifier: privateMarker },
+          { workspaceId: `${privateMarker}-failed`, tasks: 5, identifier: `${privateMarker}:error` },
+        ],
+      },
+      planPush: { pushed: 6, errors: 1, skipped: 7 },
+      emails: { sent: 8, alreadySent: 9, failed: 1, notificationsEmitted: 10 },
+    });
+
+    expect(summary.rollup.code).toBe("billing_rollup_completed");
+    expect(summary.meter).toMatchObject({ reported: 1, failed: 1 });
+    expect(summary.plan_push.code).toBe("plan_push_partial");
+    expect(summary.emails.code).toBe("billing_email_partial");
+    expect(JSON.stringify(summary)).not.toContain(privateMarker);
+    expect(summary.meter).not.toHaveProperty("events");
   });
 });

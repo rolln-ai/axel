@@ -1,7 +1,7 @@
 import "server-only";
 
 import { cache } from "react";
-import { deadLetterFingerprint } from "@axel/shared";
+import { deadLetterFingerprint, sanitizeConnectorDiagnosticForStorage } from "@axel/shared";
 import { db } from "./db";
 
 /**
@@ -175,7 +175,7 @@ export const loadInboxGroups = cache(async (workspaceId: string): Promise<InboxG
       last_resolved_at: null,
       exemplar_id: row.id,
       reason: row.reason,
-      message_excerpt: row.message.slice(0, 200),
+      message_excerpt: sanitizeConnectorDiagnosticForStorage(row.message, 200),
       source_id: row.source_id,
       destination_id: row.destination_id,
       route_id: row.route_id,
@@ -212,7 +212,7 @@ export const loadInboxGroups = cache(async (workspaceId: string): Promise<InboxG
       last_resolved_at: row.resolved_at,
       exemplar_id: row.id,
       reason: row.reason,
-      message_excerpt: row.message.slice(0, 200),
+      message_excerpt: sanitizeConnectorDiagnosticForStorage(row.message, 200),
       source_id: row.source_id,
       destination_id: row.destination_id,
       route_id: row.route_id,

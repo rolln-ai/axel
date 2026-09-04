@@ -4,6 +4,9 @@ import {
   redactAiPrompt,
   redactSecretLikeText,
   redactWebhookDataForAi,
+  safeWebhookSchemaKey,
+  summarizeWebhookDataForAi,
+  summarizeWebhookFieldPathForAi,
 } from "../src/ai-redaction";
 
 const JWT = [
@@ -24,11 +27,13 @@ const URI_USER = "webhook-user";
 const URI_PASSWORD = "webhook-pass";
 
 describe("AI webhook redaction", () => {
-  it("removes key-identified and value-identified secrets without erasing useful shape", () => {
-    const redacted = redactWebhookDataForAi({
+  it("replaces every primitive webhook value while retaining safe field names and shape", () => {
+    const input = {
       type: "invoice.paid",
       status: "complete",
       amount: 1299,
+      active: true,
+      optional: null,
       password: "hunter2",
       headers: {
         Authorization: "Bearer short-auth-value",
@@ -40,10 +45,16 @@ describe("AI webhook redaction", () => {
         `https://${URI_USER}:${URI_PASSWORD}@example.test/callback?token=query-secret&mode=live`,
       note: `customer alice@example.test used ${JWT}, ${OPAQUE}, and ${LOWERCASE_OPAQUE}`,
       card_number_as_number: 4111111111111111,
-    });
+      items: [{ sku: "private-sku", quantity: 2 }],
+    };
+    const redacted = redactWebhookDataForAi(input);
 
     const serialized = JSON.stringify(redacted);
     for (const secret of [
+      "invoice.paid",
+      "complete",
+      "1299",
+      "true",
       "hunter2",
       "short-auth-value",
       "short-cookie",
@@ -57,18 +68,62 @@ describe("AI webhook redaction", () => {
       OPAQUE,
       LOWERCASE_OPAQUE,
       "4111111111111111",
+      "private-sku",
     ]) {
       expect(serialized).not.toContain(secret);
     }
 
-    expect(redacted).toMatchObject({
-      type: "invoice.paid",
-      status: "complete",
-      amount: 1299,
-      password: "[REDACTED]",
+    expect(redacted).toEqual({
+      type: "[string]",
+      status: "[string]",
+      amount: "[number]",
+      active: "[boolean]",
+      optional: "[null]",
+      password: "[string]",
+      headers: {
+        Authorization: "[string]",
+        Cookie: "[string]",
+        "X-Hub-Signature-256": "[string]",
+        "X-Custom-Header": "[string]",
+      },
+      callback: "[string]",
+      note: "[string]",
+      card_number_as_number: "[number]",
+      items: [{ sku: "[string]", quantity: "[number]" }],
     });
-    expect(serialized).toContain("callback");
-    expect(serialized).toContain("example.test/callback");
+    expect(summarizeWebhookDataForAi(input)).toEqual(redacted);
+    expect(JSON.parse(redactAiPrompt(JSON.stringify(redacted)))).toEqual(redacted);
+  });
+
+  it("placeholders dynamic and PII-like object keys but keeps static schema paths", () => {
+    const summarized = summarizeWebhookDataForAi({
+      customer: { email_address: "private@example.test" },
+      "private@example.test": { amount: 42 },
+      "550e8400-e29b-41d4-a716-446655440000": "private",
+      "203.0.113.8": false,
+      "0123456789abcdef0123456789abcdef": "secret",
+      constructor: { prototype: "private" },
+    });
+
+    expect(summarized).toEqual({
+      customer: { email_address: "[string]" },
+      "[dynamic_key_1]": { amount: "[number]" },
+      "[dynamic_key_2]": "[string]",
+      "[dynamic_key_3]": "[boolean]",
+      "[dynamic_key_4]": "[string]",
+      "[dynamic_key_5]": { "[dynamic_key_1]": "[string]" },
+    });
+    expect(safeWebhookSchemaKey("customer_id")).toBe(true);
+    expect(safeWebhookSchemaKey("private@example.test")).toBe(false);
+    expect(safeWebhookSchemaKey("__proto__")).toBe(false);
+    expect(summarizeWebhookFieldPathForAi("data.items[].customer_id")).toBe(
+      "data.items[].customer_id",
+    );
+    expect(
+      summarizeWebhookFieldPathForAi(
+        "accounts.550e8400-e29b-41d4-a716-446655440000.balance",
+      ),
+    ).toBe("accounts.[dynamic_key].balance");
   });
 
   it("sanitizes raw prompt text and preserves ordinary diagnostics", () => {

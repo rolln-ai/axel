@@ -234,19 +234,14 @@ export async function sendBillingEmail(
   const periodStartKey = currentPeriodStartUtc();
   const idempotencyId = `axl_email:${args.workspaceId}:${args.kind}:${periodStartKey}`;
 
-  // Idempotency: same INSERT-ON-CONFLICT trick as Stripe webhooks.
-  // If this period's email already exists, skip.
+  // Idempotency: same INSERT-ON-CONFLICT trick as Stripe webhooks. The row
+  // retains only its id, type, workspace, and processing metadata.
   const insert = await pg.query<{ id: string }>(
     `INSERT INTO billing_events (id, type, workspace_id, payload)
-     VALUES ($1, $2, $3, $4::jsonb)
+     VALUES ($1, $2, $3, '{}'::jsonb)
      ON CONFLICT (id) DO NOTHING
      RETURNING id`,
-    [
-      idempotencyId,
-      `email.${args.kind}`,
-      args.workspaceId,
-      JSON.stringify({ kind: args.kind, tasks: args.tasksThisPeriod, periodStart: periodStartKey }),
-    ],
+    [idempotencyId, `email.${args.kind}`, args.workspaceId],
   );
   if (insert.rows.length === 0) {
     // Already emailed this (workspace, kind, period) — the idempotency journal
@@ -278,9 +273,9 @@ export async function sendBillingEmail(
 
   const results = await Promise.all(
     recipients.rows.map((r) =>
-      sendEmail({ to: r.email, subject, html, text }).catch((err) => ({
+      sendEmail({ to: r.email, subject, html, text }).catch(() => ({
         ok: false,
-        error: err instanceof Error ? err.message : String(err),
+        error: "email_delivery_failed",
       })),
     ),
   );

@@ -5,6 +5,7 @@ set -euo pipefail
 : "${MOCK_RENDER_DIR:?MOCK_RENDER_DIR is required}"
 : "${MOCK_RENDER_SCENARIO:?MOCK_RENDER_SCENARIO is required}"
 : "${MOCK_RENDER_COMMIT:?MOCK_RENDER_COMMIT is required}"
+: "${RENDER_OWNER_ID:?RENDER_OWNER_ID is required}"
 
 method=GET
 payload=""
@@ -20,7 +21,7 @@ while (( $# > 0 )); do
       payload="$2"
       shift 2
       ;;
-    -H|--retry|--retry-delay|--write-out|--connect-timeout|--max-time)
+    -H|--retry|--retry-delay|--write-out|--connect-timeout|--max-time|--max-filesize)
       shift 2
       ;;
     --fail-with-body|--silent|--show-error|--retry-all-errors)
@@ -39,21 +40,169 @@ done
 
 printf '%s\t%s\n' "$method" "$url" >>"${MOCK_RENDER_DIR}/calls.tsv"
 
-case "${method} ${url}" in
-  "GET https://api.render.com/v1/services?limit=100")
-    if [[ "$MOCK_RENDER_SCENARIO" == "harden" ]]; then
-      printf '%s\n' '[
-        {"service":{"id":"srv-clickhouse","name":"axel-clickhouse"}},
-        {"service":{"id":"srv-delivery-native","name":"axel-delivery-native"}},
-        {"service":{"id":"srv-delivery-workers","name":"axel-delivery-workers"}},
-        {"service":{"id":"srv-pull-worker","name":"axel-pull-worker"}}
+services_url="https://api.render.com/v1/services?ownerId=${RENDER_OWNER_ID}&includePreviews=false&limit=100"
+if [[ "$method" == "GET" && "$url" == "${services_url}"* ]]; then
+  cursor=""
+  if [[ "$url" == *"&cursor="* ]]; then
+    cursor="${url##*&cursor=}"
+  fi
+
+  emit_full_unrelated_page() {
+    local last_cursor="$1"
+    jq -cn \
+      --arg last_cursor "$last_cursor" \
+      --arg scenario "$MOCK_RENDER_SCENARIO" \
+      '[
+        range(0; 100) as $index
+        | {
+            cursor: (if $index == 99 then $last_cursor else "cursor-\($scenario)-\($index)" end),
+            service: {
+              id: "srv-unrelated-\($index)",
+              name: "unrelated-\($index)"
+            }
+          }
       ]'
-    else
-      printf '[{"service":{"id":"srv-test","name":"axel-delivery-native"}}]\n'
-    fi
-    ;;
+  }
+
+  enrich_service_metadata() {
+    jq -c \
+      --arg owner "$RENDER_OWNER_ID" \
+      --arg scenario "$MOCK_RENDER_SCENARIO" \
+      '
+        map(
+          .service.ownerId = (
+            if $scenario == "wrong-owner-deploy" and .service.name == "axel-delivery-native"
+            then "tea-wrong-owner"
+            else $owner
+            end
+          )
+          | .service.type = (
+              if $scenario == "wrong-type-deploy" and .service.name == "axel-delivery-native"
+              then "background_worker"
+              elif (.service.name == "axel-clickhouse" or .service.name == "axel-delivery-native")
+              then "web_service"
+              elif (.service.name == "axel-delivery-workers" or .service.name == "axel-pull-worker")
+              then "background_worker"
+              else "web_service"
+              end
+            )
+          | if .service.name == "axel-delivery-workers"
+            then .service.numInstances = (if $scenario == "wrong-count-harden" then 2 else 1 end)
+            else .
+            end
+        )
+      '
+  }
+
+  {
+    case "$MOCK_RENDER_SCENARIO" in
+    harden|wrong-count-harden)
+      printf '%s\n' '[
+        {"cursor":"cursor-clickhouse","service":{"id":"srv-clickhouse","name":"axel-clickhouse"}},
+        {"cursor":"cursor-delivery-native","service":{"id":"srv-delivery-native","name":"axel-delivery-native"}},
+        {"cursor":"cursor-delivery-workers","service":{"id":"srv-delivery-workers","name":"axel-delivery-workers"}},
+        {"cursor":"cursor-pull-worker","service":{"id":"srv-pull-worker","name":"axel-pull-worker"}}
+      ]'
+      ;;
+    deep-page-deploy)
+      if [[ -z "$cursor" ]]; then
+        emit_full_unrelated_page 'cursor+deep/deploy='
+      elif [[ "$cursor" == "cursor%2Bdeep%2Fdeploy%3D" ]]; then
+        printf '%s\n' '[{"cursor":"cursor-target","service":{"id":"srv-test","name":"axel-delivery-native"}}]'
+      else
+        echo "unexpected deep-page deploy cursor" >&2
+        exit 2
+      fi
+      ;;
+    deep-page-harden)
+      if [[ -z "$cursor" ]]; then
+        emit_full_unrelated_page cursor-deep-harden
+      elif [[ "$cursor" == "cursor-deep-harden" ]]; then
+        printf '%s\n' '[
+          {"cursor":"cursor-clickhouse","service":{"id":"srv-clickhouse","name":"axel-clickhouse"}},
+          {"cursor":"cursor-delivery-native","service":{"id":"srv-delivery-native","name":"axel-delivery-native"}},
+          {"cursor":"cursor-delivery-workers","service":{"id":"srv-delivery-workers","name":"axel-delivery-workers"}},
+          {"cursor":"cursor-pull-worker","service":{"id":"srv-pull-worker","name":"axel-pull-worker"}}
+        ]'
+      else
+        echo "unexpected deep-page hardening cursor" >&2
+        exit 2
+      fi
+      ;;
+    duplicate-later-deploy)
+      if [[ -z "$cursor" ]]; then
+        jq -cn '[
+          {
+            cursor: "cursor-target-first",
+            service: {id: "srv-test", name: "axel-delivery-native"}
+          },
+          (
+            range(1; 100) as $index
+            | {
+                cursor: (if $index == 99 then "cursor-duplicate-deploy" else "cursor-filler-\($index)" end),
+                service: {id: "srv-unrelated-\($index)", name: "unrelated-\($index)"}
+              }
+          )
+        ]'
+      elif [[ "$cursor" == "cursor-duplicate-deploy" ]]; then
+        printf '%s\n' '[{"cursor":"cursor-target-second","service":{"id":"srv-test-duplicate","name":"axel-delivery-native"}}]'
+      else
+        echo "unexpected duplicate deploy cursor" >&2
+        exit 2
+      fi
+      ;;
+    duplicate-later-harden)
+      if [[ -z "$cursor" ]]; then
+        jq -cn '[
+          {cursor: "cursor-clickhouse", service: {id: "srv-clickhouse", name: "axel-clickhouse"}},
+          {cursor: "cursor-delivery-native", service: {id: "srv-delivery-native", name: "axel-delivery-native"}},
+          {cursor: "cursor-delivery-workers", service: {id: "srv-delivery-workers", name: "axel-delivery-workers"}},
+          {cursor: "cursor-pull-worker", service: {id: "srv-pull-worker", name: "axel-pull-worker"}},
+          (
+            range(4; 100) as $index
+            | {
+                cursor: (if $index == 99 then "cursor-duplicate-harden" else "cursor-filler-\($index)" end),
+                service: {id: "srv-unrelated-\($index)", name: "unrelated-\($index)"}
+              }
+          )
+        ]'
+      elif [[ "$cursor" == "cursor-duplicate-harden" ]]; then
+        printf '%s\n' '[{"cursor":"cursor-target-second","service":{"id":"srv-delivery-native-duplicate","name":"axel-delivery-native"}}]'
+      else
+        echo "unexpected duplicate hardening cursor" >&2
+        exit 2
+      fi
+      ;;
+    pagination-cycle)
+      if [[ -z "$cursor" || "$cursor" == "cursor-cycle" ]]; then
+        emit_full_unrelated_page cursor-cycle
+      else
+        echo "unexpected cycle cursor" >&2
+        exit 2
+      fi
+      ;;
+    pagination-bound)
+      if [[ -z "$cursor" ]]; then
+        page_number=1
+      elif [[ "$cursor" =~ ^cursor-bound-([0-9]+)$ ]]; then
+        page_number=$((BASH_REMATCH[1] + 1))
+      else
+        echo "unexpected pagination bound cursor" >&2
+        exit 2
+      fi
+      emit_full_unrelated_page "cursor-bound-${page_number}"
+      ;;
+      *)
+        printf '%s\n' '[{"cursor":"cursor-target","service":{"id":"srv-test","name":"axel-delivery-native"}}]'
+        ;;
+    esac
+  } | enrich_service_metadata
+  exit 0
+fi
+
+case "${method} ${url}" in
   "PATCH "*/services/srv-*)
-    if [[ "$MOCK_RENDER_SCENARIO" != "harden" ]]; then
+    if [[ "$MOCK_RENDER_SCENARIO" != "harden" && "$MOCK_RENDER_SCENARIO" != "deep-page-harden" ]]; then
       echo "unexpected Render hardening request" >&2
       exit 2
     fi
@@ -63,17 +212,41 @@ case "${method} ${url}" in
     ;;
   "GET "*/services/srv-test/deploys\?limit=100)
     if [[ "$MOCK_RENDER_SCENARIO" == "existing-live" ]]; then
-      jq -n \
-        --arg commit "$MOCK_RENDER_COMMIT" \
-        '[{
-          deploy: {
-            id: "dep-existing",
-            commit: { id: $commit },
-            status: "live",
-            createdAt: "2026-07-09T00:00:00Z"
-          }
-        }]'
-    elif [[ "$MOCK_RENDER_SCENARIO" == "success" && -f "${MOCK_RENDER_DIR}/deploy-posted" ]]; then
+      if [[ -f "${MOCK_RENDER_DIR}/deploy-posted" ]]; then
+        jq -n \
+          --arg commit "$MOCK_RENDER_COMMIT" \
+          '[
+            {
+              deploy: {
+                id: "dep-new",
+                commit: { id: $commit },
+                status: "queued",
+                createdAt: "2026-07-09T00:00:01Z"
+              }
+            },
+            {
+              deploy: {
+                id: "dep-existing",
+                commit: { id: $commit },
+                status: "live",
+                createdAt: "2026-07-09T00:00:00Z"
+              }
+            }
+          ]'
+      else
+        jq -n \
+          --arg commit "$MOCK_RENDER_COMMIT" \
+          '[{
+            deploy: {
+              id: "dep-existing",
+              commit: { id: $commit },
+              status: "live",
+              createdAt: "2026-07-09T00:00:00Z"
+            }
+          }]'
+      fi
+    elif [[ ( "$MOCK_RENDER_SCENARIO" == "success" || "$MOCK_RENDER_SCENARIO" == "deep-page-deploy" ) \
+      && -f "${MOCK_RENDER_DIR}/deploy-posted" ]]; then
       jq -n \
         --arg commit "$MOCK_RENDER_COMMIT" \
         '[{
@@ -90,14 +263,20 @@ case "${method} ${url}" in
     ;;
   "POST "*/services/srv-test/deploys)
     if [[ "$MOCK_RENDER_SCENARIO" == "existing-live" ]]; then
-      echo "existing-live scenario must not trigger a deploy" >&2
-      exit 2
+      printf '%s\n' "$payload" >"${MOCK_RENDER_DIR}/deploy-request.json"
+      touch "${MOCK_RENDER_DIR}/deploy-posted"
+      printf '\n202'
+      exit 0
     fi
     printf '%s\n' "$payload" >"${MOCK_RENDER_DIR}/deploy-request.json"
-    if [[ "$MOCK_RENDER_SCENARIO" == "success" ]]; then
+    if [[ "$MOCK_RENDER_SCENARIO" == "success" || "$MOCK_RENDER_SCENARIO" == "deep-page-deploy" ]]; then
       touch "${MOCK_RENDER_DIR}/deploy-posted"
       # Render may queue an accepted deploy with a 202 and no response body.
       printf '\n202'
+    elif [[ "$MOCK_RENDER_SCENARIO" == "wrong-commit-poll" ]]; then
+      jq -cn --arg commit "$MOCK_RENDER_COMMIT" \
+        '{ id: "dep-wrong-commit", commit: { id: $commit }, status: "created" }'
+      printf '\n201'
     else
       jq -cn --arg commit "$MOCK_RENDER_COMMIT" \
         '{ id: "dep-failed", commit: { id: $commit }, status: "created" }'
@@ -112,16 +291,23 @@ case "${method} ${url}" in
     poll_count=$((poll_count + 1))
     printf '%s\n' "$poll_count" >"${MOCK_RENDER_DIR}/poll-count"
     if (( poll_count == 1 )); then
-      printf '{"id":"dep-new","status":"build_in_progress"}\n'
+      jq -cn --arg commit "$MOCK_RENDER_COMMIT" \
+        '{id:"dep-new",commit:{id:$commit},status:"build_in_progress"}'
     else
-      printf '{"id":"dep-new","status":"live"}\n'
+      jq -cn --arg commit "$MOCK_RENDER_COMMIT" \
+        '{id:"dep-new",commit:{id:$commit},status:"live"}'
     fi
     ;;
+  "GET "*/services/srv-test/deploys/dep-wrong-commit)
+    jq -cn \
+      '{id:"dep-wrong-commit",commit:{id:"ffffffffffffffffffffffffffffffffffffffff"},status:"live"}'
+    ;;
   "GET "*/services/srv-test/deploys/dep-failed)
-    printf '{"id":"dep-failed","status":"build_failed"}\n'
+    jq -cn --arg commit "$MOCK_RENDER_COMMIT" \
+      '{id:"dep-failed",commit:{id:$commit},status:"build_failed"}'
     ;;
   "GET "*/services/srv-*)
-    if [[ "$MOCK_RENDER_SCENARIO" != "harden" ]]; then
+    if [[ "$MOCK_RENDER_SCENARIO" != "harden" && "$MOCK_RENDER_SCENARIO" != "deep-page-harden" ]]; then
       echo "unexpected Render service readback" >&2
       exit 2
     fi

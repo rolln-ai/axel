@@ -190,13 +190,13 @@ export async function pushPlanStates(
   }
 
   // Derive the plan-put URL from INGEST_ADMIN_URL the same way
-  // edge-invalidation does: strip a trailing /admin/source-cache/* if present
+  // edge-invalidation does: strip a trailing source admin path if present
   // (the value may be a bare base), then append the plan path. The old
   // single-replace silently no-op'd on a bare base URL, POSTing plan state to
   // the wrong URL → 404 → suspended/over-cap workspaces kept ingesting until
   // the KV TTL, with no signal (audit).
   const base = ingestAdminUrl
-    .replace(/\/admin\/source-cache\/(invalidate|put)\/?$/, "")
+    .replace(/\/admin\/(?:source-cache\/(?:invalidate|put)|source-authority\/(?:fence|sync))\/?$/, "")
     .replace(/\/$/, "");
   const planUrl = `${base}/admin/workspace-plan/put`;
   const fetchImpl = deps.fetch ?? fetch;

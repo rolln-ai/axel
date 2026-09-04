@@ -28,6 +28,7 @@ import {
 } from "./first-run-destinations";
 import {
   resolveIngestBaseUrl,
+  sanitizeConnectorDiagnosticForStorage,
   type SourceProvider,
   withMongoTlsNoVerify,
   withNoVerifySslMode,
@@ -42,6 +43,7 @@ import {
 import { withWorkspaceMutation } from "./with-mutation";
 import { encryptSourceSigningSecret } from "./source-secret";
 import { formValue } from "./form";
+import { sourceUsesAxelToken } from "./source-ingest-auth";
 import { validateDestinationValues } from "./destination-validation";
 import type { ActionState } from "./action-data";
 
@@ -79,10 +81,8 @@ export async function createSourceWithPipeline(
     let ingestBase: string;
     try {
       ingestBase = resolveIngestBaseUrl(process.env);
-    } catch (error) {
-      return {
-        error: error instanceof Error ? error.message : "The ingest endpoint is not configured.",
-      };
+    } catch {
+      return { error: "The ingest endpoint is not configured." };
     }
 
     // --- source params ---
@@ -447,25 +447,15 @@ export async function createSourceWithPipeline(
         return { error: "Choose a BigQuery target in dataset.table format." };
       }
       if (msg === "CREDENTIALS_MASTER_KEY is not set" || msg.startsWith("CREDENTIALS_MASTER_KEY")) {
-        return { error: "Server is missing the credentials master key. Ask the operator to set CREDENTIALS_MASTER_KEY." };
+        return { error: "Secure credential storage is unavailable. Contact the operator." };
       }
-      if (msg.startsWith("Unsupported") || msg.startsWith("Missing required") || msg.startsWith("Invalid")) {
-        return { error: msg };
-      }
-      // Generic fallback used to swallow the underlying error completely,
-      // which made one class of failure (AXE-150 — Postgres pull-source
-      // create) opaque to the operator and the test harness. Forward the
-      // real error message instead — pg errors don't include credential
-      // values, just constraint/relation names and column types.
-      console.error("[createSourceWithPipeline] failed:", err);
-      const detail = msg ? msg.slice(0, 500) : (err && typeof err === "object" && "code" in err ? `pg ${(err as { code?: string }).code}` : "unknown");
-      return { error: `Could not create pipeline (${detail}). No partial records were saved.` };
+      console.error("[createSourceWithPipeline] transaction failed");
+      return { error: "Could not create pipeline. No partial records were saved." };
     }
 
     // ---------- post-commit side effects ----------
-    // Re-read the fresh source row in all cases so the edge KV mirrors
-    // exactly what's in Postgres — including the (decrypted) signing
-    // secret for AXE-23 provider verification.
+    // Re-read the fresh source row so the edge authority bootstraps from the
+    // committed config, including provider verification settings.
     const fresh = await loadSourceForEdge(result.sourceId, workspaceId);
     if (fresh) await pushSourceToEdge(await rowToEdgePayload(fresh));
 
@@ -475,7 +465,9 @@ export async function createSourceWithPipeline(
     if (result.destinationId) parts.push("destination attached");
     if (result.routeId) parts.push("route active");
     const tailNotes: string[] = [];
-    if (result.plaintextToken) tailNotes.push("Copy the ingest token now — it won't be shown again.");
+    if (sourceUsesAxelToken(inboundProvider) && result.plaintextToken) {
+      tailNotes.push("Copy the ingest token now. Send it only in the x-axel-token header.");
+    }
     if (generatedWebhookSecret) tailNotes.push("Copy the destination signing secret now — it won't be shown again.");
 
     return {
@@ -483,7 +475,9 @@ export async function createSourceWithPipeline(
       data: {
         sourceId: result.sourceId,
         ...(result.destinationId ? { destinationId: result.destinationId } : {}),
-        ...(result.plaintextToken ? { plaintextToken: result.plaintextToken } : {}),
+        ...(sourceUsesAxelToken(inboundProvider) && result.plaintextToken
+          ? { plaintextToken: result.plaintextToken }
+          : {}),
         ...(generatedWebhookSecret ? { webhookSigningSecret: generatedWebhookSecret } : {}),
         ingestUrl: `${ingestBase}/in/${result.sourceId}`,
       },
@@ -691,9 +685,8 @@ export async function connectFirstDestination(
       if (isUniqueViolation(err, "destinations")) {
         return { error: "A destination with that name already exists — rename it on the Destinations page." };
       }
-      const msg = err instanceof Error ? err.message : "";
-      console.error("[connectFirstDestination] failed:", err);
-      return { error: `Couldn't connect the destination${msg ? ` (${msg.slice(0, 200)})` : ""}. Nothing was saved.` };
+      console.error("[connectFirstDestination] transaction failed");
+      return { error: "Couldn't connect the destination. Nothing was saved." };
     }
 
     bustWorkspaceTags(workspaceId);
@@ -726,8 +719,8 @@ export async function connectFirstDestination(
           backfillJobId = job.id;
         }
       }
-    } catch (err) {
-      console.error("[connectFirstDestination] backfill queue failed:", err);
+    } catch {
+      console.error("[connectFirstDestination] backfill queue failed");
     }
 
     const landing = target || destinationName;
@@ -778,11 +771,13 @@ export async function getFirstRunBackfillStatus(jobId: string): Promise<
         delivered,
         failed,
         totalEstimated: job.total_estimated,
-        errorMessage: job.error_message ?? failureMessage,
+        errorMessage: job.error_message || failureMessage
+          ? sanitizeConnectorDiagnosticForStorage(job.error_message ?? failureMessage, 500)
+          : null,
       };
-    } catch (err) {
+    } catch {
       return {
-        error: err instanceof Error ? err.message : "Couldn't read backfill status.",
+        error: "Couldn't read backfill status.",
       };
     }
   });

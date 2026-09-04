@@ -95,6 +95,7 @@ describe("findSubjectEvents", () => {
     expect(res.coverage).toBe("partial");
     expect(res.indexWindowFrom).toBe("2026-05-01T00:00:00Z");
     expect(res.uncovered.some((u) => u.store === "pre-index window")).toBe(true);
+    expect(res.uncovered.some((u) => u.store.includes("billing_events"))).toBe(false);
   });
 
   it("never claims full coverage; unknown when no source has indexing", async () => {
@@ -174,6 +175,8 @@ describe("buildErasurePlan", () => {
     expect(plan.r2.derivedAtExecute.length).toBe(1);
     expect(plan.r2.derivedAtExecute[0]).toMatch(/queue-spill/);
     expect(plan.outOfScope.length).toBeGreaterThan(0);
+    expect(plan.outOfScope.some((entry) => entry.store.includes("billing_events"))).toBe(false);
+    expect(plan.outOfScope.some((entry) => entry.store.includes("notifications"))).toBe(true);
   });
 
   it("produces an empty plan for no matches", () => {
@@ -317,7 +320,7 @@ describe("executeErasure", () => {
         if (/SELECT DISTINCT event_id/.test(sql)) {
           return { rows: [{ event_id: "evt_a", destination_id: "dst_1", attempt_no: 0 }] as unknown as T[] };
         }
-        throw new Error("Code: 47. UNKNOWN_IDENTIFIER");
+        throw new Error("Code: 47. UNKNOWN_IDENTIFIER marker-secret private-db.internal");
       },
     };
     let pgRan = false;
@@ -337,6 +340,13 @@ describe("executeErasure", () => {
 
     // Every ClickHouse store recorded 'failed', but Postgres still ran...
     expect(res.storeResults.filter((s) => s.status === "failed").length).toBeGreaterThan(0);
+    expect(JSON.stringify(res.storeResults)).not.toContain("marker-secret");
+    expect(JSON.stringify(res.storeResults)).not.toContain("private-db.internal");
+    expect(
+      res.storeResults
+        .filter((result) => result.store.startsWith("clickhouse:") && result.status === "failed")
+        .every((result) => result.detail === "clickhouse_delete_failed"),
+    ).toBe(true);
     expect(pgRan).toBe(true);
     expect(res.storeResults.some((s) => s.store === "postgres:dead_letters" && s.status === "deleted")).toBe(true);
     // ...and the manifest hash is still computed so the audit isn't lost.

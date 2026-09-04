@@ -265,15 +265,16 @@ async function bigQueryRequest(
       ...(init.body ? { body: init.body } : {}),
       signal: controller.signal,
     });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error(`bigquery_schema_change_http_${response.status}`);
+    }
     const text = await response.text();
     let body: BigQueryJobResponse = {};
     try {
       body = JSON.parse(text) as BigQueryJobResponse;
     } catch {
       // The HTTP status and bounded response text below remain actionable.
-    }
-    if (!response.ok) {
-      throw new Error(`bigquery_schema_change_http_${response.status}:${text.slice(0, 1200)}`);
     }
     return { body };
   } finally {
@@ -284,9 +285,10 @@ async function bigQueryRequest(
 function assertBigQueryJobSuccess(body: BigQueryJobResponse): void {
   const error = body.status?.errorResult ?? body.errors?.[0] ?? body.status?.errors?.[0];
   if (error) {
-    throw new Error(
-      `bigquery_schema_change_failed:${error.reason ?? "unknown"}:${error.message ?? "BigQuery rejected the schema change."}`,
-    );
+    const reason = /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(error.reason ?? "")
+      ? error.reason
+      : "unknown";
+    throw new Error(`bigquery_schema_change_failed:${reason}`);
   }
 }
 

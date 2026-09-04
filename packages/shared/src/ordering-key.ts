@@ -8,10 +8,9 @@
  * a per-key Durable Object so event N+1 is never delivered before N reaches a
  * terminal outcome.
  *
- * This module is the Phase-1 foundation: pure extraction, no behavior change.
- * It is DEFAULT-OFF. When `ordering_enabled` is false/undefined the resolver
- * returns null and the caller shards by `event_id` exactly as before — so the
- * emitted message and chosen shard are byte-identical to baseline.
+ * This module is the Phase-1 foundation. It is DEFAULT-OFF. When
+ * `ordering_enabled` is false/undefined the resolver returns null and the
+ * caller shards by `event_id` exactly as before.
  *
  * Design choices, mirrored from the FIFO design doc:
  *  - Header wins over path when both are configured and the header is present.
@@ -20,9 +19,9 @@
  *  - A missing header, missing/invalid path, non-JSON body, or non-scalar leaf
  *    yields null — the caller falls back to the unordered hot path. A missing
  *    key MUST NEVER drop an event.
- *  - The resolved key is namespaced `${workspace_id}:${source_id}:${raw}` so
- *    the same raw value on two different sources can never collide into one
- *    ordering stream.
+ *  - The resolved scalar is namespaced by workspace and source, then HMACed
+ *    before it leaves ingest. Queue and Durable Object state never receive the
+ *    raw webhook value, including low-entropy account IDs.
  *  - The key is NOT the event_id: uuidv7 here has a fully random tail, so it is
  *    not a valid intra-millisecond sort key. Ordering is established later by
  *    enqueue order, not by comparing keys.
@@ -45,11 +44,12 @@ export interface OrderingKeyConfig {
  * disabled or no key could be extracted. `headers` keys are expected to be
  * lowercased (as the ingest worker's collectHeaders produces).
  */
-export function resolveOrderingKey(
+export async function resolveOrderingKey(
   source: OrderingKeyConfig,
   rawBody: Uint8Array,
   headers: Record<string, string>,
-): string | null {
+  hmacSecret: string,
+): Promise<string | null> {
   if (!source.ordering_enabled) return null;
 
   let raw: string | null = null;
@@ -66,7 +66,25 @@ export function resolveOrderingKey(
   }
 
   if (raw === null) return null;
-  return `${source.workspace_id}:${source.source_id}:${raw}`;
+  if (hmacSecret.length < 32) throw new Error("ordering_key_hmac_secret_invalid");
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(hmacSecret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const digest = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(
+      `axel-ordering-key-v1\0${source.workspace_id}\0${source.source_id}\0${raw}`,
+    ),
+  );
+  const hex = [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  return `ord_v1_${hex}`;
 }
 
 /**

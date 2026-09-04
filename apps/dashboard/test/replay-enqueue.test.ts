@@ -29,6 +29,7 @@ vi.mock("next/cache", () => ({
 }));
 
 import { updateTag } from "next/cache";
+import { cacheTags } from "../lib/repositories";
 import { bustReplayTags, enqueueReplays } from "../lib/replay-enqueue";
 
 function candidate(over: Record<string, unknown> = {}) {
@@ -225,15 +226,15 @@ describe("bustReplayTags", () => {
   it("busts replays + dead-letters, plus replay-jobs when a job was created", async () => {
     bustReplayTags("ws_1");
     expect(vi.mocked(updateTag).mock.calls.map((c) => c[0])).toEqual([
-      "ws-ws_1-replays",
-      "ws-ws_1-dead-letters",
+      cacheTags.replays("ws_1"),
+      cacheTags.deadLetters("ws_1"),
     ]);
     vi.clearAllMocks();
     bustReplayTags("ws_1", { jobs: true });
     expect(vi.mocked(updateTag).mock.calls.map((c) => c[0])).toEqual([
-      "ws-ws_1-replays",
-      "ws-ws_1-dead-letters",
-      "ws-ws_1-replay-jobs",
+      cacheTags.replays("ws_1"),
+      cacheTags.deadLetters("ws_1"),
+      cacheTags.replayJobs("ws_1"),
     ]);
   });
 });

@@ -57,7 +57,7 @@ export default async function UsagePage() {
         <PageHeader eyebrow="Workspace" title="Usage" />
         <EmptyState
           title="Usage analytics not configured"
-          body="Set CLICKHOUSE_URL (and optionally CLICKHOUSE_USER / CLICKHOUSE_PASSWORD) on the dashboard service to enable per-workspace usage statistics. The ingest, router, and delivery services already write to ClickHouse — only the dashboard needs the read connection."
+          body="Usage analytics are unavailable for this deployment. Contact the operator to enable them."
         />
       </>
     );
@@ -75,8 +75,8 @@ export default async function UsagePage() {
       listWorkspaceFailureTypes(workspaceId),
       getDailyUsage(workspaceId, 30, { timezone }),
     ]);
-  } catch (err) {
-    error = err instanceof Error ? err.message : "ClickHouse query failed.";
+  } catch {
+    error = "Usage analytics are temporarily unavailable.";
   }
 
   if (error || !summary) {
@@ -85,7 +85,7 @@ export default async function UsagePage() {
         <PageHeader eyebrow="Workspace" title="Usage" />
         <EmptyState
           title="Couldn't load usage stats"
-          body={error ?? "ClickHouse query failed. Check CLICKHOUSE_URL and credentials."}
+          body={error ?? "Usage analytics are temporarily unavailable."}
         />
       </>
     );

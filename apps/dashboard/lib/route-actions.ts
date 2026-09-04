@@ -62,9 +62,8 @@ export async function backfillRoute(_state: ActionState, formData: FormData): Pr
       return {
         notice: `Backfill job queued (${sizePhrase}). The worker drains it in throttled batches — track progress on this page.`,
       };
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : "unknown";
-      return { error: `Could not queue backfill job (${reason}).` };
+    } catch {
+      return { error: "Could not queue the backfill job. Try again." };
     }
   });
 }

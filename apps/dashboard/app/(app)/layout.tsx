@@ -8,7 +8,6 @@ import { StopImpersonationBar } from "../(admin)/_components/StopImpersonationBa
 import { SuspendedWorkspaceBanner } from "../(admin)/_components/SuspendedWorkspaceBanner";
 import { BillingBanner } from "./_components/BillingBanner";
 import { VerifyEmailBanner } from "./_components/VerifyEmailBanner";
-import { PostHogIdentify } from "./_components/PostHogIdentify";
 import { redirect } from "next/navigation";
 import { AppShellChromeSkeleton } from "./AppShellChromeSkeleton";
 
@@ -92,17 +91,7 @@ async function AuthenticatedShell({
           impersonatorEmail={session.impersonator.email}
           viewingAs={session.user.email}
         />
-      ) : (
-        // Skip identify during impersonation so a support session doesn't
-        // overwrite the customer's PostHog identity with staff activity.
-        <PostHogIdentify
-          distinctId={session.user.id}
-          email={session.user.email}
-          name={session.user.name}
-          workspaceId={session.activeWorkspace.workspace_id}
-          workspaceName={session.activeWorkspace.workspace_name}
-        />
-      )}
+      ) : null}
       <AppShell session={session}>
         <PanelStackProvider>
           {/* Unverified email: a persistent nudge, never a gate — the

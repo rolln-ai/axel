@@ -2,12 +2,12 @@ import type { DestinationQueueMessage } from "./types.js";
 
 /**
  * Cloudflare Queues caps a single message body at 128KB. We spill the
- * heavy fields (`payload`, `headers`, `query`) to R2 once the serialised
+ * payload to R2 once the serialised
  * message gets close — leaving headroom for the metadata around it and
  * the queue's own envelope.
  *
  * 100KB is intentionally conservative: a transformed payload near the
- * limit plus large `headers`/`query` could push the JSON envelope and
+ * limit could push the JSON envelope and
  * Cloudflare's wrapping over 128KB on its own, and a few KB of
  * accounting metadata (binding, idempotency_key, …) sits in the message
  * regardless. If we ever see false-positive spills in production we can
@@ -49,18 +49,18 @@ export interface QueueSpillReader {
 }
 
 export class QueueSpillObjectMissingError extends Error {
-  readonly spillKey: string;
-
-  constructor(spillKey: string) {
-    super(`spill_r2_key_missing: ${spillKey}`);
+  constructor(_spillKey: string) {
+    super("spill_r2_key_missing");
     this.name = "QueueSpillObjectMissingError";
-    this.spillKey = spillKey;
   }
 }
 
 export function isQueueSpillObjectMissingError(err: unknown): err is QueueSpillObjectMissingError {
   return err instanceof QueueSpillObjectMissingError
-    || (err instanceof Error && err.message.startsWith("spill_r2_key_missing: "));
+    || (err instanceof Error && (
+      err.message === "spill_r2_key_missing"
+      || err.message.startsWith("spill_r2_key_missing: ")
+    ));
 }
 
 /**
@@ -69,15 +69,11 @@ export function isQueueSpillObjectMissingError(err: unknown): err is QueueSpillO
  * data, not authority to read another workspace's object key.
  */
 export class QueueSpillKeyMismatchError extends Error {
-  readonly spillKey: string;
-  readonly expectedSpillKey: string;
-
-  constructor(spillKey: string, expectedSpillKey: string) {
-    // Keep attacker-controlled key material out of logs and Sentry titles.
+  constructor(_spillKey: string, _expectedSpillKey: string) {
+    // Keep attacker-controlled and canonical key material off the Error object;
+    // runtimes may serialize enumerable custom properties to logs or Sentry.
     super("spill_r2_key_mismatch");
     this.name = "QueueSpillKeyMismatchError";
-    this.spillKey = spillKey;
-    this.expectedSpillKey = expectedSpillKey;
   }
 }
 
@@ -85,26 +81,26 @@ export class QueueSpillKeyMismatchError extends Error {
  * The spill object came back but didn't parse as JSON.
  *
  * Raised instead of the bare `SyntaxError` from `JSON.parse` so the error
- * carries the spill key and body size rather than a byte offset. A raw
- * SyntaxError fingerprints on "position <n>", which opens a fresh Sentry
- * issue per truncation length (JAVASCRIPT-3M) and buries the one fact that
- * identifies the object.
+ * carries only the bounded body size, never the tenant-bearing object key. A
+ * raw SyntaxError fingerprints on "position <n>", which opens a fresh Sentry
+ * issue per truncation length (JAVASCRIPT-3M).
  */
 export class QueueSpillBodyCorruptError extends Error {
-  readonly spillKey: string;
   readonly byteLength: number;
 
-  constructor(spillKey: string, byteLength: number) {
-    super(`spill_r2_body_corrupt: ${spillKey} (${byteLength} bytes)`);
+  constructor(_spillKey: string, byteLength: number) {
+    super(`spill_r2_body_corrupt (${byteLength} bytes)`);
     this.name = "QueueSpillBodyCorruptError";
-    this.spillKey = spillKey;
     this.byteLength = byteLength;
   }
 }
 
 export function isQueueSpillBodyCorruptError(err: unknown): err is QueueSpillBodyCorruptError {
   return err instanceof QueueSpillBodyCorruptError
-    || (err instanceof Error && err.message.startsWith("spill_r2_body_corrupt: "));
+    || (err instanceof Error && (
+      err.message.startsWith("spill_r2_body_corrupt (")
+      || err.message.startsWith("spill_r2_body_corrupt: ")
+    ));
 }
 
 /**
@@ -138,13 +134,14 @@ export function hasCanonicalSpillKey(message: DestinationQueueMessage): boolean 
  *  - If `spill_r2_key` is already set and canonical, the message has been
  *    through a spill round-trip without changing attempts. The R2 object is
  *    still authoritative — strip the inline copies and return the wire form.
- *  - If the attempt changed, write the hydrated fields under the new attempt's
- *    canonical key before stripping them. This keeps retries compatible with
- *    exact key binding instead of carrying `/1.json` into attempt 2.
+ *  - If the attempt changed, write the hydrated payload under the new
+ *    attempt's canonical key before stripping it. This keeps retries
+ *    compatible with exact key binding instead of carrying `/1.json` into
+ *    attempt 2.
  *  - Otherwise, measure the message's JSON byte size. If it exceeds
- *    the spill threshold, write `{ payload, headers, query }` to R2
- *    and return a stripped copy with `spill_r2_key` set. Small
- *    messages pass through unchanged.
+ *    the spill threshold, write `{ payload, headers: {}, query: {} }` to R2
+ *    and return a stripped copy with `spill_r2_key` set. Small messages keep
+ *    their payload inline. Every path erases legacy request metadata values.
  *
  * Throws if the R2 write fails — the caller should propagate so the
  * source queue retries instead of enqueueing a half-spilled message.
@@ -153,53 +150,55 @@ export async function spillIfOversized(
   message: DestinationQueueMessage,
   writer: QueueSpillWriter,
 ): Promise<DestinationQueueMessage> {
-  if (hasCanonicalSpillKey(message)) {
+  // Old queue/backlog messages may still contain arbitrary inbound request
+  // values. Erase them before measuring, returning, or writing a new spill.
+  const sanitizedMessage: DestinationQueueMessage = {
+    ...message,
+    headers: {},
+    query: {},
+  };
+  if (hasCanonicalSpillKey(sanitizedMessage)) {
     return {
-      ...message,
+      ...sanitizedMessage,
       payload: null,
-      headers: {},
-      query: {},
     };
   }
-  if (message.spill_r2_key) {
-    const spillKey = buildSpillKey(message);
+  if (sanitizedMessage.spill_r2_key) {
+    const spillKey = buildSpillKey(sanitizedMessage);
     const spillBody: QueueSpillBody = {
-      payload: message.payload,
-      headers: message.headers,
-      query: message.query,
+      payload: sanitizedMessage.payload,
+      headers: {},
+      query: {},
     };
     await writer.put(spillKey, JSON.stringify(spillBody));
     return {
-      ...message,
+      ...sanitizedMessage,
       payload: null,
-      headers: {},
-      query: {},
       spill_r2_key: spillKey,
     };
   }
-  const serialised = JSON.stringify(message);
+  const serialised = JSON.stringify(sanitizedMessage);
   if (byteLength(serialised) <= QUEUE_MESSAGE_SPILL_THRESHOLD_BYTES) {
-    return message;
+    return sanitizedMessage;
   }
-  const spillKey = buildSpillKey(message);
+  const spillKey = buildSpillKey(sanitizedMessage);
   const spillBody: QueueSpillBody = {
-    payload: message.payload,
-    headers: message.headers,
-    query: message.query,
+    payload: sanitizedMessage.payload,
+    headers: {},
+    query: {},
   };
   await writer.put(spillKey, JSON.stringify(spillBody));
   return {
-    ...message,
+    ...sanitizedMessage,
     payload: null,
-    headers: {},
-    query: {},
     spill_r2_key: spillKey,
   };
 }
 
 /**
- * If the message references an R2 spill, fetch and merge it back in.
- * Returns the message unchanged when there's no spill key.
+ * If the message references an R2 spill, fetch and merge its payload back in.
+ * Every path erases legacy request metadata values, including those in old
+ * spill objects. With no spill key, only that normalization is applied.
  *
  * Throws QueueSpillObjectMissingError if the key is missing — that means the
  * spill was deleted before the consumer ran (a cleanup-vs-redelivery race).
@@ -220,10 +219,15 @@ export async function hydrateIfSpilled(
   message: DestinationQueueMessage,
   reader: QueueSpillReader,
 ): Promise<DestinationQueueMessage> {
-  if (!message.spill_r2_key) return message;
-  const spillKey = message.spill_r2_key;
-  const expectedSpillKey = buildSpillKey(message);
-  if (!hasCanonicalSpillKey(message)) {
+  const sanitizedMessage: DestinationQueueMessage = {
+    ...message,
+    headers: {},
+    query: {},
+  };
+  if (!sanitizedMessage.spill_r2_key) return sanitizedMessage;
+  const spillKey = sanitizedMessage.spill_r2_key;
+  const expectedSpillKey = buildSpillKey(sanitizedMessage);
+  if (!hasCanonicalSpillKey(sanitizedMessage)) {
     throw new QueueSpillKeyMismatchError(spillKey, expectedSpillKey);
   }
   const buf = await reader.get(spillKey);
@@ -242,10 +246,12 @@ export async function hydrateIfSpilled(
     throw new QueueSpillBodyCorruptError(spillKey, buf.byteLength);
   }
   return {
-    ...message,
+    ...sanitizedMessage,
     payload: parsed.payload,
-    headers: parsed.headers,
-    query: parsed.query,
+    // Parse the legacy fields for structural compatibility, but never restore
+    // their values into a delivery, retry, connector, or future spill.
+    headers: {},
+    query: {},
   };
 }
 

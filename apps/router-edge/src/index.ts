@@ -33,12 +33,16 @@ import {
   type QueueSpillWriter,
   type Route,
   evaluateRouteFanout,
+  isCanonicalRawPayloadKey,
   sleep,
   spillIfOversized,
   createTtlCache,
   requiresNativeRuntimeDestination,
   isParquetObjectStoreBinding,
+  readBoundedJsonResponse,
+  resolveInternalServiceEndpoint,
   sanitizeConnectorDiagnosticForStorage,
+  validateInternalServiceEndpoint,
 } from "@axel/shared";
 import { captureException, isCloudflareQueueOverloadError, isTransientR2Error, recordHeartbeatHttp, sentryClientFromEnv, type SentryEnv } from "@axel/observability";
 
@@ -143,8 +147,16 @@ const ROUTE_CACHE_TTL_MS = 30_000;
 const routeCache = createTtlCache<RouteWithTypes[]>({ ttlMs: ROUTE_CACHE_TTL_MS });
 
 function maybeBeatRouter(env: Env, ctx: ExecutionContext, error?: string): void {
-  const url = env.DELIVERY_HEARTBEAT_URL
-    ?? (env.DELIVERY_SERVICE_URL ? `${env.DELIVERY_SERVICE_URL.replace(/\/$/, "")}/internal/heartbeat` : null);
+  let url: string | null = null;
+  try {
+    url = env.DELIVERY_HEARTBEAT_URL
+      ? validateInternalServiceEndpoint(env.DELIVERY_HEARTBEAT_URL, "/internal/heartbeat")
+      : env.DELIVERY_SERVICE_URL
+        ? resolveInternalServiceEndpoint(env.DELIVERY_SERVICE_URL, "/internal/heartbeat")
+        : null;
+  } catch {
+    return;
+  }
   const secret = env.DELIVERY_SHARED_SECRET;
   if (!url || !secret) return;
   const now = Date.now();
@@ -173,7 +185,7 @@ export default {
       } catch (err) {
         // Preserve the actual router exception before Cloudflare replaces it
         // with a generic auto-DLQ `max_retries_exceeded` payload.
-        console.error("[router] processing failed", err);
+        console.error(`[router] processing failed: ${routerErrorMessage(err)}`);
         const finalAttempt = msg.attempts >= ROUTER_CONSUMER_MAX_RETRIES;
         const transientR2Read = isTransientR2Error(err);
         // AXE-65 — `env.DELIVERY_QUEUE.send()` throws "Queue is overloaded
@@ -208,10 +220,17 @@ export default {
   },
 };
 
-async function processOne(
+export async function processOne(
   message: QueueMessage,
   env: Env,
 ): Promise<void> {
+  if (!isCanonicalRawPayloadKey(message.r2_key, {
+    workspaceId: message.workspace_id,
+    eventId: message.event_id,
+    sourceId: message.source_id,
+  })) {
+    throw new Error("raw_payload_key_mismatch");
+  }
   const cacheKey = `${message.workspace_id}|${message.source_id}`;
   const routes = await routeCache.getOrLoad(cacheKey, () =>
     loadActiveRoutes(env, message.workspace_id, message.source_id),
@@ -240,7 +259,7 @@ async function processOne(
         route_id: route.route_id,
         r2_key: message.r2_key,
         reason: "raw_payload_missing",
-        message: `R2 lookup returned null for ${message.r2_key}`,
+        message: "Raw payload lookup returned no object.",
         errored_at: enqueuedAt,
       });
     }
@@ -316,7 +335,7 @@ async function processOne(
         );
       }
       console.log(
-        `[router] event=${message.event_id} dest=${destinationId} type=${destinationType ?? "(unknown)"} → ${runtime} (queue)${queueMessage.spill_r2_key ? " spilled" : ""}`,
+        `[router] type=${destinationType ?? "(unknown)"} → ${runtime} (queue)${queueMessage.spill_r2_key ? " spilled" : ""}`,
       );
       // Force `contentType: "json"` so messages survive the HTTP-pull API
       // round-trip used by the Render delivery service. The default ("v8")
@@ -438,6 +457,8 @@ interface InternalRoutesResponse {
   routes: Array<RouteWithTypes & { fieldSelection?: string[] | null }>;
 }
 
+const INTERNAL_ROUTES_RESPONSE_MAX_BYTES = 2 * 1024 * 1024;
+
 async function loadActiveRoutes(
   env: Env,
   workspaceId: string,
@@ -448,7 +469,11 @@ async function loadActiveRoutes(
       "DELIVERY_SERVICE_URL or DELIVERY_SHARED_SECRET not configured — required for route lookup",
     );
   }
-  const res = await fetch(`${env.DELIVERY_SERVICE_URL.replace(/\/$/, "")}/internal/routes`, {
+  const endpoint = resolveInternalServiceEndpoint(
+    env.DELIVERY_SERVICE_URL,
+    "/internal/routes",
+  );
+  const res = await fetch(endpoint, {
     method: "POST",
     redirect: "manual",
     headers: {
@@ -458,10 +483,14 @@ async function loadActiveRoutes(
     body: JSON.stringify({ workspace_id: workspaceId, source_id: sourceId }),
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => "(no body)");
-    throw new Error(`internal_routes_${res.status}: ${text.slice(0, 200)}`);
+    await res.body?.cancel().catch(() => undefined);
+    throw new Error(`internal_routes_${res.status}`);
   }
-  const data = (await res.json()) as InternalRoutesResponse;
+  const data = await readBoundedJsonResponse(
+    res,
+    INTERNAL_ROUTES_RESPONSE_MAX_BYTES,
+  ) as Partial<InternalRoutesResponse>;
+  if (!Array.isArray(data?.routes)) throw new Error("internal_routes_invalid");
   return data.routes.map(({ fieldSelection, ...route }) => ({
     ...route,
     field_selection: route.field_selection ?? fieldSelection ?? null,
@@ -496,7 +525,7 @@ async function reportRouteEngineError(
   };
   await markRouteErrored(env, message.workspace_id, routeId, storedBreach).catch((err) => {
     console.error(
-      `[router] failed to mark route ${routeId} errored: ${sanitizeConnectorDiagnosticForStorage(err)}`,
+      `[router] failed to mark route errored: ${sanitizeConnectorDiagnosticForStorage(err)}`,
     );
   });
   routeCache.invalidate(`${message.workspace_id}|${message.source_id}`);
@@ -522,7 +551,11 @@ export async function markRouteErrored(
   if (!env.DELIVERY_SERVICE_URL || !env.DELIVERY_SHARED_SECRET) {
     throw new Error("DELIVERY_SERVICE_URL or DELIVERY_SHARED_SECRET not configured");
   }
-  const res = await fetch(`${env.DELIVERY_SERVICE_URL.replace(/\/$/, "")}/internal/routes/errored`, {
+  const endpoint = resolveInternalServiceEndpoint(
+    env.DELIVERY_SERVICE_URL,
+    "/internal/routes/errored",
+  );
+  const res = await fetch(endpoint, {
     method: "POST",
     redirect: "manual",
     headers: {
@@ -537,9 +570,10 @@ export async function markRouteErrored(
     }),
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => "(no body)");
-    throw new Error(`internal_routes_errored_${res.status}: ${text.slice(0, 200)}`);
+    await res.body?.cancel().catch(() => undefined);
+    throw new Error(`internal_routes_errored_${res.status}`);
   }
+  await res.body?.cancel().catch(() => undefined);
 }
 
 // NOTE: deliberately different from apps/router's decodePayload — this one

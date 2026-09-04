@@ -11,7 +11,7 @@
  * priority order whose value is a short string. This matches the shapes the
  * vast majority of webhook providers use (`type`, `event`, `event_type`,
  * `action`, `topic`, `name`), e.g. Stripe `{type:"payment_intent.succeeded"}`
- * or newsletter provider `{event:"subscriber.opened_email"}`.
+ * or a newsletter provider `{event:"subscriber.opened_email"}`.
  *
  * When the body carries no discriminator, we fall back to a small set of
  * common event-type HEADERS — many providers put the type only in a header

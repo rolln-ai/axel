@@ -4,6 +4,9 @@ import type { ClickhouseQueryable } from "../clickhouse";
 import { clickhouse } from "../clickhouse";
 import type { Queryable } from "../db";
 import { db } from "../db";
+import type { BillingEmailDispatchSummary } from "./email-dispatcher";
+import type { MeterReportSummary } from "./meter-reporter";
+import type { PushPlanStateSummary } from "./plan-state";
 
 const BILLING_CLICKHOUSE_QUERY_TIMEOUT_MS = 30_000;
 
@@ -37,6 +40,100 @@ export interface BillingRollupSummary {
   deliveryTasks: number;
   /** Wall-clock duration of the rollup run, ms. */
   durationMs: number;
+}
+
+export interface BillingRollupCronResult {
+  summary: BillingRollupSummary | { skipped: "clickhouse_not_configured" };
+  meter: MeterReportSummary | { skipped: "stripe_not_configured" };
+  planPush: PushPlanStateSummary;
+  emails: BillingEmailDispatchSummary;
+}
+
+type BillingRollupCronCode =
+  | "billing_rollup_completed"
+  | "clickhouse_not_configured";
+type MeterReportCronCode =
+  | "meter_report_completed"
+  | "stripe_not_configured";
+type PlanPushCronCode = "plan_push_completed" | "plan_push_partial";
+type BillingEmailCronCode = "billing_email_completed" | "billing_email_partial";
+
+export interface PublicBillingRollupCronSummary {
+  rollup: {
+    code: BillingRollupCronCode;
+    workspace_count: number;
+    ingest_tasks: number;
+    delivery_tasks: number;
+    duration_ms: number;
+  };
+  meter: {
+    code: MeterReportCronCode;
+    reported: number;
+    skipped: number;
+    unbound: number;
+    failed: number;
+  };
+  plan_push: PushPlanStateSummary & { code: PlanPushCronCode };
+  emails: {
+    code: BillingEmailCronCode;
+    sent: number;
+    already_sent: number;
+    failed: number;
+    notifications_emitted: number;
+  };
+}
+
+/** Project the authenticated cron response to fixed codes and numeric totals. */
+export function publicBillingRollupCronSummary(
+  result: BillingRollupCronResult,
+): PublicBillingRollupCronSummary {
+  const rollup = "skipped" in result.summary
+    ? {
+        code: "clickhouse_not_configured" as const,
+        workspace_count: 0,
+        ingest_tasks: 0,
+        delivery_tasks: 0,
+        duration_ms: 0,
+      }
+    : {
+        code: "billing_rollup_completed" as const,
+        workspace_count: result.summary.workspaceCount,
+        ingest_tasks: result.summary.ingestTasks,
+        delivery_tasks: result.summary.deliveryTasks,
+        duration_ms: result.summary.durationMs,
+      };
+  const meter = "events" in result.meter
+    ? {
+        code: "meter_report_completed" as const,
+        reported: result.meter.reported,
+        skipped: result.meter.skipped,
+        unbound: result.meter.unbound,
+        failed: Math.max(0, result.meter.events.length - result.meter.reported),
+      }
+    : {
+        code: "stripe_not_configured" as const,
+        reported: 0,
+        skipped: 0,
+        unbound: 0,
+        failed: 0,
+      };
+  return {
+    rollup,
+    meter,
+    plan_push: {
+      code: result.planPush.errors > 0 ? "plan_push_partial" : "plan_push_completed",
+      pushed: result.planPush.pushed,
+      errors: result.planPush.errors,
+      skipped: result.planPush.skipped,
+    },
+    emails: {
+      code: result.emails.failed > 0 ? "billing_email_partial" : "billing_email_completed",
+      sent: result.emails.sent,
+      already_sent: result.emails.alreadySent,
+      failed: result.emails.failed,
+      notifications_emitted: result.emails.notificationsEmitted,
+    },
+  };
 }
 
 export interface BillingRollupDeps {

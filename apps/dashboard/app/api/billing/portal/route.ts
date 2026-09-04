@@ -41,14 +41,14 @@ export async function POST(_request: Request): Promise<Response> {
         { status: 409 },
       );
     }
-    await captureDashboardException(err, {
+    await captureDashboardException(new Error("billing_portal_failed"), {
       tags: {
         component: "billing_portal",
         workspace_id: session.activeWorkspace.workspace_id,
       },
     });
     return Response.json(
-      { ok: false, error: err instanceof Error ? err.message : String(err) },
+      { ok: false, error: "billing_portal_failed" },
       { status: 500 },
     );
   }

@@ -21,7 +21,7 @@ import {
 // Same SSRF guard the delivery S3 connector uses (connectors/s3.ts). Applied
 // before any network client is built so a DB-set custom endpoint can't aim
 // compaction at a metadata / internal host.
-import { validateDestinationUrl } from "@axel/shared";
+import { sanitizeConnectorDiagnosticForStorage, validateDestinationUrl } from "@axel/shared";
 
 const DEFAULT_TARGET_BYTES = 64 * 1024 * 1024;
 
@@ -71,7 +71,7 @@ export async function loadParquetCompactionRoutes(
     const secretAccessKey = str(config.secret_access_key);
     if (!bucket || !region || !accessKeyId || !secretAccessKey) {
       console.warn(
-        `[compaction] skipping route=${row.route_id} dest=${row.destination_id} — incomplete S3 config`,
+        "[compaction] skipping route — incomplete S3 config",
       );
       continue;
     }
@@ -83,7 +83,7 @@ export async function loadParquetCompactionRoutes(
       const epSsrf = validateDestinationUrl(endpoint);
       if (epSsrf) {
         console.warn(
-          `[compaction] skipping route=${row.route_id} dest=${row.destination_id} — endpoint blocked: ${epSsrf}`,
+          `[compaction] skipping route — endpoint blocked: ${sanitizeConnectorDiagnosticForStorage(epSsrf)}`,
         );
         continue;
       }
@@ -171,10 +171,12 @@ export async function runParquetCompactionTick(deps: ParquetCompactionLoopDeps):
       mergedTotal += res.merged;
       deletedTotal += res.deleted;
       for (const e of res.errors) {
-        console.error(`[compaction] route=${route.target.routeId} ${e}`);
+        console.error(`[compaction] ${sanitizeConnectorDiagnosticForStorage(e)}`);
       }
     } catch (err) {
-      console.error(`[compaction] route=${route.target.routeId} route_failed:`, err);
+      console.error(
+        `[compaction] route_failed: ${sanitizeConnectorDiagnosticForStorage(err)}`,
+      );
     }
   }
   if (mergedTotal > 0 || deletedTotal > 0) {
@@ -206,7 +208,9 @@ export function startParquetCompactionLoop(deps: ParquetCompactionLoopDeps): Run
   const runTick = async () => {
     if (stopped) return;
     inFlight = runParquetCompactionTick(deps).catch((err) => {
-      console.error("[compaction] tick failed", err);
+      console.error(
+        `[compaction] tick failed: ${sanitizeConnectorDiagnosticForStorage(err)}`,
+      );
     });
     try {
       await inFlight;

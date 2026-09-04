@@ -67,7 +67,7 @@ describe("delivery-service ClickHouse attempt logging", () => {
     expect(JSON.parse(String(init?.body))).toMatchObject({ is_test: true });
   });
 
-  it("drops downstream body echoes and redacts diagnostics before persistence", async () => {
+  it("drops downstream bodies and collapses diagnostics before persistence", async () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response("", { status: 200 }));
@@ -79,7 +79,8 @@ describe("delivery-service ClickHouse attempt logging", () => {
         response: {
           status: 400,
           body: '{"password":"raw-webhook-secret"}',
-          error: 'invalid value "alice@example.test"',
+          error: 'invalid value "alice@example.test" from customer_schema_marker',
+          table: "customer_table_marker",
         },
       },
     );
@@ -88,9 +89,11 @@ describe("delivery-service ClickHouse attempt logging", () => {
     const row = JSON.parse(String(init?.body)) as { response_json: string };
     expect(row.response_json).not.toContain("raw-webhook-secret");
     expect(row.response_json).not.toContain("alice@example.test");
+    expect(row.response_json).not.toContain("customer_schema_marker");
+    expect(row.response_json).not.toContain("customer_table_marker");
     expect(JSON.parse(row.response_json)).toEqual({
-      status: 400,
-      error: 'invalid value "[REDACTED]"',
+      http_status: 400,
+      error: "delivery_failed",
     });
   });
 

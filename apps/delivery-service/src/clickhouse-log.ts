@@ -21,7 +21,7 @@
 
 import {
   insertRows,
-  sanitizeConnectorResponseForStorage,
+  sanitizeDeliveryAttemptResponseForStorage,
   toClickhouseDateTime,
   type ClickhouseInsertEnv,
 } from "@axel/shared";
@@ -72,7 +72,7 @@ export async function logDeliveryAttempt(
     latency_ms: attempt.latency_ms,
     is_test: attempt.is_test === true,
     response_json: JSON.stringify(
-      sanitizeConnectorResponseForStorage(attempt.response ?? {}),
+      sanitizeDeliveryAttemptResponseForStorage(attempt.response ?? {}),
     ),
     created_at: toClickhouseDateTime(attempt.created_at ?? new Date().toISOString()),
   };

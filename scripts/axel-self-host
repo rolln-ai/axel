@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set +x
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -45,7 +46,8 @@ load_env() {
 
 load_env_file() {
   local path="$1"
-  local line name value
+  local line name value seen_names
+  seen_names=$'\n'
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       ""|\#*) continue ;;
@@ -56,10 +58,44 @@ load_env_file() {
       echo "[self-host] invalid environment entry in $path: $name" >&2
       exit 1
     fi
+    case "$path" in
+      "$ENV_FILE")
+        case "$name" in
+          AXEL_DEPLOYMENT_MODE|AXEL_INSTALLATION_ID|AXEL_SITE_ADDRESS|AXEL_PUBLIC_URL|AXEL_DELIVERY_PUBLIC_URL|AXEL_RESOURCE_PREFIX|AXEL_HTTP_PORT|AXEL_HTTPS_PORT|AXEL_PUBLISH_PUBLIC_PORTS|AXEL_LOCAL_BIND_ADDRESS|AXEL_LOCAL_PORT|AXEL_INGEST_DOMAIN|CLOUDFLARE_ACCOUNT_ID|CLOUDFLARE_API_TOKEN|CLOUDFLARE_RUNTIME_API_TOKEN|DELIVERY_QUEUE_ID|RAW_PAYLOAD_BUCKET|NEXT_PUBLIC_AXEL_INGEST_URL|POSTGRES_PASSWORD|POSTGRES_ADMIN_PASSWORD|POSTGRES_MIGRATION_PASSWORD|POSTGRES_DASHBOARD_PASSWORD|POSTGRES_DELIVERY_PASSWORD|CREDENTIALS_MASTER_KEY|DELIVERY_SHARED_SECRET|DELIVERY_SHARED_SECRET_PREVIOUS|SOURCE_LOOKUP_SHARED_SECRET|SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS|ORDERING_KEY_HMAC_SECRET|INGEST_ADMIN_TOKEN|CRON_SECRET|RESEND_API_KEY|RESEND_FROM_EMAIL) ;;
+          *)
+            echo "[self-host] unapproved environment key in $path: $name" >&2
+            exit 1
+            ;;
+        esac
+        ;;
+      "$STATE_DIR/resources.env")
+        case "$name" in
+          INGRESS_QUEUE|DELIVERY_QUEUE|DEAD_QUEUE|RAW_PAYLOAD_BUCKET|INGEST_WORKER_NAME|ROUTER_WORKER_NAME) ;;
+          *)
+            echo "[self-host] unapproved generated resource key in $path: $name" >&2
+            exit 1
+            ;;
+        esac
+        ;;
+      *)
+        echo "[self-host] refusing unapproved environment file: $path" >&2
+        exit 1
+        ;;
+    esac
+    if [[ "$seen_names" == *$'\n'"$name"$'\n'* ]]; then
+      echo "[self-host] duplicate environment key in $path: $name" >&2
+      exit 1
+    fi
+    seen_names+="$name"$'\n'
     # Quoted assignment exports the bytes as data. Never `source` this file:
     # operator-supplied URLs and tokens must not be evaluated as shell code.
+    # The path-specific allowlist above also excludes interpreter and provider
+    # controls such as BASH_ENV, NODE_OPTIONS, DOCKER_HOST, and COMPOSE_FILE.
     export "$name=$value"
   done < "$path"
+  if [ -z "${POSTGRES_ADMIN_PASSWORD:-}" ] && [ -n "${POSTGRES_PASSWORD:-}" ]; then
+    export POSTGRES_ADMIN_PASSWORD="$POSTGRES_PASSWORD"
+  fi
 }
 
 require_value() {
@@ -79,6 +115,37 @@ require_strong_secret() {
     echo "[self-host] $name must contain at least 32 characters" >&2
     exit 1
   fi
+}
+
+require_database_password() {
+  local name="$1"
+  local value
+  require_value "$name"
+  value="${!name}"
+  if [[ ! "$value" =~ ^[A-Za-z0-9_-]{40,128}$ ]]; then
+    echo "[self-host] $name must contain 40-128 URL-safe characters" >&2
+    exit 1
+  fi
+}
+
+require_distinct_database_passwords() {
+  local names=(
+    POSTGRES_ADMIN_PASSWORD
+    POSTGRES_MIGRATION_PASSWORD
+    POSTGRES_DASHBOARD_PASSWORD
+    POSTGRES_DELIVERY_PASSWORD
+  )
+  local left right left_name right_name
+  for ((left = 0; left < ${#names[@]}; left += 1)); do
+    for ((right = left + 1; right < ${#names[@]}; right += 1)); do
+      left_name="${names[$left]}"
+      right_name="${names[$right]}"
+      if [ "${!left_name}" = "${!right_name}" ]; then
+        echo "[self-host] Postgres admin, migration, dashboard, and delivery passwords must differ" >&2
+        exit 1
+      fi
+    done
+  done
 }
 
 compose() {
@@ -111,13 +178,34 @@ publish_public_ports() {
 }
 
 wrangler() {
-  NO_COLOR=1 "$WRANGLER_BIN" "$@"
+  local -a clean_env=(
+    "NO_COLOR=1"
+    "PATH=${PATH:-/usr/bin:/bin}"
+  )
+  local name
+  for name in \
+    HOME TMPDIR LANG LC_ALL LC_CTYPE TZ CI \
+    HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY \
+    http_proxy https_proxy all_proxy no_proxy \
+    SSL_CERT_FILE SSL_CERT_DIR NODE_EXTRA_CA_CERTS; do
+    if [ -n "${!name:-}" ]; then
+      clean_env+=("$name=${!name}")
+    fi
+  done
+  for name in CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN; do
+    if [ -n "${!name:-}" ]; then
+      clean_env+=("$name=${!name}")
+    fi
+  done
+  env -i "${clean_env[@]}" "$WRANGLER_BIN" "$@"
 }
 
 ensure_wrangler() {
   if [ ! -x "$WRANGLER_BIN" ]; then
     echo "[self-host] installing the pinned Cloudflare provisioner"
-    pnpm --dir "$ROOT_DIR" install --frozen-lockfile
+    # This runs before loading .env.selfhost. Ignore package lifecycle scripts
+    # as a second boundary for secrets already exported by the caller.
+    pnpm --dir "$ROOT_DIR" install --frozen-lockfile --ignore-scripts
   fi
   if [ ! -x "$WRANGLER_BIN" ]; then
     echo "[self-host] Wrangler was not installed at $WRANGLER_BIN" >&2
@@ -253,12 +341,204 @@ ensure_raw_bucket() {
   fi
 }
 
-put_secret() {
-  local config="$1"
-  local name="$2"
-  local value="$3"
-  printf '%s' "$value" | wrangler secret put "$name" -c "$config" >/dev/null
-}
+release_edge_workers() (
+  local ingest_config="$1"
+  local router_config="$2"
+  local ingest_worker_name="$3"
+  local router_worker_name="$4"
+  local release_nonce ingest_tag router_tag release_dir
+  local ingest_prior_state router_prior_state
+  local ingest_activation_attempted=0
+  local router_activation_attempted=0
+  local ADMIN_TOKEN="$INGEST_ADMIN_TOKEN"
+  export ADMIN_TOKEN
+  release_nonce="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(8).toString("hex"))')"
+  ingest_tag="selfhost-ingest-${AXEL_INSTALLATION_ID}-${release_nonce}"
+  router_tag="selfhost-router-${AXEL_INSTALLATION_ID}-${release_nonce}"
+  release_dir="$(mktemp -d "$STATE_DIR/.worker-release.XXXXXX")"
+  chmod 700 "$release_dir"
+  umask 077
+
+  cleanup_worker_release() {
+    rm -f -- \
+      "$release_dir/ingest-secrets.json" \
+      "$release_dir/router-secrets.json" \
+      "$release_dir/ingest-prior.json" \
+      "$release_dir/router-prior.json" \
+      "$release_dir/ingest-versions.json" \
+      "$release_dir/ingest-deployment.json" \
+      "$release_dir/router-versions.json" \
+      "$release_dir/router-deployment.json" \
+      "$release_dir/ingest-rollback-deployment.json" \
+      "$release_dir/router-rollback-deployment.json"
+    rmdir "$release_dir" 2>/dev/null || true
+  }
+  trap cleanup_worker_release EXIT
+
+  stage_worker_version() {
+    local config="$1"
+    local tag="$2"
+    local secret_file="$3"
+    shift 3
+    if ! node "$ROOT_DIR/scripts/self-host/cloudflare-worker-release.mjs" \
+      write-secrets "$secret_file" "$@"; then
+      echo "[self-host] could not prepare the protected Worker secret file" >&2
+      return 1
+    fi
+    if ! wrangler versions upload \
+      --secrets-file "$secret_file" \
+      --tag "$tag" \
+      --message "Axel self-host atomic release" \
+      -c "$config" >/dev/null 2>&1; then
+      echo "[self-host] Cloudflare Worker version staging failed; production was not activated" >&2
+      return 1
+    fi
+    rm -f -- "$secret_file"
+  }
+
+  activate_worker_version() {
+    local config="$1"
+    local tag="$2"
+    if ! wrangler versions deploy \
+      --version-tag "$tag" \
+      --percentage 100 \
+      --message "Activate Axel self-host atomic release" \
+      --yes \
+      -c "$config" >/dev/null 2>&1; then
+      echo "[self-host] Cloudflare Worker version activation failed" >&2
+      return 1
+    fi
+  }
+
+  verify_worker_version() {
+    local config="$1"
+    local tag="$2"
+    local label="$3"
+    if ! wrangler versions list --json -c "$config" \
+      > "$release_dir/${label}-versions.json" 2>/dev/null \
+      || ! wrangler deployments status --json -c "$config" \
+        > "$release_dir/${label}-deployment.json" 2>/dev/null \
+      || ! node "$ROOT_DIR/scripts/self-host/cloudflare-worker-release.mjs" \
+        verify-active \
+        "$release_dir/${label}-versions.json" \
+        "$release_dir/${label}-deployment.json" \
+        "$tag"; then
+      echo "[self-host] Cloudflare Worker activation readback failed" >&2
+      return 1
+    fi
+  }
+
+  capture_worker_version() {
+    local worker_name="$1"
+    local state_path="$2"
+    if ! node "$ROOT_DIR/scripts/self-host/cloudflare-worker-release.mjs" \
+      capture-active "$worker_name" "$state_path" >/dev/null 2>&1; then
+      echo "[self-host] Cloudflare Worker active-version capture failed; no Worker version was staged" >&2
+      return 1
+    fi
+  }
+
+  rollback_worker_version() {
+    local config="$1"
+    local state_path="$2"
+    local label="$3"
+    local prior_version
+    if ! prior_version="$(
+      node "$ROOT_DIR/scripts/self-host/cloudflare-worker-release.mjs" \
+        read-captured "$state_path" 2>/dev/null
+    )"; then
+      echo "[self-host] $label Worker rollback state is invalid" >&2
+      return 1
+    fi
+    case "$prior_version" in
+      absent)
+        echo "[self-host] $label Worker had no prior deployment; automatic recovery is incomplete" >&2
+        return 1
+        ;;
+      active:*) prior_version="${prior_version#active:}" ;;
+      *)
+        echo "[self-host] $label Worker rollback state is invalid" >&2
+        return 1
+        ;;
+    esac
+    if ! wrangler versions deploy \
+      --version-id "$prior_version" \
+      --percentage 100 \
+      --message "Restore prior Axel self-host release" \
+      --yes \
+      -c "$config" >/dev/null 2>&1; then
+      echo "[self-host] $label Worker rollback activation failed" >&2
+      return 1
+    fi
+    if ! wrangler deployments status --json -c "$config" \
+      > "$release_dir/${label}-rollback-deployment.json" 2>/dev/null \
+      || ! node "$ROOT_DIR/scripts/self-host/cloudflare-worker-release.mjs" \
+        verify-version \
+        "$release_dir/${label}-rollback-deployment.json" \
+        "$prior_version" >/dev/null 2>&1; then
+      echo "[self-host] $label Worker rollback readback failed" >&2
+      return 1
+    fi
+  }
+
+  rollback_release() {
+    local recovery_complete=1
+    if [ "$ingest_activation_attempted" = "1" ]; then
+      rollback_worker_version "$ingest_config" "$ingest_prior_state" ingest \
+        || recovery_complete=0
+    fi
+    if [ "$router_activation_attempted" = "1" ]; then
+      rollback_worker_version "$router_config" "$router_prior_state" router \
+        || recovery_complete=0
+    fi
+    if [ "$recovery_complete" = "1" ]; then
+      echo "[self-host] failed Worker release restored every prior active deployment" >&2
+    else
+      echo "[self-host] failed Worker release recovery is incomplete; inspect both Workers before retrying" >&2
+    fi
+    return 1
+  }
+
+  ingest_prior_state="$release_dir/ingest-prior.json"
+  router_prior_state="$release_dir/router-prior.json"
+  # Capture both production states before the first inactive upload. A split or
+  # non-100% deployment is rejected rather than normalized implicitly.
+  capture_worker_version "$ingest_worker_name" "$ingest_prior_state"
+  capture_worker_version "$router_worker_name" "$router_prior_state"
+
+  # Stage both complete code+secret versions before either Worker is allowed to
+  # receive production traffic. A failure during either upload leaves both live
+  # Workers untouched; no sequence of `secret put` mutations is used.
+  stage_worker_version \
+    "$ingest_config" "$ingest_tag" "$release_dir/ingest-secrets.json" \
+    ADMIN_TOKEN DELIVERY_SHARED_SECRET SOURCE_LOOKUP_SHARED_SECRET \
+    ORDERING_KEY_HMAC_SECRET
+  stage_worker_version \
+    "$router_config" "$router_tag" "$release_dir/router-secrets.json" \
+    DELIVERY_SHARED_SECRET
+
+  ingest_activation_attempted=1
+  if ! activate_worker_version "$ingest_config" "$ingest_tag"; then
+    rollback_release
+  fi
+  router_activation_attempted=1
+  if ! activate_worker_version "$router_config" "$router_tag"; then
+    rollback_release
+  fi
+
+  # Routes, workers.dev, and Queue consumers are non-versioned Cloudflare
+  # triggers. Apply them only after both atomic versions are active.
+  if ! wrangler triggers deploy -c "$ingest_config" >/dev/null 2>&1 \
+    || ! wrangler triggers deploy -c "$router_config" >/dev/null 2>&1; then
+    echo "[self-host] Cloudflare Worker trigger deployment failed" >&2
+    rollback_release
+  fi
+
+  if ! verify_worker_version "$ingest_config" "$ingest_tag" ingest \
+    || ! verify_worker_version "$router_config" "$router_tag" router; then
+    rollback_release
+  fi
+)
 
 command_init() {
   need_command node
@@ -280,17 +560,21 @@ command_doctor() {
   load_env
   local failed=0
   if [ -x "$WRANGLER_BIN" ]; then
-    echo "[self-host] Wrangler: $($WRANGLER_BIN --version)"
+    echo "[self-host] Wrangler: $(wrangler --version)"
   else
     echo "[self-host] workspace dependencies are missing; run 'pnpm install' or let the edge command install them"
     failed=1
   fi
-  for name in AXEL_PUBLIC_URL AXEL_DELIVERY_PUBLIC_URL AXEL_RESOURCE_PREFIX AXEL_INSTALLATION_ID CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN CLOUDFLARE_RUNTIME_API_TOKEN POSTGRES_PASSWORD DELIVERY_SHARED_SECRET SOURCE_LOOKUP_SHARED_SECRET INGEST_ADMIN_TOKEN CRON_SECRET; do
+  for name in AXEL_PUBLIC_URL AXEL_DELIVERY_PUBLIC_URL AXEL_RESOURCE_PREFIX AXEL_INSTALLATION_ID CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN CLOUDFLARE_RUNTIME_API_TOKEN DELIVERY_SHARED_SECRET SOURCE_LOOKUP_SHARED_SECRET ORDERING_KEY_HMAC_SECRET INGEST_ADMIN_TOKEN CRON_SECRET; do
     if [ -z "${!name:-}" ]; then
       echo "[self-host] missing: $name"
       failed=1
     fi
   done
+  for name in POSTGRES_ADMIN_PASSWORD POSTGRES_MIGRATION_PASSWORD POSTGRES_DASHBOARD_PASSWORD POSTGRES_DELIVERY_PASSWORD; do
+    require_database_password "$name"
+  done
+  require_distinct_database_passwords
   if [ -n "${CLOUDFLARE_API_TOKEN:-}" ] \
     && [ "${CLOUDFLARE_API_TOKEN}" = "${CLOUDFLARE_RUNTIME_API_TOKEN:-}" ]; then
     echo "[self-host] CLOUDFLARE_RUNTIME_API_TOKEN must differ from the provisioning token"
@@ -309,13 +593,27 @@ command_doctor() {
     failed=1
   fi
   local secret_value
-  for name in DELIVERY_SHARED_SECRET SOURCE_LOOKUP_SHARED_SECRET INGEST_ADMIN_TOKEN CRON_SECRET; do
+  for name in DELIVERY_SHARED_SECRET SOURCE_LOOKUP_SHARED_SECRET ORDERING_KEY_HMAC_SECRET INGEST_ADMIN_TOKEN CRON_SECRET; do
     secret_value="${!name:-}"
     if [ "${#secret_value}" -lt 32 ]; then
       echo "[self-host] $name must contain at least 32 characters"
       failed=1
     fi
   done
+  if [ -n "${DELIVERY_SHARED_SECRET_PREVIOUS:-}" ]; then
+    if [ "${#DELIVERY_SHARED_SECRET_PREVIOUS}" -lt 32 ] \
+      || [ "$DELIVERY_SHARED_SECRET_PREVIOUS" = "${DELIVERY_SHARED_SECRET:-}" ]; then
+      echo "[self-host] DELIVERY_SHARED_SECRET_PREVIOUS must be a distinct 32+ character rotation credential"
+      failed=1
+    fi
+  fi
+  if [ -n "${SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS:-}" ]; then
+    if [ "${#SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS}" -lt 32 ] \
+      || [ "$SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS" = "${SOURCE_LOOKUP_SHARED_SECRET:-}" ]; then
+      echo "[self-host] SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS must be a distinct 32+ character rotation credential"
+      failed=1
+    fi
+  fi
   if [ "$failed" -ne 0 ]; then exit 1; fi
   echo "[self-host] prerequisites and required configuration look good"
 }
@@ -323,6 +621,7 @@ command_doctor() {
 command_edge() {
   need_command node
   need_command pnpm
+  ensure_wrangler
   load_env
   require_value AXEL_RESOURCE_PREFIX
   require_value AXEL_INSTALLATION_ID
@@ -330,12 +629,17 @@ command_edge() {
   require_value CLOUDFLARE_ACCOUNT_ID
   require_value CLOUDFLARE_API_TOKEN
   require_value CLOUDFLARE_RUNTIME_API_TOKEN
+  if [[ ! "$CLOUDFLARE_ACCOUNT_ID" =~ ^[A-Za-z0-9_-]{3,128}$ ]]; then
+    echo "[self-host] CLOUDFLARE_ACCOUNT_ID contains invalid characters" >&2
+    exit 1
+  fi
   if [ "$CLOUDFLARE_API_TOKEN" = "$CLOUDFLARE_RUNTIME_API_TOKEN" ]; then
     echo "[self-host] CLOUDFLARE_RUNTIME_API_TOKEN must differ from the provisioning token" >&2
     exit 1
   fi
   require_value DELIVERY_SHARED_SECRET
   require_value SOURCE_LOOKUP_SHARED_SECRET
+  require_value ORDERING_KEY_HMAC_SECRET
   require_value INGEST_ADMIN_TOKEN
   case "$AXEL_DELIVERY_PUBLIC_URL" in
     https://localhost*|https://127.*)
@@ -353,14 +657,34 @@ command_edge() {
       ;;
   esac
   require_strong_secret DELIVERY_SHARED_SECRET
+  if [ -n "${DELIVERY_SHARED_SECRET_PREVIOUS:-}" ]; then
+    require_strong_secret DELIVERY_SHARED_SECRET_PREVIOUS
+    if [ "$DELIVERY_SHARED_SECRET_PREVIOUS" = "$DELIVERY_SHARED_SECRET" ]; then
+      echo "[self-host] DELIVERY_SHARED_SECRET_PREVIOUS must differ from DELIVERY_SHARED_SECRET" >&2
+      exit 1
+    fi
+  fi
   require_strong_secret SOURCE_LOOKUP_SHARED_SECRET
+  if [ -n "${SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS:-}" ]; then
+    require_strong_secret SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS
+    if [ "$SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS" = "$SOURCE_LOOKUP_SHARED_SECRET" ]; then
+      echo "[self-host] SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS must differ from SOURCE_LOOKUP_SHARED_SECRET" >&2
+      exit 1
+    fi
+  fi
+  require_strong_secret ORDERING_KEY_HMAC_SECRET
   require_strong_secret INGEST_ADMIN_TOKEN
   if [[ ! "$AXEL_INSTALLATION_ID" =~ ^[0-9a-fA-F]{32}$ ]]; then
     echo "[self-host] AXEL_INSTALLATION_ID must be exactly 32 hex characters" >&2
     exit 1
   fi
-  ensure_wrangler
-
+  local ingest_url=""
+  if [ -n "${AXEL_INGEST_DOMAIN:-}" ]; then
+    ingest_url="$(
+      node "$ROOT_DIR/scripts/self-host/cloudflare-worker-release.mjs" \
+        custom-url "$AXEL_INGEST_DOMAIN"
+    )"
+  fi
   mkdir -p "$STATE_DIR"
   chmod 700 "$STATE_DIR"
   node "$ROOT_DIR/scripts/self-host/generate-wrangler.mjs" "$STATE_DIR"
@@ -398,29 +722,16 @@ command_edge() {
     RAW_PAYLOAD_BUCKET="$RAW_PAYLOAD_BUCKET" \
     node "$ROOT_DIR/scripts/self-host/verify-runtime-token.mjs"
 
-  echo "[self-host] deploying ingest worker"
-  local deploy_output ingest_url
-  deploy_output="$(wrangler deploy -c "$ingest_config" 2>&1 | tee /dev/stderr)"
-  put_secret "$ingest_config" ADMIN_TOKEN "$INGEST_ADMIN_TOKEN"
-  put_secret "$ingest_config" DELIVERY_SHARED_SECRET "$DELIVERY_SHARED_SECRET"
-  put_secret "$ingest_config" SOURCE_LOOKUP_SHARED_SECRET "$SOURCE_LOOKUP_SHARED_SECRET"
+  echo "[self-host] staging and activating atomic Worker releases"
+  release_edge_workers \
+    "$ingest_config" "$router_config" "$INGEST_WORKER_NAME" "$ROUTER_WORKER_NAME"
 
-  if [ -n "${AXEL_INGEST_DOMAIN:-}" ]; then
-    ingest_url="https://${AXEL_INGEST_DOMAIN}"
-  else
-    ingest_url="$(printf '%s\n' "$deploy_output" \
-      | grep -Eo 'https://[^[:space:]]+\.workers\.dev' \
-      | tail -1 || true)"
-  fi
   if [ -z "$ingest_url" ]; then
-    echo "[self-host] deploy succeeded, but the workers.dev URL could not be parsed" >&2
-    echo "[self-host] set NEXT_PUBLIC_AXEL_INGEST_URL in $ENV_FILE and rerun edge" >&2
-    exit 1
+    ingest_url="$(
+      node "$ROOT_DIR/scripts/self-host/cloudflare-worker-release.mjs" \
+        workers-dev-url "$INGEST_WORKER_NAME"
+    )"
   fi
-
-  echo "[self-host] deploying router worker"
-  wrangler deploy -c "$router_config"
-  put_secret "$router_config" DELIVERY_SHARED_SECRET "$DELIVERY_SHARED_SECRET"
 
   node "$ROOT_DIR/scripts/self-host/env-file.mjs" set "$ENV_FILE" DELIVERY_QUEUE_ID "$delivery_queue_id"
   node "$ROOT_DIR/scripts/self-host/env-file.mjs" set "$ENV_FILE" RAW_PAYLOAD_BUCKET "$RAW_PAYLOAD_BUCKET"
@@ -433,15 +744,34 @@ command_up() {
   need_command docker
   need_command node
   load_env
-  for name in DELIVERY_QUEUE_ID RAW_PAYLOAD_BUCKET NEXT_PUBLIC_AXEL_INGEST_URL POSTGRES_PASSWORD CREDENTIALS_MASTER_KEY CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN CLOUDFLARE_RUNTIME_API_TOKEN AXEL_PUBLIC_URL AXEL_DELIVERY_PUBLIC_URL; do
+  for name in DELIVERY_QUEUE_ID RAW_PAYLOAD_BUCKET NEXT_PUBLIC_AXEL_INGEST_URL CREDENTIALS_MASTER_KEY CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN CLOUDFLARE_RUNTIME_API_TOKEN AXEL_PUBLIC_URL AXEL_DELIVERY_PUBLIC_URL; do
     require_value "$name"
   done
+  for name in POSTGRES_ADMIN_PASSWORD POSTGRES_MIGRATION_PASSWORD POSTGRES_DASHBOARD_PASSWORD POSTGRES_DELIVERY_PASSWORD; do
+    require_database_password "$name"
+  done
+  require_distinct_database_passwords
   if [ "$CLOUDFLARE_API_TOKEN" = "$CLOUDFLARE_RUNTIME_API_TOKEN" ]; then
     echo "[self-host] CLOUDFLARE_RUNTIME_API_TOKEN must differ from the provisioning token" >&2
     exit 1
   fi
   require_strong_secret DELIVERY_SHARED_SECRET
+  if [ -n "${DELIVERY_SHARED_SECRET_PREVIOUS:-}" ]; then
+    require_strong_secret DELIVERY_SHARED_SECRET_PREVIOUS
+    if [ "$DELIVERY_SHARED_SECRET_PREVIOUS" = "$DELIVERY_SHARED_SECRET" ]; then
+      echo "[self-host] DELIVERY_SHARED_SECRET_PREVIOUS must differ from DELIVERY_SHARED_SECRET" >&2
+      exit 1
+    fi
+  fi
   require_strong_secret SOURCE_LOOKUP_SHARED_SECRET
+  if [ -n "${SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS:-}" ]; then
+    require_strong_secret SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS
+    if [ "$SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS" = "$SOURCE_LOOKUP_SHARED_SECRET" ]; then
+      echo "[self-host] SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS must differ from SOURCE_LOOKUP_SHARED_SECRET" >&2
+      exit 1
+    fi
+  fi
+  require_strong_secret ORDERING_KEY_HMAC_SECRET
   require_strong_secret INGEST_ADMIN_TOKEN
   require_strong_secret CRON_SECRET
   node "$ROOT_DIR/scripts/self-host/verify-runtime-token.mjs"

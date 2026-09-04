@@ -51,8 +51,10 @@ export interface ImmediateAlertSummary {
   recipients_scanned: number;
   recipients_opted_out: number;
   emails_sent: number;
-  errors: Array<{ user_id: string; message: string }>;
+  errors: Array<{ code: ImmediateAlertErrorCode }>;
 }
+
+export type ImmediateAlertErrorCode = "email_send_rejected" | "email_send_failed";
 
 export interface ImmediateAlertDeps {
   listRecipients?: (
@@ -123,12 +125,9 @@ export async function sendImmediateErrorAlert(
     try {
       const result = await send({ to: r.email, subject, html, text });
       if (result.ok) summary.emails_sent += 1;
-      else summary.errors.push({ user_id: r.user_id, message: result.error ?? "unknown send failure" });
-    } catch (err) {
-      summary.errors.push({
-        user_id: r.user_id,
-        message: err instanceof Error ? err.message : String(err),
-      });
+      else summary.errors.push({ code: "email_send_rejected" });
+    } catch {
+      summary.errors.push({ code: "email_send_failed" });
     }
   }
   return summary;

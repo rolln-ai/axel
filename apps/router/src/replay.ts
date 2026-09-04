@@ -16,7 +16,11 @@
  * spinning up a database.
  */
 
-import { sanitizeConnectorDiagnosticForStorage, type QueueMessage } from "@axel/shared";
+import {
+  isCanonicalRawPayloadKey,
+  sanitizeConnectorDiagnosticForStorage,
+  type QueueMessage,
+} from "@axel/shared";
 import { processQueueMessage, type FanoutScope, type RouterDeps, type RouterProcessResult } from "./processor.ts";
 
 export interface ReplayRow {
@@ -52,11 +56,15 @@ export interface ReplayStore {
 
 export interface ReplayPayloadHints {
   /**
-   * Best-effort: replay rows don't carry the original headers/query/content
-   * type. The lookup returns whatever R2 customMetadata captured at ingest
-   * time so the re-run looks as much like the original event as possible.
+   * Best-effort bounded scalar hints for replay. Header and query maps remain
+   * in the legacy type during rollout but processors must ignore their values.
    */
-  resolveHints(eventId: string, r2Key: string): Promise<{
+  resolveHints(
+    eventId: string,
+    r2Key: string,
+    workspaceId: string,
+    sourceId: string,
+  ): Promise<{
     received_at?: string;
     content_type?: string;
     size_bytes?: number;
@@ -91,14 +99,17 @@ export interface ReplayProcessSummary extends RouterProcessResult {
  * buggy replay producer cannot turn the account-wide R2 credential into a
  * cross-tenant read primitive.
  */
-export function replayPayloadKeyBelongsToWorkspace(key: string, workspaceId: string): boolean {
-  const segments = key.split("/");
-  return (
-    (segments[0] === "events" || segments[0] === "pull") &&
-    segments[1] === workspaceId &&
-    segments.length >= 3 &&
-    segments.slice(2).every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
-  );
+export function replayPayloadKeyBelongsToWorkspace(
+  key: string,
+  workspaceId: string,
+  eventId: string,
+  sourceId: string,
+): boolean {
+  return isCanonicalRawPayloadKey(key, {
+    workspaceId,
+    eventId,
+    sourceId,
+  });
 }
 
 /**
@@ -116,10 +127,20 @@ export async function processReplayBatch(deps: ReplayProcessorDeps): Promise<Rep
 
   for (const row of rows) {
     try {
-      if (!replayPayloadKeyBelongsToWorkspace(row.r2_key, row.workspace_id)) {
-        throw new Error("replay_payload_workspace_mismatch");
+      if (!replayPayloadKeyBelongsToWorkspace(
+        row.r2_key,
+        row.workspace_id,
+        row.event_id,
+        row.source_id,
+      )) {
+        throw new Error("replay_payload_key_mismatch");
       }
-      const hints = (await deps.hints?.resolveHints(row.event_id, row.r2_key)) ?? null;
+      const hints = (await deps.hints?.resolveHints(
+        row.event_id,
+        row.r2_key,
+        row.workspace_id,
+        row.source_id,
+      )) ?? null;
       // We tag the synthesized event_id with the replay_id so that the
       // delivery idempotency_key (workspace:event:route:destination) naturally
       // differs from the original delivery — otherwise the delivery worker
@@ -139,8 +160,9 @@ export async function processReplayBatch(deps: ReplayProcessorDeps): Promise<Rep
         content_type: hints?.content_type ?? "application/json",
         size_bytes: hints?.size_bytes ?? 0,
         shard: hints?.shard ?? 0,
-        headers: hints?.headers ?? {},
-        query: hints?.query ?? {},
+        // Never restore historical request values into Queue or delivery.
+        headers: {},
+        query: {},
         // Inherit the original event's test-flag so replaying a test event
         // stays non-billable (the rollup counts delivery_attempts WHERE
         // is_test = false). Falls back to false when the hint lookup can't
@@ -163,7 +185,12 @@ export async function processReplayBatch(deps: ReplayProcessorDeps): Promise<Rep
           : (row.scope === "route" || row.scope === "destination") && row.route_id
             ? { routeId: row.route_id }
             : undefined;
-      const result = await processQueueMessage(deps.router, message, scope);
+      const result = await processQueueMessage(
+        deps.router,
+        message,
+        scope,
+        row.event_id,
+      );
       const summary: ReplayProcessSummary = { ...result, replay_id: row.id };
       if (summary.enqueued_deliveries > 0) {
         await deps.replays.markDispatched(row.id, summary);

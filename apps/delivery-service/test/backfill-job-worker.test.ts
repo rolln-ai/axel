@@ -148,8 +148,8 @@ describe("backfill-job-worker", () => {
 
   it("enqueues a batch, advances cursor, and transactions the INSERT+UPDATE together", async () => {
     const events = [
-      { event_id: "e1", r2_key: "events/ws_1/e1.json", received_at_text: "2026-05-10 00:00:01.000" },
-      { event_id: "e2", r2_key: "events/ws_1/e2.json", received_at_text: "2026-05-10 00:00:02.000" },
+      { event_id: "e1", r2_key: "events/ws_1/2026-05-10/e1", received_at_text: "2026-05-10 00:00:01.000" },
+      { event_id: "e2", r2_key: "events/ws_1/2026-05-10/e2", received_at_text: "2026-05-10 00:00:02.000" },
     ];
     const { deps, txCalls } = fakeWorkerDeps({
       jobs: [{ ...baseJob }],
@@ -185,7 +185,7 @@ describe("backfill-job-worker", () => {
 
   it("uses cursor-based pagination on subsequent ticks", async () => {
     const events = [
-      { event_id: "e3", r2_key: "k", received_at_text: "2026-05-10 00:00:03.000" },
+      { event_id: "e3", r2_key: "events/ws_1/2026-05-10/e3", received_at_text: "2026-05-10 00:00:03.000" },
     ];
     const job: JobState = {
       ...baseJob,
@@ -230,7 +230,7 @@ describe("backfill-job-worker", () => {
     const result = await advanceJob(deps, baseJob as never);
     expect(result).toBe("failed");
     expect(jobsById.get("bfj_1")?.state).toBe("failed");
-    expect(jobsById.get("bfj_1")?.error_message).toMatch(/clickhouse_500/);
+    expect(jobsById.get("bfj_1")?.error_message).toBe("http_error_500");
   });
 
   it("does not read or retain a failed ClickHouse response body", async () => {
@@ -251,14 +251,14 @@ describe("backfill-job-worker", () => {
     const result = await advanceJob(deps, baseJob as never);
 
     expect(result).toBe("failed");
-    expect(jobsById.get("bfj_1")?.error_message).toBe("clickhouse_400");
+    expect(jobsById.get("bfj_1")?.error_message).toBe("http_error_400");
     expect(cancel).toHaveBeenCalledOnce();
     expect(text).not.toHaveBeenCalled();
   });
 
   it("rolls back transaction on bulk-INSERT failure and marks job failed", async () => {
     const events = [
-      { event_id: "e1", r2_key: "k", received_at_text: "2026-05-10 00:00:01.000" },
+      { event_id: "e1", r2_key: "events/ws_1/2026-05-10/e1", received_at_text: "2026-05-10 00:00:01.000" },
     ];
     const { deps, jobsById, fakeClient, txCalls } = fakeWorkerDeps({
       jobs: [{ ...baseJob }],
@@ -279,6 +279,24 @@ describe("backfill-job-worker", () => {
     expect(jobsById.get("bfj_1")?.state).toBe("failed");
     // ROLLBACK must have been called
     expect(txCalls.some((c) => c.sql === "ROLLBACK")).toBe(true);
+  });
+
+  it("fails a poisoned ClickHouse key before opening a replay transaction", async () => {
+    const { deps, jobsById, txCalls } = fakeWorkerDeps({
+      jobs: [{ ...baseJob }],
+      fetchPages: [[{
+        event_id: "evt_alpha",
+        r2_key: "events/ws_victim/2026-05-10/evt_alpha",
+        received_at_text: "2026-05-10 00:00:01.000",
+      }]],
+    });
+
+    const result = await advanceJob(deps, baseJob as never);
+
+    expect(result).toBe("failed");
+    expect(jobsById.get("bfj_1")?.error_message).toBe("raw_payload_key_mismatch");
+    expect(deps.pool.connect).not.toHaveBeenCalled();
+    expect(txCalls).toEqual([]);
   });
 
   it("runBackfillWorkerOnce returns a per-tick summary", async () => {

@@ -143,6 +143,7 @@ export interface InternalSourceDependencies {
 
 export interface InternalSourceAuthEnv {
   DELIVERY_SHARED_SECRET?: string;
+  DELIVERY_SHARED_SECRET_PREVIOUS?: string;
   SOURCE_LOOKUP_SHARED_SECRET?: string;
   SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS?: string;
 }
@@ -151,6 +152,23 @@ export interface InternalSourceAuthSecrets {
   current: string;
   previous: string;
   usingDeliveryFallback: boolean;
+}
+
+export interface DeliveryAuthSecrets {
+  current: string;
+  previous: string;
+}
+
+export function resolveDeliveryAuthSecrets(
+  env: Pick<
+    InternalSourceAuthEnv,
+    "DELIVERY_SHARED_SECRET" | "DELIVERY_SHARED_SECRET_PREVIOUS"
+  >,
+): DeliveryAuthSecrets {
+  return {
+    current: env.DELIVERY_SHARED_SECRET ?? "",
+    previous: env.DELIVERY_SHARED_SECRET_PREVIOUS ?? "",
+  };
 }
 
 /**
@@ -164,9 +182,11 @@ export function resolveInternalSourceAuthSecrets(
   env: InternalSourceAuthEnv,
 ): InternalSourceAuthSecrets {
   const dedicated = env.SOURCE_LOOKUP_SHARED_SECRET ?? "";
+  const delivery = resolveDeliveryAuthSecrets(env);
   return {
-    current: dedicated || env.DELIVERY_SHARED_SECRET || "",
-    previous: env.SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS ?? "",
+    current: dedicated || delivery.current,
+    previous: env.SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS
+      ?? (dedicated ? "" : delivery.previous),
     usingDeliveryFallback: !dedicated,
   };
 }
@@ -250,4 +270,12 @@ export function isInternalSecretAuthorized(
   const expectedBytes = Buffer.from(expected);
   return providedBytes.length === expectedBytes.length
     && timingSafeEqual(providedBytes, expectedBytes);
+}
+
+export function isRotatingInternalSecretAuthorized(
+  provided: string | string[] | undefined,
+  secrets: DeliveryAuthSecrets,
+): boolean {
+  return isInternalSecretAuthorized(provided, secrets.current)
+    || isInternalSecretAuthorized(provided, secrets.previous);
 }

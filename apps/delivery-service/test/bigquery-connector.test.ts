@@ -369,7 +369,7 @@ describe("bigquery connector", () => {
     });
   });
 
-  it("nested_records creates a nested newsletter schema and inserts the matching nested row", async () => {
+  it("nested_records creates a nested newsletter schema and inserts the matching row", async () => {
     insertSeq = [makeRes(404, { error: { message: "Not found: Table" } }), makeRes(200, {})];
     const event = {
       event: "subscriber.updated",
@@ -798,9 +798,24 @@ describe("bigquery connector", () => {
     const limited = await deliver(encode({}), destination(), { eventId: "e", binding: { table: "events" } });
     expect(limited.status).toBe("retry");
 
-    insertSeq = [makeRes(403, { error: { message: "Access Denied: BigQuery" } })];
+    insertSeq = [makeRes(403, { error: { message: "Access Denied: provider-private-detail" } })];
     const denied = await deliver(encode({}), destination(), { eventId: "e", binding: { table: "events" } });
     expect(denied.status).toBe("dead");
+    expect(denied.response).toEqual({ status: 403, error: "bigquery_forbidden" });
+    expect(JSON.stringify(denied.response)).not.toContain("provider-private-detail");
+  });
+
+  it("does not retain a token-endpoint response body", async () => {
+    tokenRes = makeRes(401, { error: "provider-private-token-detail" });
+
+    const out = await deliver(encode({}), destination(), {
+      eventId: "evt-token-failure",
+      binding: { table: "events" },
+    });
+
+    expect(out.status).toBe("dead");
+    expect(out.response).toEqual({ error: "token_exchange_401" });
+    expect(JSON.stringify(out.response)).not.toContain("provider-private-token-detail");
   });
 
   it("auto-creates the table on 404, then retries the insert to success", async () => {

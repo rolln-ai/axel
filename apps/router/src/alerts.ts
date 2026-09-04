@@ -37,6 +37,54 @@ export interface AlertSink {
   notify(event: AlertEvent): Promise<void>;
 }
 
+const SAFE_ALERT_SLUG_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
+
+function safeAlertSlug(value: string, fallback: string): string {
+  return SAFE_ALERT_SLUG_RE.test(value) ? value : fallback;
+}
+
+function safeAlertDetails(
+  input: Record<string, unknown>,
+  depth = 0,
+): Record<string, unknown> {
+  if (depth >= 3) return {};
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(input).slice(0, 32)) {
+    if (!SAFE_ALERT_SLUG_RE.test(key)) continue;
+    if (typeof value === "number" && Number.isFinite(value)) {
+      out[key] = value;
+    } else if (typeof value === "boolean" || value === null) {
+      out[key] = value;
+    } else if (typeof value === "object" && value && !Array.isArray(value)) {
+      const nested = safeAlertDetails(value as Record<string, unknown>, depth + 1);
+      if (Object.keys(nested).length > 0) out[key] = nested;
+    }
+  }
+  return out;
+}
+
+/**
+ * Enforce the privacy boundary shared by hosted logs, Sentry, and operator
+ * webhooks. Callers may accidentally attach exception text, provider
+ * responses, tenant identifiers, or webhook-derived strings to an alert; no
+ * string value crosses this boundary except validated operational slugs and a
+ * generated timestamp.
+ */
+export function externalAlertEvent(event: AlertEvent): AlertEvent {
+  return {
+    severity: ["info", "warn", "critical"].includes(event.severity) ? event.severity : "warn",
+    rule: safeAlertSlug(event.rule, "unknown_rule"),
+    summary: "Operational alert emitted.",
+    source: safeAlertSlug(event.source, "unknown_source"),
+    details: safeAlertDetails(event.details),
+    occurred_at:
+      ISO_TIMESTAMP_RE.test(event.occurred_at) && Number.isFinite(Date.parse(event.occurred_at))
+        ? event.occurred_at
+        : new Date().toISOString(),
+  };
+}
+
 /** Drops every alert. Useful for tests. */
 export function silentAlertSink(): AlertSink {
   return {
@@ -50,8 +98,9 @@ export function silentAlertSink(): AlertSink {
 export function consoleAlertSink(): AlertSink {
   return {
     async notify(event) {
-      const tag = event.severity.toUpperCase();
-      console.error(`[alert ${tag}] ${event.source}/${event.rule}: ${event.summary}`, event.details);
+      const safeEvent = externalAlertEvent(event);
+      const tag = safeEvent.severity.toUpperCase();
+      console.error(`[alert ${tag}] ${safeEvent.source}/${safeEvent.rule}: alert emitted`);
     },
   };
 }
@@ -65,7 +114,7 @@ export function multiAlertSink(sinks: AlertSink[]): AlertSink {
       // throwing — we never want alerting to take the service down.
       for (const result of results) {
         if (result.status === "rejected") {
-          console.error("[alert sink] notify failed", result.reason);
+          console.error("[alert sink] notify failed");
         }
       }
     },
@@ -96,6 +145,7 @@ export function webhookAlertSink(options: WebhookAlertSinkOptions): AlertSink {
 
   return {
     async notify(event) {
+      const safeEvent = externalAlertEvent(event);
       const ac = new AbortController();
       const timer = setTimeout(() => ac.abort(), timeoutMs);
       try {
@@ -108,16 +158,16 @@ export function webhookAlertSink(options: WebhookAlertSinkOptions): AlertSink {
             ...(options.token ? { "x-axel-alert-token": options.token } : {}),
           },
           body: JSON.stringify({
-            text: `[${event.severity.toUpperCase()}] ${event.source}/${event.rule}: ${event.summary}`,
-            event,
+            text: `[${safeEvent.severity.toUpperCase()}] ${safeEvent.source}/${safeEvent.rule}: alert emitted`,
+            event: safeEvent,
           }),
         });
         if (!response.ok) {
           throw new Error(`alert_webhook_http_${response.status}`);
         }
-      } catch (err) {
+      } catch {
         // Logged-and-swallowed: alerting must never page the service itself.
-        console.error("[alert webhook] post failed", err);
+        console.error("[alert webhook] post failed");
       } finally {
         clearTimeout(timer);
       }
@@ -313,13 +363,18 @@ export function evaluateDestinationLatency(
 ): AlertEvent[] {
   const now = new Date().toISOString();
   if (snapshot.attempts === 0) return [];
+  const operationalDetails = {
+    p95_latency_ms: snapshot.p95_latency_ms,
+    attempts: snapshot.attempts,
+    window_seconds: snapshot.window_seconds,
+  };
   if (snapshot.p95_latency_ms >= thresholds.destination_p95_latency_ms_critical) {
     return [{
       severity: "critical",
       rule: "destination_p95_latency",
-      summary: `Destination ${snapshot.destination_id} p95 latency ${snapshot.p95_latency_ms}ms exceeds critical threshold ${thresholds.destination_p95_latency_ms_critical}ms`,
+      summary: `Destination p95 latency ${snapshot.p95_latency_ms}ms exceeds critical threshold ${thresholds.destination_p95_latency_ms_critical}ms`,
       source,
-      details: { ...snapshot, threshold: thresholds.destination_p95_latency_ms_critical },
+      details: { ...operationalDetails, threshold: thresholds.destination_p95_latency_ms_critical },
       occurred_at: now,
     }];
   }
@@ -327,9 +382,9 @@ export function evaluateDestinationLatency(
     return [{
       severity: "warn",
       rule: "destination_p95_latency",
-      summary: `Destination ${snapshot.destination_id} p95 latency ${snapshot.p95_latency_ms}ms exceeds warning threshold ${thresholds.destination_p95_latency_ms_warn}ms`,
+      summary: `Destination p95 latency ${snapshot.p95_latency_ms}ms exceeds warning threshold ${thresholds.destination_p95_latency_ms_warn}ms`,
       source,
-      details: { ...snapshot, threshold: thresholds.destination_p95_latency_ms_warn },
+      details: { ...operationalDetails, threshold: thresholds.destination_p95_latency_ms_warn },
       occurred_at: now,
     }];
   }

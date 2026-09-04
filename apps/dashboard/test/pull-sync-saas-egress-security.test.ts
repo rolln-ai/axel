@@ -22,7 +22,6 @@ describe("dashboard authenticated SaaS pull egress", () => {
       config: { api_key: "sk_test_source_secret" },
       expectedUrl: /^https:\/\/api\.stripe\.com\//,
       expectedHeader: ["authorization", "Bearer sk_test_source_secret"],
-      expectedError: /Stripe connection failed with HTTP 302/,
     },
     {
       type: "shopify",
@@ -30,11 +29,10 @@ describe("dashboard authenticated SaaS pull egress", () => {
       config: { shop: "acme.myshopify.com", access_token: "shopify_source_secret" },
       expectedUrl: /^https:\/\/acme\.myshopify\.com\//,
       expectedHeader: ["x-shopify-access-token", "shopify_source_secret"],
-      expectedError: /Shopify connection failed with HTTP 302/,
     },
   ] as const)(
     "uses the protected fetch and refuses $type redirects",
-    async ({ type, stream, config, expectedUrl, expectedHeader, expectedError }) => {
+    async ({ type, stream, config, expectedUrl, expectedHeader }) => {
       installPullSource(type, stream, config);
       safeDashboardFetchMock.mockResolvedValue(new Response("redirect", {
         status: 302,
@@ -45,7 +43,7 @@ describe("dashboard authenticated SaaS pull egress", () => {
         sourceId: `src_${type}`,
         workspaceId: "ws_1",
         actorUserId: "usr_1",
-      })).rejects.toThrow(expectedError);
+      })).rejects.toThrow(/^http_error_302$/);
 
       expect(safeDashboardFetchMock).toHaveBeenCalledOnce();
       const [url, init] = safeDashboardFetchMock.mock.calls[0] ?? [];

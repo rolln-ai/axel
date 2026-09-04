@@ -49,6 +49,7 @@ vi.mock("../lib/auth-guards", async (importOriginal) => {
 });
 
 import { withWorkspaceMutation } from "../lib/with-mutation";
+import { cacheTags } from "../lib/repositories";
 
 function setSession(over: Partial<{ role: "owner" | "admin" | "member"; status: "active" | "suspended" | "deleted" }>) {
   sessionState.session = {
@@ -160,6 +161,9 @@ describe("withWorkspaceMutation — gate ordering", () => {
       tags("sources", "routes");
       return { notice: "ok" };
     });
-    expect(updateTagMock.mock.calls.map((c) => c[0])).toEqual(["ws-ws_1-sources", "ws-ws_1-routes"]);
+    expect(updateTagMock.mock.calls.map((c) => c[0])).toEqual([
+      cacheTags.sources("ws_1"),
+      cacheTags.routes("ws_1"),
+    ]);
   });
 });

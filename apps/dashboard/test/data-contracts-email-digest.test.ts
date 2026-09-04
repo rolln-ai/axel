@@ -154,13 +154,19 @@ describe("runDigestJob", () => {
       listNotifications: async () => [notification()],
       send: async (args) => {
         if (args.to === "a@example.com")
-          return { ok: false, error: "resend 503" };
+          return {
+            ok: false,
+            error:
+              "provider rejected recipient victim@example.test with token=private-value",
+          };
         return { ok: true };
       },
     });
     expect(summary.emails_sent).toBe(1);
     expect(summary.errors).toHaveLength(1);
-    expect(summary.errors[0]!.message).toMatch(/resend 503/);
+    expect(summary.errors).toEqual([{ code: "digest_send_failed" }]);
+    expect(JSON.stringify(summary)).not.toContain("victim@example.test");
+    expect(JSON.stringify(summary)).not.toContain("private-value");
   });
 
   it("counts only blocked pipelines in the subject", async () => {
@@ -207,7 +213,7 @@ describe("runDigestJob", () => {
         {
           user_id: "u1",
           email: "a@example.com",
-          workspace_id: "ws_acme",
+          workspace_id: "ws_demo",
           workspace_name: "Demo Workspace",
           prefs: null,
         },
@@ -234,7 +240,7 @@ describe("runDigestJob", () => {
         notification({
           kind: "data_contract_auto_extended",
           severity: "info",
-          title: "New event type added to Demo billing source — 2030-01-15 12:00",
+          title: "New event type added to Demo billing source, 2030-01-15 12:00",
           body_md: "Axel auto-extended the Data Contract to include: `payment_failed`.",
           context_name: "Demo billing source",
         }),

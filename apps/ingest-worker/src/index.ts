@@ -1,14 +1,18 @@
-import { deriveSubjectIdWeb, extractEventTypeFromBody, extractEventTypeFromHeaders, extractSubjectPairs, ipMatchesAllowlist, redactJsonPayload, resolveOrderingKey, shardFor, verifyProviderSignatureWithSecrets, type QueueMessage, type Source } from "@axel/shared";
+import { deriveSubjectIdWeb, extractEventTypeFromBody, extractEventTypeFromHeaders, extractSubjectPairs, ipMatchesAllowlist, redactJsonPayload, resolveInternalServiceEndpoint, resolveOrderingKey, sanitizeConnectorDiagnosticForStorage, shardFor, validateInternalServiceEndpoint, verifyProviderSignatureWithSecrets, type QueueMessage, type Source } from "@axel/shared";
 import { captureException, isCloudflareQueueInternalError, isCloudflareQueueOverloadError, isTransientR2Error, recordHeartbeatHttp, sentryClientFromEnv, type SentryEnv } from "@axel/observability";
 import { exceedsJsonDepth, looksLikeJson } from "./depth.js";
 import { kvPlanCache, type PlanCache } from "./plan-cache.js";
 import { checkTokenBucket } from "./rate-limit.js";
-import { kvSourceCache, resolveSource, type KVNamespaceLike, type SourceCache } from "./source-cache.js";
-import { handleSourceCacheInvalidate, handleSourceCachePut, handleTriggerEvent, handleWorkspacePayloadDeleteBatch, handleWorkspacePlanPut } from "./admin.js";
-import { indexErasureSubjects, lookupSourceInPostgres } from "./source-lookup-pg.js";
+import { kvSourceCache, type KVNamespaceLike, type SourceCache } from "./source-cache.js";
+import { handleSourceAuthorityFence, handleSourceAuthoritySync, handleSourceCacheInvalidate, handleSourceCachePut, handleTriggerEvent, handleWorkspacePayloadDeleteBatch, handleWorkspacePlanPut } from "./admin.js";
+import { indexErasureSubjectsFromDeliveryService } from "./erasure-index-http.js";
+import { indexErasureSubjects as indexErasureSubjectsInPostgres, lookupSourceInPostgres } from "./source-lookup-pg.js";
 import { lookupSourceFromDeliveryService } from "./source-lookup-http.js";
 import { SourceLookupUnavailableError } from "./source-lookup-error.js";
 import { logEventToClickhouse } from "./clickhouse-log.js";
+import { beginSourceAuthorizationWithAuthority, confirmSourceAuthorizationWithAuthority, sourceAuthorityAdminClient, type SourceAuthorityNamespaceLike } from "./source-authority.js";
+
+export { SourceAuthorityDurableObject } from "./source-authority.js";
 
 export interface Env extends SentryEnv {
   EVENTS_RAW: R2Bucket;
@@ -28,10 +32,20 @@ export interface Env extends SentryEnv {
   QUEUE_EVENTS_13: Queue<QueueMessage>;
   QUEUE_EVENTS_14: Queue<QueueMessage>;
   QUEUE_EVENTS_15: Queue<QueueMessage>;
-  /** Optional KV binding for source-lookup caching at the edge. */
+  /** KV is retained for workspace plan state and rollback cleanup only. */
   SOURCE_CACHE?: KVNamespaceLike;
-  /** Optional override SourceCache (test injection point). */
+  /** Legacy source-cache override used by admin endpoint tests. */
   __SOURCE_CACHE_OVERRIDE?: SourceCache;
+  /** Hosted, strongly consistent per-source authorization state. */
+  SOURCE_AUTHORITY?: SourceAuthorityNamespaceLike;
+  /** Hosted profiles fail closed if the Durable Object binding is missing. */
+  SOURCE_AUTHORITY_REQUIRED?: string;
+  /**
+   * HMAC key used to pseudonymize per-customer FIFO ordering values before
+   * they leave this worker. Required for every hosted ingest request and for
+   * any self-hosted source that enables ordered delivery.
+   */
+  ORDERING_KEY_HMAC_SECRET?: string;
   /**
    * Optional override PlanCache (test injection point). In production
    * the plan cache reuses the SOURCE_CACHE KV binding with a
@@ -58,9 +72,8 @@ export interface Env extends SentryEnv {
   DEV_MODE?: string;
   DEV_SOURCES?: string;
   /**
-   * Control-plane Postgres is retained for erasure indexing and an explicit
-   * local-dev source lookup fallback. Production source lookups go through
-   * DELIVERY_SERVICE_URL because direct Cloudflare→Postgres is unreliable.
+   * Local-development Postgres fallback only. Production source lookup and
+   * erasure indexing both go through the authenticated delivery service.
    */
   DATABASE_URL?: string;
   /**
@@ -100,8 +113,16 @@ let heartbeatTickCount = 0;
 const HEARTBEAT_THROTTLE_MS = 60 * 1000;
 
 function maybeBeatIngest(env: Env, ctx: ExecutionContext, error?: string): void {
-  const url = env.DELIVERY_HEARTBEAT_URL
-    ?? (env.DELIVERY_SERVICE_URL ? `${env.DELIVERY_SERVICE_URL.replace(/\/$/, "")}/internal/heartbeat` : null);
+  let url: string | null = null;
+  try {
+    url = env.DELIVERY_HEARTBEAT_URL
+      ? validateInternalServiceEndpoint(env.DELIVERY_HEARTBEAT_URL, "/internal/heartbeat")
+      : env.DELIVERY_SERVICE_URL
+        ? resolveInternalServiceEndpoint(env.DELIVERY_SERVICE_URL, "/internal/heartbeat")
+        : null;
+  } catch {
+    return;
+  }
   if (!url || !env.DELIVERY_SHARED_SECRET) return;
   const now = Date.now();
   if (now - lastHeartbeatAt < HEARTBEAT_THROTTLE_MS && !error) return;
@@ -182,7 +203,7 @@ export default {
       // Keep raw exception text out of the durable heartbeat row. Sentry receives
       // the sanitized diagnostic through the capture boundary above.
       maybeBeatIngest(env, ctx, "ingest_request_failed");
-      throw err;
+      return json({ error: "internal_error" }, 500);
     }
   },
 };
@@ -211,6 +232,10 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       return handleSourceCacheInvalidate(request, {
         cache: env.__SOURCE_CACHE_OVERRIDE
           ?? (env.SOURCE_CACHE ? kvSourceCache(env.SOURCE_CACHE) : null),
+        authority: sourceAuthorityAdminClient(
+          env.SOURCE_AUTHORITY,
+          env.SOURCE_AUTHORITY_REQUIRED === "true",
+        ),
         adminToken: env.ADMIN_TOKEN,
       });
     }
@@ -218,6 +243,32 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       return handleSourceCachePut(request, {
         cache: env.__SOURCE_CACHE_OVERRIDE
           ?? (env.SOURCE_CACHE ? kvSourceCache(env.SOURCE_CACHE) : null),
+        authority: sourceAuthorityAdminClient(
+          env.SOURCE_AUTHORITY,
+          env.SOURCE_AUTHORITY_REQUIRED === "true",
+        ),
+        adminToken: env.ADMIN_TOKEN,
+      });
+    }
+    if (url.pathname === "/admin/source-authority/fence") {
+      return handleSourceAuthorityFence(request, {
+        cache: env.__SOURCE_CACHE_OVERRIDE
+          ?? (env.SOURCE_CACHE ? kvSourceCache(env.SOURCE_CACHE) : null),
+        authority: sourceAuthorityAdminClient(
+          env.SOURCE_AUTHORITY,
+          env.SOURCE_AUTHORITY_REQUIRED === "true",
+        ),
+        adminToken: env.ADMIN_TOKEN,
+      });
+    }
+    if (url.pathname === "/admin/source-authority/sync") {
+      return handleSourceAuthoritySync(request, {
+        cache: env.__SOURCE_CACHE_OVERRIDE
+          ?? (env.SOURCE_CACHE ? kvSourceCache(env.SOURCE_CACHE) : null),
+        authority: sourceAuthorityAdminClient(
+          env.SOURCE_AUTHORITY,
+          env.SOURCE_AUTHORITY_REQUIRED === "true",
+        ),
         adminToken: env.ADMIN_TOKEN,
       });
     }
@@ -235,7 +286,18 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     }
     if (url.pathname === "/admin/trigger-event") {
       return handleTriggerEvent(request, {
-        lookupSource: (sourceId) => lookupSource(env, sourceId),
+        beginSourceAuthorization: (sourceId) =>
+          beginSourceAuthorizationWithAuthority(
+            env,
+            sourceId,
+            (id) => lookupSourceUncached(env, id),
+          ),
+        confirmSourceAuthorization: (sourceId, authorizationVersion) =>
+          confirmSourceAuthorizationWithAuthority(
+            env,
+            sourceId,
+            authorizationVersion,
+          ),
         adminToken: env.ADMIN_TOKEN,
         rawPayloads: env.EVENTS_RAW,
         queueForShard: (shard) => queueForShard(env, shard),
@@ -252,12 +314,24 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     if (!match) return json({ error: "not_found" }, 404);
 
     const sourceId = match[1]!;
-    const token = url.searchParams.get("token") ?? request.headers.get("x-axel-token");
-    if (!token) return json({ error: "missing_token" }, 401);
+    // URL credentials are visible to platform, proxy, browser-history, and
+    // provider access logs before application code can redact them. Reject the
+    // legacy query form outright. Custom sources authenticate only with the
+    // x-axel-token header; signed named providers authenticate by signature.
+    if (url.searchParams.has("token")) {
+      return json({ error: "query_token_not_allowed" }, 401);
+    }
+    const headerToken = request.headers.get("x-axel-token");
 
-    const source = await lookupSource(env, sourceId);
+    const authorization = await beginSourceAuthorizationWithAuthority(
+      env,
+      sourceId,
+      (id) => lookupSourceUncached(env, id),
+    );
+    const source = authorization.source;
     if (!source) return json({ error: "unknown_source" }, 404);
     if (source.status !== "active") return json({ error: "source_disabled" }, 403);
+    const provider = source.provider ?? "custom";
     // AXE-34 — inbound IP allowlist. When set, reject any IP outside
     // the union (cheaper than running token verify on forged traffic;
     // 403 is non-billable). `cf-connecting-ip` is the canonical
@@ -268,17 +342,66 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         return json({ error: "ip_not_allowlisted" }, 403);
       }
     }
-    // The stored `secret_token` is the SHA-256 hex hash of the plaintext token
-    // the customer supplies (matches `sources.secret_token_hash` in Postgres).
-    // Constant-time-compare hashes, never plaintext.
-    const presentedHash = await sha256Hex(token);
-    if (!safeEqual(source.secret_token, presentedHash)) return json({ error: "invalid_token" }, 401);
+    if (provider === "custom") {
+      if (!headerToken) return json({ error: "missing_token" }, 401);
+      // The stored token is a SHA-256 hex hash. Compare hashes in constant time
+      // and keep plaintext confined to this request's memory.
+      const presentedHash = await sha256Hex(headerToken);
+      if (!safeEqual(source.secret_token, presentedHash)) {
+        return json({ error: "invalid_token" }, 401);
+      }
+    }
 
-    // Billing gate. Authenticated traffic only — placed after the
-    // token check so unauthenticated probes can't enumerate which
-    // workspaces are suspended or over-cap. The cache is permissive
-    // on miss (no entry → accept) so a KV outage doesn't take ingest
-    // down. See axelapp.ai/pricing for the gate semantics.
+    const maxBodyBytes = source.max_body_bytes ?? parsePositiveInt(env.MAX_BODY_BYTES, MAX_BODY_BYTES);
+    const maxBodyDepth = source.max_body_depth ?? parsePositiveInt(env.MAX_BODY_DEPTH, MAX_BODY_DEPTH);
+
+    const contentLength = Number(request.headers.get("content-length") ?? "0");
+    if (contentLength > maxBodyBytes) return json({ error: "payload_too_large" }, 413);
+
+    const body = await request.arrayBuffer();
+    if (body.byteLength > maxBodyBytes) return json({ error: "payload_too_large" }, 413);
+
+    const contentType = request.headers.get("content-type") ?? "application/octet-stream";
+    if (looksLikeJson(contentType) && exceedsJsonDepth(new Uint8Array(body), maxBodyDepth)) {
+      return json({ error: "payload_too_deep" }, 413);
+    }
+
+    // AXE-23: per-provider signature verification. Must run BEFORE R2
+    // write + queue enqueue — a spoofed payload that gets through here
+    // is durable, billable, and will fan out to destinations. Custom sources
+    // may remain token-only for backwards compatibility. A
+    // named provider, however, must never degrade to token-only merely because
+    // its decrypted secret is absent from the edge Source shape.
+    const hasSigningSecret =
+      (source.signing_secret?.length ?? 0) > 0
+      || (source.signing_secret_previous?.length ?? 0) > 0;
+    if (provider !== "custom" && !hasSigningSecret) {
+      throw new SourceLookupUnavailableError(
+        "provider signing verification is unavailable",
+      );
+    }
+    const verificationHeaders = hasSigningSecret ? collectVerificationHeaders(request) : null;
+    if (hasSigningSecret && verificationHeaders) {
+      // Verification needs the exact inbound auth headers. Chargebee signs via
+      // HTTP Basic auth, so using the sanitized persistence map here would
+      // strip `authorization` and reject every valid Chargebee webhook.
+      // Verify against the current secret first, then the previous one during a
+      // rotation overlap window — a webhook signed with the old secret while the
+      // customer rotates still passes until the previous secret is retired.
+      const result = await verifyProviderSignatureWithSecrets(
+        { provider, body: new Uint8Array(body), headers: verificationHeaders },
+        [source.signing_secret, source.signing_secret_previous],
+      );
+      if (!result.ok) {
+        // 401 with a stable reason slug, not the secret. The reason
+        // matches the SignatureVerifyResult enum so support can
+        // diagnose without per-request logs.
+        return json({ error: "invalid_signature", reason: result.reason }, 401);
+      }
+    }
+
+    // Billing and source rate gates run only after the request is authenticated
+    // by a custom-source header token or a named-provider signature.
     const planCache = planCacheFor(env);
     if (planCache) {
       const planState = await planCache.get(source.workspace_id);
@@ -304,55 +427,6 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       }
     }
 
-    const maxBodyBytes = source.max_body_bytes ?? parsePositiveInt(env.MAX_BODY_BYTES, MAX_BODY_BYTES);
-    const maxBodyDepth = source.max_body_depth ?? parsePositiveInt(env.MAX_BODY_DEPTH, MAX_BODY_DEPTH);
-
-    const contentLength = Number(request.headers.get("content-length") ?? "0");
-    if (contentLength > maxBodyBytes) return json({ error: "payload_too_large" }, 413);
-
-    const body = await request.arrayBuffer();
-    if (body.byteLength > maxBodyBytes) return json({ error: "payload_too_large" }, 413);
-
-    const contentType = request.headers.get("content-type") ?? "application/octet-stream";
-    if (looksLikeJson(contentType) && exceedsJsonDepth(new Uint8Array(body), maxBodyDepth)) {
-      return json({ error: "payload_too_deep" }, 413);
-    }
-
-    // AXE-23: per-provider signature verification. Must run BEFORE R2
-    // write + queue enqueue — a spoofed payload that gets through here
-    // is durable, billable, and will fan out to destinations. Custom sources
-    // may remain token-only for backwards compatibility. A
-    // named provider, however, must never degrade to token-only merely because
-    // its decrypted secret is absent from the edge Source shape.
-    const provider = source.provider ?? "custom";
-    const hasSigningSecret =
-      (source.signing_secret?.length ?? 0) > 0
-      || (source.signing_secret_previous?.length ?? 0) > 0;
-    if (provider !== "custom" && !hasSigningSecret) {
-      throw new SourceLookupUnavailableError(
-        `signing secret missing for provider source ${source.source_id} (${provider}) — refusing to skip verification`,
-      );
-    }
-    const verificationHeaders = hasSigningSecret ? collectVerificationHeaders(request) : null;
-    if (hasSigningSecret && verificationHeaders) {
-      // Verification needs the exact inbound auth headers. Chargebee signs via
-      // HTTP Basic auth, so using the sanitized persistence map here would
-      // strip `authorization` and reject every valid Chargebee webhook.
-      // Verify against the current secret first, then the previous one during a
-      // rotation overlap window — a webhook signed with the old secret while the
-      // customer rotates still passes until the previous secret is retired.
-      const result = await verifyProviderSignatureWithSecrets(
-        { provider, body: new Uint8Array(body), headers: verificationHeaders },
-        [source.signing_secret, source.signing_secret_previous],
-      );
-      if (!result.ok) {
-        // 401 with a stable reason slug, not the secret. The reason
-        // matches the SignatureVerifyResult enum so support can
-        // diagnose without per-request logs.
-        return json({ error: "invalid_signature", reason: result.reason }, 401);
-      }
-    }
-
     // Signed providers publish a stable delivery/event identity. Bind it to the
     // Axel source, hash it, and use the digest for both event_id and the raw R2
     // key. Provider retries therefore remain one logical Axel event even across
@@ -373,24 +447,42 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       ? `events/${source.workspace_id}/provider/${eventId}`
       : `events/${source.workspace_id}/${receivedAt.slice(0, 10)}/${eventId}`;
 
-    const headers = collectHeaders(request);
-    const query = collectQuery(url);
+    // These request-derived maps exist only in this request's memory. They are
+    // needed for ordering, event-type, test-marker, and erasure derivation, but
+    // their values must never enter Queue, ClickHouse, CLI, or dashboard data.
+    const derivedHeaders = collectHeaders(request);
+    const derivedQuery = collectQuery(url);
+
+    const orderingHmacSecret = env.ORDERING_KEY_HMAC_SECRET?.trim() ?? "";
+    if (
+      (env.SOURCE_AUTHORITY_REQUIRED === "true" || source.ordering_enabled === true)
+      && orderingHmacSecret.length < 32
+    ) {
+      throw new SourceLookupUnavailableError("ordering key HMAC is unavailable");
+    }
 
     // FIFO Phase 1 — resolve the per-source ordering key from the PRE-redaction
     // body (or a header) so same-key events co-locate on one shard. Default-off:
     // null unless the source opted in AND a key resolved, in which case we fall
     // back to event_id sharding exactly as before. A missing/unresolvable key
     // NEVER drops the event. Later phases serialize delivery per key.
-    const orderingKey = resolveOrderingKey(source, new Uint8Array(body), headers);
+    const orderingKey = await resolveOrderingKey(
+      source,
+      new Uint8Array(body),
+      derivedHeaders,
+      orderingHmacSecret,
+    );
 
-    // Event-type discriminator for the ClickHouse index. Prefer the ORIGINAL
-    // (pre-redaction) body so a redact path that overlaps the type field can't
-    // blank it; fall back to common event-type headers. For non-JSON bodies we
-    // skip the body parse but still check headers (GitHub/Shopify/etc. put the
-    // type only in a header). '' when nothing matches.
-    const eventType = looksLikeJson(contentType)
-      ? extractEventTypeFromBody(new Uint8Array(body), headers)
-      : extractEventTypeFromHeaders(headers) ?? "";
+    // Only authenticated, named providers may add a bounded canonical type to
+    // analytics. Custom webhook fields and headers can contain arbitrary
+    // customer values, so custom sources remain untyped by default.
+    const eventType = provider === "custom"
+      ? ""
+      : boundedProviderEventType(
+          looksLikeJson(contentType)
+            ? extractEventTypeFromBody(new Uint8Array(body), derivedHeaders)
+            : extractEventTypeFromHeaders(derivedHeaders) ?? "",
+        );
 
     // PII redaction — mask configured paths BEFORE the durable R2 write, so
     // masked fields never persist and are never delivered. Runs after signature
@@ -400,6 +492,16 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       source.redact_paths && source.redact_paths.length > 0
         ? redactJsonPayload(new Uint8Array(body), source.redact_paths)
         : body;
+
+    // A source may be fenced while this worker reads the body and checks its
+    // provider signature. Reconfirm the exact authority version immediately
+    // before the first durable write. A rotation, disable, delete, suspension,
+    // or TTL refresh makes this fail closed with a retryable 503.
+    await confirmSourceAuthorizationWithAuthority(
+      env,
+      sourceId,
+      authorization.authorizationVersion,
+    );
 
     const stored = await env.EVENTS_RAW.put(r2Key, storedBody, {
       ...(providerEventId ? { onlyIf: { etagDoesNotMatch: "*" } } : {}),
@@ -438,13 +540,13 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       content_type: contentType,
       size_bytes: storedBody.byteLength,
       shard,
-      headers,
-      query,
-      // Test-flag detection isn't wired here yet — AXE-25 added the
-      // field to the type but the producer side defaults to false.
-      // When the dashboard test-sender starts setting a marker header
-      // we'll read it from `headers` here.
-      is_test: headers["x-axel-test"] === "1",
+      // Raw request metadata is request-local only. Persist value-free maps so
+      // arbitrary webhook secrets cannot reach Queue, ClickHouse, CLI, or UI.
+      headers: {},
+      query: {},
+      // Public senders cannot opt traffic out of billing. Test events are
+      // created only by the separately authenticated admin trigger endpoint.
+      is_test: false,
       // Stamp the event type only when one was found, so the message stays
       // byte-identical to baseline for non-JSON / untyped sources.
       ...(eventType ? { event_type: eventType } : {}),
@@ -464,7 +566,16 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     // body (not the redacted storedBody) — subject_id is a hash, so it stays
     // pseudonymous even when the path overlaps a redact path. Non-blocking; no-op
     // for sources without subject indexing.
-    ctx.waitUntil(indexSubjectsForErasure(env, source, new Uint8Array(body), headers, query, eventId, r2Key, receivedAt));
+    ctx.waitUntil(indexSubjectsForErasure(
+      env,
+      source,
+      new Uint8Array(body),
+      derivedHeaders,
+      derivedQuery,
+      eventId,
+      r2Key,
+      receivedAt,
+    ));
 
     return json({ event_id: eventId, received_at: receivedAt }, 202);
 }
@@ -473,7 +584,8 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
  * Best-effort: must never throw out of ctx.waitUntil. Extracts subject (kind,
  * value) pairs per the source's subject_key_paths, derives subject_ids with the
  * shared Web-Crypto deriver (byte-identical to the dashboard read-path), and
- * writes erasure_subjects over the control-plane PG client.
+ * sends erasure_subjects to the delivery service in production. Local
+ * development may still use its explicitly configured Postgres connection.
  */
 async function indexSubjectsForErasure(
   env: Env,
@@ -489,9 +601,30 @@ async function indexSubjectsForErasure(
     const pairs = extractSubjectPairs(source, rawBody, headers, query);
     if (pairs.length === 0) return;
     const ids = await Promise.all(pairs.map((p) => deriveSubjectIdWeb(source.workspace_id, p.kind, p.value)));
-    await indexErasureSubjects(env, source.workspace_id, [...new Set(ids)], eventId, r2Key, receivedAt);
+    const uniqueIds = [...new Set(ids)];
+    if (env.DEV_MODE === "true" && env.DATABASE_URL) {
+      await indexErasureSubjectsInPostgres(
+        env,
+        source.workspace_id,
+        uniqueIds,
+        eventId,
+        r2Key,
+        receivedAt,
+      );
+    } else {
+      await indexErasureSubjectsFromDeliveryService(
+        env,
+        source.source_id,
+        uniqueIds,
+        eventId,
+        r2Key,
+        receivedAt,
+      );
+    }
   } catch (err) {
-    console.error(`[ingest] erasure subject index failed for ${eventId}:`, err);
+    console.error(
+      `[ingest] erasure subject index failed: ${sanitizeConnectorDiagnosticForStorage(err)}`,
+    );
   }
 }
 
@@ -526,12 +659,6 @@ function queueForShard(env: Env, shard: number): Queue<QueueMessage> {
   const q = map[shard];
   if (!q) throw new Error(`no queue binding for shard ${shard}`);
   return q;
-}
-
-async function lookupSource(env: Env, sourceId: string): Promise<Source | null> {
-  const cache = env.__SOURCE_CACHE_OVERRIDE
-    ?? (env.SOURCE_CACHE ? kvSourceCache(env.SOURCE_CACHE) : null);
-  return resolveSource(cache, (id) => lookupSourceUncached(env, id), sourceId);
 }
 
 /**
@@ -577,10 +704,10 @@ export async function lookupSourceUncached(env: Env, sourceId: string): Promise<
   );
 }
 
-// Secret-bearing headers that must never be persisted (ClickHouse headers_json)
-// or propagated (queue message → delivery). x-axel-token is the source ingest
-// secret, already validated before this runs; the rest are generic auth carriers.
-// Keys arrive lowercased from the Headers iterator.
+// Secret-bearing headers excluded even from the request-local derivation map.
+// No values from this map are persisted or propagated. x-axel-token is the
+// source credential already validated before collection; the rest are generic
+// auth carriers. Keys arrive lowercased from the Headers iterator.
 const REDACTED_INBOUND_HEADERS = new Set([
   "x-axel-token",
   "authorization",
@@ -658,6 +785,11 @@ function collectQuery(url: URL): Record<string, string> {
     out[key] = value;
   });
   return out;
+}
+
+function boundedProviderEventType(value: string): string {
+  const candidate = value.trim();
+  return /^[A-Za-z][A-Za-z0-9_.:/-]{0,127}$/.test(candidate) ? candidate : "";
 }
 
 function safeEqual(a: string, b: string): boolean {

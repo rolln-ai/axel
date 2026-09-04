@@ -135,20 +135,19 @@ export async function runDashboardPullSync(input: {
   const lease = await tryAcquirePullSourceLock(pool, row.id);
   if (!lease) throw new Error("pull_sync_already_running");
   try {
-    return await runLockedDashboardPullSync(input, row, lease.client);
+    return await runLockedDashboardPullSync(row, lease.client);
   } finally {
     try {
       await lease.release();
     } catch (err) {
       console.error(
-        `[pull-sync] failed to release source lock ${row.id}: ${safePullDiagnostic(err)}`,
+        `[pull-sync] failed to release source lock: ${safePullDiagnostic(err)}`,
       );
     }
   }
 }
 
 async function runLockedDashboardPullSync(
-  input: { sourceId: string; workspaceId: string; actorUserId: string },
   row: PullSourceRow,
   pool: PullSourceLockClient,
 ): Promise<PullRunSummary> {
@@ -191,7 +190,7 @@ async function runLockedDashboardPullSync(
           await connector.close?.();
         } catch (closeErr) {
           console.error(
-            `[pull-sync] connector close failed for ${source.source_id}: ${safePullDiagnostic(closeErr)}`,
+            `[pull-sync] connector close failed: ${safePullDiagnostic(closeErr)}`,
           );
         }
       }
@@ -223,7 +222,6 @@ async function runLockedDashboardPullSync(
         JSON.stringify({
           ...sanitizePullRunSummaryForStorage(summary),
           triggered_by: "dashboard",
-          actor_user_id: input.actorUserId,
         }),
       ],
     );
@@ -390,7 +388,7 @@ async function runGenericSync(input: {
       summaries.push(summary);
     } catch (err) {
       summaries.push({
-        stream: sanitizeConnectorDiagnosticForStorage(stream, 160) || "pull_stream",
+        stream,
         records: 0,
         pages: 0,
         cursor: persistedState?.streams[stream]?.cursor ?? null,

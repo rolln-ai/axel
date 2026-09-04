@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { useActionState, useEffect, useRef, useState } from "react";
+import type { SourceProvider } from "@axel/shared";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ArrowRight, Check, Loader2, Radio, TriangleAlert } from "lucide-react";
@@ -19,11 +20,16 @@ import { Label } from "@/components/ui/label";
 import { ConditionalDestField } from "../destinations/ConditionalDestField";
 import {
   FIRST_RUN_DESTINATIONS,
+  FIRST_RUN_TLS_NO_VERIFY_DEFAULT,
   firstRunDestination,
   validateDestinationTarget,
   type FirstRunDestinationType,
 } from "../../../lib/first-run-destinations";
 import { summarizeBackfillProgress } from "../../../lib/first-run-backfill";
+import {
+  sourceAuthenticationCopy,
+  sourceUsesAxelToken,
+} from "../../../lib/source-ingest-auth";
 import { LocalTime } from "../../_components/LocalTime";
 import {
   InboundProviderFields,
@@ -57,6 +63,7 @@ interface CreatedSource {
   /** Null when recovered from the server after a reload — shown once only. */
   token: string | null;
   signingSecret: string | null;
+  provider: SourceProvider;
 }
 
 type StepStatus = "locked" | "active" | "done";
@@ -79,7 +86,12 @@ export function FirstRunSetupFlow({
    * reloaded /setup resume at step 2 with a working endpoint — minus the
    * plaintext token, which is unrecoverable by design.
    */
-  existingSource?: { id: string; name: string; ingestUrl: string } | undefined;
+  existingSource?: {
+    id: string;
+    name: string;
+    ingestUrl: string;
+    provider: SourceProvider;
+  } | undefined;
 }) {
   const router = useRouter();
   const [state, formAction, pending] = useActionState<ActionState, FormData>(
@@ -87,6 +99,9 @@ export function FirstRunSetupFlow({
     {},
   );
   const [sourceName, setSourceName] = useState("my-first-source");
+  const [sourceProvider, setSourceProvider] = useState<SourceProvider>(
+    existingSource?.provider ?? "custom",
+  );
   // Unmounted (not merely hidden) while collapsed, so a required-but-invisible
   // signing-secret input can never block submit.
   const [showProvider, setShowProvider] = useState(false);
@@ -115,9 +130,10 @@ export function FirstRunSetupFlow({
           ingestUrl: d.ingestUrl!,
           token: d.plaintextToken ?? null,
           signingSecret: d.webhookSigningSecret ?? null,
+          provider: sourceProvider,
         },
     );
-  }, [state, pending, sourceName]);
+  }, [state, pending, sourceName, sourceProvider]);
 
   const eventSeen = firstEvent !== null;
   const destinationReady = Boolean(created) && (eventSeen || skippedEventStep);
@@ -178,7 +194,10 @@ export function FirstRunSetupFlow({
             </p>
           </div>
           {showProvider ? (
-            <InboundProviderFields />
+            <InboundProviderFields
+              value={sourceProvider}
+              onValueChange={setSourceProvider}
+            />
           ) : (
             // block + self-start: both this and the submit button are
             // inline-block, so without it they collide on one line.
@@ -362,59 +381,55 @@ function DestinationPicker({
 
 /** The endpoint + one-shot secrets. The hero of step 2. */
 function EndpointPanel({ created }: { created: CreatedSource }) {
+  const usesAxelToken = sourceUsesAxelToken(created.provider);
+  const hasOneShotSecret = Boolean(
+    (usesAxelToken && created.token) || created.signingSecret,
+  );
+
   return (
     <div className="space-y-1 rounded-md border border-border bg-muted/30 p-3">
-      {created.token ? (
+      {hasOneShotSecret ? (
         <div
           role="alert"
           className="flex items-start gap-1.5 rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs font-medium text-foreground"
         >
           <TriangleAlert className="size-3.5 shrink-0 text-amber-600" />
           <span>
-            Copy this URL now — it contains your ingest token, which is shown only once.
+            Copy each secret below now. One-shot secrets cannot be retrieved after you leave setup.
           </span>
         </div>
       ) : null}
-      {created.token ? (
-        <>
-          <SecretRow
-            label="Webhook URL — paste this into your provider"
-            value={`${created.ingestUrl}?token=${created.token}`}
-          />
-          <p className="text-[11px] text-muted-foreground">
-            Or POST to the Ingest URL with the token as an{" "}
-            <code className="font-mono">x-axel-token</code> header.
-          </p>
-          <SecretRow label="Ingest URL" value={created.ingestUrl} />
-          <SecretRow label="Ingest token" value={created.token} />
-        </>
-      ) : (
-        <>
-          <SecretRow label="Ingest URL" value={created.ingestUrl} />
-          <p className="text-[11px] text-muted-foreground">
-            The ingest token is shown only once, at creation. If you no longer have it, rotate it
-            on the{" "}
-            <Link href={`/sources/${created.id}`} className="underline hover:text-foreground">
-              source page
-            </Link>
-            .
-          </p>
-        </>
-      )}
+      <SecretRow label="Webhook URL — paste this into your provider" value={created.ingestUrl} />
+      <p className="text-[11px] text-muted-foreground">
+        {sourceAuthenticationCopy(created.provider)}
+      </p>
+      {usesAxelToken && created.token ? (
+        <SecretRow label="Ingest token — send only as x-axel-token" value={created.token} />
+      ) : null}
+      {usesAxelToken && !created.token ? (
+        <p className="text-[11px] text-muted-foreground">
+          The ingest token is shown only once, at creation. If you no longer have it, rotate it on
+          the{" "}
+          <Link href={`/sources/${created.id}`} className="underline hover:text-foreground">
+            source page
+          </Link>
+          .
+        </p>
+      ) : null}
       {created.signingSecret ? (
         <>
-          <SecretRow label="Webhook signing secret" value={created.signingSecret} />
+          <SecretRow label="Destination signing secret" value={created.signingSecret} />
           <SigningSecretHint />
         </>
       ) : null}
-      {created.token ? (
+      {usesAxelToken && created.token ? (
         <details className="mt-2 rounded-md border border-border bg-background/50 px-3 py-2 text-xs">
           <summary className="cursor-pointer font-medium text-foreground">
             Or send one yourself with curl
           </summary>
           <SecretRow
             label="curl"
-            value={`curl -X POST "${created.ingestUrl}?token=${created.token}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"hello":"world"}'`}
+            value={`curl -X POST "${created.ingestUrl}" \\\n  -H "x-axel-token: ${created.token}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"hello":"world"}'`}
           />
         </details>
       ) : null}
@@ -459,8 +474,8 @@ function FirstEventWatcher({
 
     const tick = async () => {
       const res = await getRecentIngestEvents(sourceId, 1).catch(
-        (err): { error: string } => ({
-          error: err instanceof Error ? err.message : "Couldn't reach the ingest monitor.",
+        (): { error: string } => ({
+          error: "Couldn't reach the ingest monitor.",
         }),
       );
       if (cancelled) return;
@@ -584,10 +599,9 @@ function DestinationForm({
   const [values, setValues] = useState<Record<string, string>>({});
   const [target, setTarget] = useState("");
   const [targetParts, setTargetParts] = useState<Record<string, string>>({});
-  // Default ON for managed Postgres/Mongo: nearly every hosted provider serves
-  // a self-signed certificate, and leaving it off silently fails every
-  // delivery. Still encrypted; only the certificate check is relaxed.
-  const [tlsNoVerify, setTlsNoVerify] = useState(true);
+  // This escape hatch is deliberately opt-in. Encryption without certificate
+  // identity validation is vulnerable to an active man-in-the-middle attack.
+  const [tlsNoVerify, setTlsNoVerify] = useState(FIRST_RUN_TLS_NO_VERIFY_DEFAULT);
   const notified = useRef(false);
   const submittedTarget = spec.target?.parts
     ? spec.target.parts
@@ -785,8 +799,8 @@ function BackfillPanel({
 
     const tick = async () => {
       const res = await getFirstRunBackfillStatus(jobId).catch(
-        (err): { error: string } => ({
-          error: err instanceof Error ? err.message : "Couldn't read backfill status.",
+        (): { error: string } => ({
+          error: "Couldn't read backfill status.",
         }),
       );
       if (cancelled) return;

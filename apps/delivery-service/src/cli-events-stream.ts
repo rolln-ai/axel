@@ -23,8 +23,15 @@
 
 import { Buffer } from "node:buffer";
 import http from "node:http";
-import { cloudflareR2ObjectUrl } from "@axel/shared";
+import {
+  cloudflareR2ObjectUrl,
+  isCanonicalRawPayloadKey,
+} from "@axel/shared";
 import type { CliApiDeps } from "./cli-api.js";
+import {
+  readResponseBytesLimited,
+  readResponseTextLimited,
+} from "./cli-bounded-io.js";
 
 interface EventRow {
   event_id: string;
@@ -36,10 +43,11 @@ interface EventRow {
   received_at_text: string;
   content_type: string;
   r2_key: string;
-  headers_json: string;
 }
 
 const MAX_EVENTS_PER_POLL = 50;
+const MAX_LISTEN_CLICKHOUSE_RESPONSE_BYTES = 8 * 1024 * 1024;
+const MAX_LISTEN_EVENT_PAYLOAD_BYTES = 5 * 1024 * 1024;
 
 export async function handleListenStream(
   res: http.ServerResponse,
@@ -67,7 +75,10 @@ export async function handleListenStream(
     [sourceId, ctx.workspace_id],
   );
   if (!sourceCheck.rowCount) {
-    return jsonResponse(res, 404, { error: "source_not_found", message: `Source ${sourceId} is not in this workspace.` });
+    return jsonResponse(res, 404, {
+      error: "source_not_found",
+      message: "Source not found in this workspace.",
+    });
   }
 
   const chHeaders: Record<string, string> = { accept: "application/json" };
@@ -75,7 +86,7 @@ export async function handleListenStream(
   if (deps.clickhousePassword) chHeaders["x-clickhouse-key"] = deps.clickhousePassword;
   const query = `SELECT event_id, source_id,
                         toString(received_at) AS received_at_text,
-                        content_type, r2_key, headers_json
+                        content_type, r2_key
                    FROM events
                   WHERE workspace_id = {workspace_id:String}
                     AND source_id = {source_id:String}
@@ -91,22 +102,45 @@ export async function handleListenStream(
 
   let chRes: Response;
   try {
-    chRes = await fetch(chUrl, { headers: chHeaders, redirect: "manual" });
-  } catch (err: unknown) {
-    console.error("[/v1/cli/events] clickhouse fetch failed:", err);
+    chRes = await (deps.fetchImpl ?? fetch)(chUrl, { headers: chHeaders, redirect: "manual" });
+  } catch {
+    console.error("[/v1/cli/events] clickhouse fetch failed");
     return jsonResponse(res, 502, {
       error: "clickhouse_unreachable",
       message: "Upstream ClickHouse request failed.",
     });
   }
   if (!chRes.ok) {
-    const body = await chRes.text().catch(() => "");
+    await chRes.body?.cancel().catch(() => undefined);
     return jsonResponse(res, 502, {
       error: `clickhouse_${chRes.status}`,
-      message: body.slice(0, 200),
+      message: "ClickHouse request failed.",
     });
   }
-  const json = (await chRes.json()) as { data?: EventRow[] };
+  let json: { data?: EventRow[] };
+  try {
+    const parsed = JSON.parse(await readResponseTextLimited(
+      chRes,
+      MAX_LISTEN_CLICKHOUSE_RESPONSE_BYTES,
+    )) as unknown;
+    if (
+      parsed === null
+      || typeof parsed !== "object"
+      || Array.isArray(parsed)
+      || (
+        "data" in parsed
+        && !Array.isArray((parsed as { data?: unknown }).data)
+      )
+    ) {
+      throw new Error("clickhouse_response_contract_invalid");
+    }
+    json = parsed as typeof json;
+  } catch {
+    return jsonResponse(res, 502, {
+      error: "clickhouse_invalid_response",
+      message: "ClickHouse returned an invalid response.",
+    });
+  }
   const rows = json.data ?? [];
 
   // Fetch raw bytes from R2 in parallel — bounded at MAX_EVENTS_PER_POLL.
@@ -114,30 +148,42 @@ export async function handleListenStream(
   // on one bad object; the CLI will see them on the next tick.
   const events = await Promise.all(
     rows.map(async (row) => {
+      if (
+        !isEventRow(row)
+        || row.source_id !== sourceId
+        || !isCanonicalRawPayloadKey(row.r2_key, {
+          workspaceId: ctx.workspace_id,
+          eventId: row.event_id,
+          sourceId,
+        })
+      ) {
+        return null;
+      }
       const r2Url = cloudflareR2ObjectUrl(
         deps.cloudflareAccountId,
         deps.rawPayloadBucket,
         row.r2_key,
       );
       try {
-        const r2Res = await fetch(r2Url, {
+        const r2Res = await (deps.fetchImpl ?? fetch)(r2Url, {
           redirect: "manual",
           headers: { authorization: `Bearer ${deps.cloudflareApiToken}` },
         });
-        if (!r2Res.ok) return null;
-        const buf = Buffer.from(await r2Res.arrayBuffer());
-        let headers: Record<string, string> = {};
-        try {
-          headers = JSON.parse(row.headers_json) as Record<string, string>;
-        } catch {
-          headers = {};
+        if (!r2Res.ok) {
+          await r2Res.body?.cancel().catch(() => undefined);
+          return null;
         }
+        const buf = Buffer.from(await readResponseBytesLimited(
+          r2Res,
+          MAX_LISTEN_EVENT_PAYLOAD_BYTES,
+        ));
         return {
           event_id: row.event_id,
           source_id: row.source_id,
           received_at: row.received_at_text,
           content_type: row.content_type,
-          headers,
+          // Request metadata values never cross the CLI export boundary.
+          headers: {},
           body_base64: buf.toString("base64"),
         };
       } catch {
@@ -150,6 +196,18 @@ export async function handleListenStream(
     events: events.filter((e): e is NonNullable<typeof e> => e !== null),
     truncated: rows.length === MAX_EVENTS_PER_POLL,
   });
+}
+
+function isEventRow(value: unknown): value is EventRow {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const row = value as Partial<EventRow>;
+  return typeof row.event_id === "string"
+    && typeof row.source_id === "string"
+    && typeof row.received_at_text === "string"
+    && typeof row.content_type === "string"
+    && typeof row.r2_key === "string";
 }
 
 function jsonResponse(res: http.ServerResponse, status: number, body: unknown): void {

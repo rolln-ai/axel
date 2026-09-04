@@ -52,10 +52,12 @@ export interface Source {
    * than "custom" with a `signing_secret`, the ingest worker rejects requests
    * that fail the provider's HMAC check BEFORE writing to R2 or enqueuing.
    *
-   * - `custom`  — no provider preset; secret-token-only auth (legacy default).
+   * - `custom`  — no provider preset; x-axel-token header auth.
    *               If `signing_secret` is also set, the worker verifies our
    *               own `X-Axel-Signature: t=…,v1=…` HMAC scheme on top of
    *               the secret token check.
+   * Named providers authenticate with their provider signature and do not use
+   * an Axel source token.
    * - `stripe`  — verifies `Stripe-Signature: t=…,v1=…`.
    * - `github`  — verifies `X-Hub-Signature-256: sha256=…`.
    * - `shopify` — verifies `X-Shopify-Hmac-Sha256: <base64>`.
@@ -64,9 +66,11 @@ export interface Source {
   provider?: SourceProvider;
   /**
    * The plaintext provider signing secret. Stored encrypted at rest in
-   * Postgres (AES-256-GCM under CREDENTIALS_MASTER_KEY) and decrypted by
-   * the dashboard before being pushed to the edge KV cache. The ingest
-   * worker reads it from KV and uses it to verify inbound HMACs.
+   * Postgres (AES-256-GCM under CREDENTIALS_MASTER_KEY). Delivery service
+   * decrypts it for origin lookups. The edge authority holds the live source
+   * only in isolate memory and persists a config digest; mutations fence the
+   * source before the database write and publish fresh committed state before
+   * it can authorize again.
    * Empty / undefined = no signature verification (token-only).
    */
   signing_secret?: string;
@@ -96,7 +100,8 @@ export interface Source {
    * ingest worker resolves an `ordering_key` per event — from
    * `ordering_key_header` (case-insensitive, wins when present) or otherwise
    * the dot-path `ordering_key_path` into the JSON body — and co-locates
-   * same-key events on one shard. Later phases serialize delivery per key.
+   * same-key events on one shard. The raw value is HMAC-pseudonymized before
+   * Queue or Durable Object use. Later phases serialize delivery per key.
    * Default-off: when unset, events shard by event_id exactly as before and a
    * missing/unresolvable key falls back to the unordered path (never dropped).
    */
@@ -112,9 +117,9 @@ export interface Source {
    */
   subject_key_paths?: SubjectKeyPath[] | null;
   /**
-   * Source-level delivery projection. It is carried in the edge source cache
-   * alongside the ingest fields so cache fills from every control-plane path
-   * remain byte-for-byte equivalent. Ingest does not apply the projection;
+   * Source-level delivery projection. It is carried in the edge source
+   * authority alongside the ingest fields so every control-plane path
+   * publishes the same shape. Ingest does not apply the projection;
    * routers do when they fan out the event.
    */
   field_selection?: string[] | null;
@@ -393,25 +398,22 @@ export interface QueueMessage {
   content_type: string;
   size_bytes: number;
   shard: number;
+  /** Value-free by policy. Raw request header values never leave ingest. */
   headers: Record<string, string>;
+  /** Value-free by policy. Raw query values never leave ingest. */
   query: Record<string, string>;
   is_test: boolean;
   /**
-   * Event-type discriminator extracted from the payload body at ingest
-   * (see `extractEventTypeFromBody`). Indexed into ClickHouse
-   * `events.event_type` so Data Contract inference can enumerate every
-   * distinct type with a `GROUP BY` instead of hoping random sampling
-   * surfaces the long tail. `""` when the body isn't JSON or carries no
-   * recognizable discriminator. Optional so messages stay byte-identical
-   * to baseline for non-JSON sources.
+   * Bounded canonical type from an authenticated named provider. Custom,
+   * admin-triggered, and pull-source events omit it so arbitrary customer
+   * body or header values cannot enter the analytics index.
    */
   event_type?: string;
   /**
    * FIFO / ordered delivery (Phase 1). Present only when the source opted into
-   * ordered delivery AND a key resolved; namespaced `${ws}:${src}:${raw}`.
-   * Absent (not null) for unordered events so the message is byte-identical to
-   * baseline when ordering is off. Later phases route ordered events through a
-   * per-key serializer keyed on this value.
+   * ordered delivery AND a key resolved. It is a domain-separated keyed HMAC
+   * over workspace, source, and the raw scalar; Queue and serializers never
+   * receive the raw value. Absent (not null) for unordered events.
    */
   ordering_key?: string;
 }

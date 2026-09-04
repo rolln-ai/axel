@@ -161,7 +161,7 @@ export function createSentryClient(options: SentryClientOptions): SentryClient {
       if (timer) clearTimeout(timer);
     }
     if (!response.ok) {
-      throw new Error(`sentry_send_failed status=${response.status} project=${parsed.projectId}`);
+      throw new Error(`sentry_send_failed status=${response.status}`);
     }
   }
 
@@ -183,11 +183,11 @@ export function createSentryClient(options: SentryClientOptions): SentryClient {
         event_id: eventId,
         timestamp: eventTimestamp,
         platform: "javascript",
-        server_name: options.service,
-        environment: options.environment,
-        release: options.release,
+        server_name: safeSentrySlug(options.service, "service"),
+        environment: optionalSafeSentrySlug(options.environment),
+        release: optionalSafeSentrySlug(options.release),
         tags: {
-          service: options.service,
+          service: safeSentrySlug(options.service, "service"),
           ...(isRecord(eventTags) ? eventTags : {}),
         },
         ...eventPayload,
@@ -230,19 +230,22 @@ export function createSentryClient(options: SentryClientOptions): SentryClient {
         exception: {
           values: [exceptionValue(error)],
         },
-        tags: context?.tags,
+        tags: sanitizeSentryTags(context?.tags),
         extra: sanitizeSentryValue(context?.extra),
-        user: context?.user,
+        // User identity is never required to diagnose a backend exception. Drop
+        // the whole object so a future caller cannot bypass the value scrubber
+        // with `id`, `email`, `username`, or `ip_address`.
+        user: undefined,
       });
     },
     async captureMessage(message, context) {
       await sendEvent({
         level: context?.level ?? "info",
         fingerprint: sanitizeSentryFingerprint(context?.fingerprint),
-        message: sanitizeSentryText(message),
-        tags: context?.tags,
+        message: sentryMessageCode(message),
+        tags: sanitizeSentryTags(context?.tags),
         extra: sanitizeSentryValue(context?.extra),
-        user: context?.user,
+        user: undefined,
       });
     },
     async captureTransaction(input) {
@@ -250,19 +253,19 @@ export function createSentryClient(options: SentryClientOptions): SentryClient {
       await sendEvent(
         {
           type: "transaction",
-          transaction: input.name,
+          transaction: safeSentrySlug(input.name, "application_transaction"),
           transaction_info: { source: "custom" },
           start_timestamp: timestamp,
           contexts: {
             trace: {
               trace_id: crypto.randomUUID().replaceAll("-", ""),
               span_id: crypto.randomUUID().replaceAll("-", "").slice(0, 16),
-              op: input.op,
-              status: input.status ?? "ok",
+              op: safeSentrySlug(input.op, "custom"),
+              status: safeSentrySlug(input.status ?? "ok", "unknown"),
             },
           },
           spans: [],
-          tags: input.tags,
+          tags: sanitizeSentryTags(input.tags),
           extra: sanitizeSentryValue(input.extra),
         },
         "transaction",
@@ -454,7 +457,7 @@ export function isPoolAcquireTimeout(error: unknown): boolean {
  * dropped tick.
  */
 export async function withPgRetry<T>(
-  label: string,
+  _label: string,
   fn: () => Promise<T>,
   options: { backoffMs?: number } = {},
 ): Promise<T> {
@@ -466,13 +469,11 @@ export async function withPgRetry<T>(
     // exhausted pool and amplifies a connection storm. Shed and let the caller
     // (queue redelivery with backoff) reconnect later.
     if (isPoolAcquireTimeout(err)) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.warn(`[pg-retry] pool acquire timeout on ${label} — shedding, no in-process retry: ${message.slice(0, 200)}`);
+      console.warn("[pg-retry] pool_acquire_timeout");
       throw err;
     }
     if (isTransientPostgresError(err)) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.warn(`[pg-retry] transient on ${label} — retrying once: ${message.slice(0, 200)}`);
+      console.warn("[pg-retry] transient_retry");
       await new Promise((resolve) => setTimeout(resolve, options.backoffMs ?? 100));
       return await fn();
     }
@@ -561,7 +562,7 @@ export function isTransientPlatformHttpError(error: unknown): boolean {
  * - `Error: put: We encountered an internal error. Please try again. (10001)`
  * - `Error: put: Please look at https://www.cloudflarestatus.com for issues or contact customer support. (10043)`
  * - `Error: put: Reduce your concurrent request rate for the same object. (10058)`
- * - `Error: r2_get_truncated: queue-spill/… (65536/131072 bytes)`
+ * - `Error: r2_get_truncated (65536/131072 bytes)`
  */
 export function isTransientR2Error(error: unknown): boolean {
   if (!error) return false;
@@ -607,7 +608,7 @@ export async function captureExceptionBeforeExit(
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const capture = Promise.resolve()
     .then(() => client.captureException(error, context))
-    .catch((captureErr) => console.error("[sentry] capture failed", captureErr));
+    .catch(() => console.error("[sentry] capture failed"));
   const deadline = new Promise<void>((resolve) => {
     timeout = setTimeout(() => {
       timedOut = true;
@@ -645,10 +646,7 @@ export function installNodeSentryHandlers(
     // The process is already committed to exit; capture exactly one root cause.
     if (terminating) return;
     terminating = true;
-    console.error(
-      `[fatal] ${kind}`,
-      sanitizeSentryText(reason instanceof Error ? reason.message : String(reason)),
-    );
+    console.error(`[fatal] ${kind}`);
     const transientPostgres = isTransientPostgresError(reason);
     void captureExceptionBeforeExit(
       client,
@@ -664,10 +662,10 @@ export function installNodeSentryHandlers(
       options.flushTimeoutMs,
     ).then(
       () => maybeProcess.exit?.(1),
-      (captureErr) => {
+      () => {
         // Defensive fallback: the helper is designed not to reject, but no
         // observability failure may leave a corrupted process running.
-        console.error("[sentry] fatal handler failed", captureErr);
+        console.error("[sentry] fatal handler failed");
         maybeProcess.exit?.(1);
       },
     );
@@ -685,8 +683,8 @@ export async function captureException(
   if (!client) return;
   try {
     await client.captureException(error, context);
-  } catch (captureErr) {
-    console.error("[sentry] capture failed", captureErr);
+  } catch {
+    console.error("[sentry] capture failed");
   }
 }
 
@@ -697,8 +695,8 @@ export async function captureCheckIn(
   if (!client) return null;
   try {
     return await client.captureCheckIn(input);
-  } catch (captureErr) {
-    console.error("[sentry] check-in failed", captureErr);
+  } catch {
+    console.error("[sentry] check-in failed");
     return null;
   }
 }
@@ -777,72 +775,155 @@ function cloudflareRelease(metadata: SentryEnv["CF_VERSION_METADATA"]): string |
 function exceptionValue(error: unknown): Record<string, unknown> {
   if (error instanceof Error) {
     return {
-      type: error.name,
-      value: sanitizeSentryText(error.message),
+      type: safeExceptionType(error.name),
+      value: sentryErrorCode(error),
       stacktrace: {
         frames: stackFrames(error.stack),
       },
     };
   }
   return {
-    type: typeof error,
-    value: sanitizeSentryText(String(error)),
+    type: "Error",
+    value: sentryErrorCode(error),
   };
 }
 
-const SENTRY_EMAIL_RE = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
-const SENTRY_LONG_DIGITS_RE = /\b\d(?:[\d -]{6,})\d\b/g;
-const SENTRY_AUTH_RE = /\b(Bearer|Basic)\s+[^\s,;]+/gi;
-const SENTRY_TOKEN_RE = /\b(?:axe_pat|whsec|sk|rk|ghp|github_pat)_[A-Za-z0-9_-]{8,}\b/gi;
-const SENTRY_QUERY_RE = /([?&][A-Za-z0-9_.~-]{1,128}=)[^&#\s]*/g;
-const SENTRY_URI_USERINFO_RE = /(\b[a-z][a-z0-9+.-]*:\/\/[^:\s/@]+:)[^@\s/]+@/gi;
-const SENTRY_HTTP_DETAIL_RE = /(\b(?:HTTP\s+\d{3}|[A-Za-z0-9_-]+_http_\d{3}|delivery_service_\d{3})\s*:\s*)[\s\S]*/i;
-const SENTRY_SECRET_ASSIGNMENT_RE = /(\b(?:authorization|client[_ -]?secret|cookie|credential|password|passwd|private[_ -]?key|refresh[_ -]?token|secret|secret[_ -]?access[_ -]?key|signature|token|api[_ -]?key|access[_ -]?key)\b\s*(?:=|:|\bis\b)\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)/gi;
-const SENTRY_PAYLOAD_ASSIGNMENT_RE = /(\b(?:body|data|document|event|input|payload|raw|record|response[_ -]?body|row|value)\b\s*(?:=|:)\s*)(?:\{[^\r\n]{0,2000}\}|\[[^\r\n]{0,2000}\]|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)/gi;
-const SENTRY_PRIVATE_KEY_RE = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*/gi;
-const SENTRY_SECRET_KEY_RE =
-  /(?:authorization|body|cookie|credential|password|payload|raw|secret|signature|token|api[_-]?key)/i;
+const SAFE_EXCEPTION_TYPES = new Set([
+  "AggregateError",
+  "Error",
+  "EvalError",
+  "RangeError",
+  "ReferenceError",
+  "SyntaxError",
+  "TypeError",
+  "URIError",
+]);
 
-function sanitizeSentryText(input: string): string {
-  return input
-    .replace(SENTRY_HTTP_DETAIL_RE, "$1[REDACTED]")
-    .replace(SENTRY_URI_USERINFO_RE, "$1[REDACTED]@")
-    .replace(SENTRY_PRIVATE_KEY_RE, "[REDACTED PRIVATE KEY]")
-    .replace(SENTRY_EMAIL_RE, "[EMAIL]")
-    .replace(SENTRY_LONG_DIGITS_RE, "[NUM]")
-    .replace(SENTRY_AUTH_RE, "$1 [REDACTED]")
-    .replace(SENTRY_TOKEN_RE, "[REDACTED]")
-    .replace(SENTRY_QUERY_RE, "$1[REDACTED]")
-    .replace(SENTRY_SECRET_ASSIGNMENT_RE, "$1[REDACTED]")
-    .replace(SENTRY_PAYLOAD_ASSIGNMENT_RE, "$1[REDACTED]")
-    .replace(/"(?:\\.|[^"\\])*"/g, '"[REDACTED]"')
-    .replace(/'(?:\\.|[^'\\])*'/g, "'[REDACTED]'")
-    .slice(0, 1_000);
+function safeExceptionType(value: string): string {
+  return SAFE_EXCEPTION_TYPES.has(value) ? value : "Error";
 }
 
+function sentryErrorCode(error: unknown): string {
+  const message = error instanceof Error
+    ? error.message
+    : typeof error === "string"
+      ? error
+      : "";
+
+  const alert = /^operational_alert:([a-z0-9_-]{1,64}):([a-z0-9_-]{1,64}):(info|warn|critical)$/u
+    .exec(message);
+  if (alert) return alert[0];
+  if (message === "destination_queue_message_invalid") {
+    return "destination_queue_message_invalid";
+  }
+  if (isCloudflareQueueOverloadError(error)) return "cloudflare_queue_overloaded";
+  if (isCloudflareQueueInternalError(error)) return "cloudflare_queue_internal";
+  if (isCircuitBreakerOpenError(error)) return "circuit_breaker_open";
+  if (isPoolAcquireTimeout(error)) return "postgres_pool_acquire_timeout";
+  if (isTransientPostgresError(error)) return "transient_postgres";
+  if (isTransientR2Error(error)) return "transient_r2";
+  if (isTransientFetchError(error)) return "transient_fetch";
+  if (isTransientPlatformHttpError(error)) return "transient_platform_http";
+
+  const status = /\b(?:HTTP\s+|[a-z0-9_-]+_)([1-5][0-9]{2})\b/iu.exec(message)?.[1];
+  return status ? `http_error_${status}` : "application_error";
+}
+
+function sentryMessageCode(message: string): string {
+  if (message === "Destination queue message failed runtime validation") {
+    return "destination_queue_message_invalid";
+  }
+  if (message === "Direct delivery message failed runtime validation") {
+    return "direct_delivery_message_invalid";
+  }
+  return "application_message";
+}
+
+const SENTRY_SECRET_KEY_RE =
+  /(?:authorization|body|cookie|credential|password|payload|raw|secret|signature|token|api[_-]?key)/i;
+const SENTRY_IDENTIFIER_KEY_RE =
+  /^(?:attempt|credential|customer|destination|event|replay|route|source|user|workspace)[_-]?id$/i;
+
 function sanitizeSentryValue(value: unknown, depth = 0): unknown {
-  if (value === undefined || value === null || typeof value === "boolean" || typeof value === "number") {
+  if (value === undefined || value === null || typeof value === "boolean") {
     return value;
   }
-  if (typeof value === "string") return sanitizeSentryText(value);
-  if (depth >= 8) return "[TRUNCATED]";
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  // Free-form strings can contain webhook values, provider responses, or
+  // identifiers under an innocuous key. Operational extras are metrics only.
+  if (typeof value === "string") return undefined;
+  if (depth >= 8) return undefined;
   if (Array.isArray(value)) {
-    return value.slice(0, 32).map((item) => sanitizeSentryValue(item, depth + 1));
+    return value
+      .slice(0, 32)
+      .map((item) => sanitizeSentryValue(item, depth + 1))
+      .filter((item) => item !== undefined);
   }
-  if (typeof value !== "object") return sanitizeSentryText(String(value));
+  if (typeof value !== "object") return undefined;
 
   const out: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(value as Record<string, unknown>).slice(0, 64)) {
-    out[key] = SENTRY_SECRET_KEY_RE.test(key)
-      ? "[REDACTED]"
-      : sanitizeSentryValue(child, depth + 1);
+    if (!/^[a-z][a-z0-9_]{0,63}$/iu.test(key)) continue;
+    if (SENTRY_SECRET_KEY_RE.test(key) || SENTRY_IDENTIFIER_KEY_RE.test(key)) continue;
+    const sanitized = sanitizeSentryValue(child, depth + 1);
+    if (sanitized !== undefined) out[key] = sanitized;
   }
-  return out;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+const SENTRY_ALLOWED_TAG_KEYS = new Set([
+  "alert_rule",
+  "alert_severity",
+  "alert_source",
+  "category",
+  "component",
+  "controlled_probe",
+  "error_code",
+  "field",
+  "final_attempt",
+  "http_status",
+  "kind",
+  "phase",
+  "reason",
+  "retryable",
+  "severity",
+  "status",
+  "unhandled",
+]);
+
+function sanitizeSentryTags(
+  tags: Record<string, string | number | boolean | null | undefined> | undefined,
+): Record<string, string | number | boolean | null | undefined> | undefined {
+  if (!tags) return undefined;
+  const sanitized: Record<string, string | number | boolean | null | undefined> = {};
+  for (const [key, value] of Object.entries(tags).slice(0, 64)) {
+    if (!SENTRY_ALLOWED_TAG_KEYS.has(key)) continue;
+    if (typeof value === "string") {
+      sanitized[key] = safeSentrySlug(value, "redacted");
+    } else if (typeof value === "number") {
+      if (Number.isFinite(value)) sanitized[key] = value;
+    } else {
+      sanitized[key] = value;
+    }
+  }
+  return sanitized;
 }
 
 function sanitizeSentryFingerprint(fingerprint: readonly string[] | undefined): string[] | undefined {
   if (!fingerprint) return undefined;
-  return fingerprint.slice(0, 8).map((part) => sanitizeSentryText(part));
+  if (fingerprint.length !== 4 || fingerprint[0] !== "operational_alert") {
+    return ["application_error"];
+  }
+  return fingerprint.map((part) => safeSentrySlug(part, "redacted"));
+}
+
+function safeSentrySlug(value: string, fallback: string): string {
+  const trimmed = value.trim();
+  return /^[a-z0-9][a-z0-9_.:-]{0,95}$/iu.test(trimmed) ? trimmed : fallback;
+}
+
+function optionalSafeSentrySlug(value: string | undefined): string | undefined {
+  return value === undefined ? undefined : safeSentrySlug(value, "redacted");
 }
 
 function stackFrames(stack: string | undefined): Array<Record<string, unknown>> {
@@ -858,18 +939,18 @@ function stackFrames(stack: string | undefined): Array<Record<string, unknown>> 
 function parseStackFrame(line: string): Record<string, unknown> {
   const withoutPrefix = line.startsWith("at ") ? line.slice(3) : line;
   const colSep = withoutPrefix.lastIndexOf(":");
-  if (colSep === -1) return { function: withoutPrefix };
+  if (colSep === -1) return { function: "<unknown>" };
   const lineSep = withoutPrefix.lastIndexOf(":", colSep - 1);
-  if (lineSep === -1) return { function: withoutPrefix };
+  if (lineSep === -1) return { function: "<unknown>" };
 
   const colno = Number(withoutPrefix.slice(colSep + 1).replace(")", ""));
   const lineno = Number(withoutPrefix.slice(lineSep + 1, colSep));
-  if (!Number.isFinite(lineno) || !Number.isFinite(colno)) return { function: withoutPrefix };
+  if (!Number.isFinite(lineno) || !Number.isFinite(colno)) return { function: "<unknown>" };
 
   const locationWithMaybeFunction = withoutPrefix.slice(0, lineSep);
   const openParen = locationWithMaybeFunction.lastIndexOf(" (");
   if (openParen === -1) {
-    const filename = locationWithMaybeFunction;
+    const filename = safeStackFilename(locationWithMaybeFunction);
     return {
       function: "<anonymous>",
       filename,
@@ -879,9 +960,9 @@ function parseStackFrame(line: string): Record<string, unknown> {
     };
   }
 
-  const filename = locationWithMaybeFunction.slice(openParen + 2);
+  const filename = safeStackFilename(locationWithMaybeFunction.slice(openParen + 2));
   return {
-    function: locationWithMaybeFunction.slice(0, openParen),
+    function: "<anonymous>",
     filename,
     lineno,
     colno,
@@ -889,7 +970,23 @@ function parseStackFrame(line: string): Record<string, unknown> {
   };
 }
 
+function safeStackFilename(filename: string): string {
+  const clean = filename.replace(/\)+$/u, "");
+  if (/^node:[a-z0-9_./-]{1,160}$/iu.test(clean)) return clean;
+  for (const root of ["/apps/", "/packages/"] as const) {
+    const index = clean.lastIndexOf(root);
+    if (index >= 0) return clean.slice(index + 1, index + 1 + 240);
+  }
+  if (/^(?:apps|packages)\/[a-z0-9_./@-]{1,230}$/iu.test(clean)) {
+    return clean.slice(0, 240);
+  }
+  return "[external]";
+}
+
 function isInAppFrame(filename: string): boolean {
   if (filename.startsWith("node:") || filename.includes("/node_modules/")) return false;
-  return filename.includes("/apps/") || filename.includes("/packages/");
+  return filename.startsWith("apps/")
+    || filename.startsWith("packages/")
+    || filename.includes("/apps/")
+    || filename.includes("/packages/");
 }

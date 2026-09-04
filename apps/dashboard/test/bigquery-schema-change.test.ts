@@ -148,7 +148,7 @@ describe("BigQuery destination schema widening", () => {
     expect(mocks.introspect).toHaveBeenCalledTimes(2);
   });
 
-  it("surfaces the permission required to run the schema job", async () => {
+  it("returns a stable status error without exposing the provider response", async () => {
     mocks.introspect.mockResolvedValue({ kind: "schema", fields: integerSchema });
     vi.stubGlobal("fetch", vi.fn(async () => ({
       ok: false,
@@ -166,6 +166,6 @@ describe("BigQuery destination schema widening", () => {
       fieldPath: "data.properties.total_taxes",
       fromType: "INT64",
       toType: "FLOAT64",
-    })).rejects.toThrow(/bigquery\.jobs\.create/);
+    })).rejects.toThrow(/^bigquery_schema_change_http_403$/);
   });
 });

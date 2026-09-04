@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { customDomainUrl } from "./cloudflare-worker-release.mjs";
 
 const required = (name) => {
   const value = process.env[name]?.trim();
@@ -21,7 +22,10 @@ const deadQueue = `${prefix}-dead-letter`;
 const bucket = `${prefix}-raw`;
 const ingestName = `${prefix}-ingest`;
 const routerName = `${prefix}-router`;
-const customDomain = process.env.AXEL_INGEST_DOMAIN?.trim();
+const customDomainInput = process.env.AXEL_INGEST_DOMAIN?.trim();
+const customDomain = customDomainInput
+  ? new URL(customDomainUrl(customDomainInput)).hostname
+  : undefined;
 
 const ingestProducerBindings = Array.from({ length: 16 }, (_, index) => {
   const binding = `QUEUE_EVENTS_${index.toString().padStart(2, "0")}`;
@@ -41,9 +45,12 @@ binding = "EVENTS_RAW"
 bucket_name = ${quote(bucket)}
 
 ${ingestProducerBindings}
+# SOURCE_AUTHORITY is intentionally absent in the small self-host profile.
+# Ingest uses the authenticated delivery-service source lookup on every request.
 [vars]
 DELIVERY_SERVICE_URL = ${quote(deliveryUrl)}
 SENTRY_ENVIRONMENT = "self-hosted"
+SOURCE_AUTHORITY_REQUIRED = "false"
 `;
 
 const router = `name = ${quote(routerName)}

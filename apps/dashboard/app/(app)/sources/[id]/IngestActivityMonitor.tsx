@@ -44,8 +44,8 @@ export function IngestActivityMonitor({
 
     const tick = async () => {
       const res = await getRecentIngestEvents(sourceId).catch(
-        (err): { error: string } => ({
-          error: err instanceof Error ? err.message : "Couldn't reach the ingest monitor.",
+        (): { error: string } => ({
+          error: "Couldn't reach the ingest monitor.",
         }),
       );
       if (cancelledRef.current) return;

@@ -15,10 +15,11 @@ permissions:
 jobs:
   enable:
     name: Enable auto-merge
-    # Keep the write-capable token unavailable to forks. The shell repeats
-    # this check as defense in depth before it calls the GitHub API.
-    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    # Keep the write-capable token unavailable to forks and untrusted authors.
+    # Add future maintainers explicitly after granting repository write access.
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == '10-01' }}
     runs-on: ubuntu-latest
+    environment: Automation
     steps:
       - name: Enable auto-merge for Codex Linear branches
         env:
@@ -34,6 +35,7 @@ jobs:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           BASE_REPO: ${{ github.repository }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           IS_DRAFT: ${{ github.event.pull_request.draft }}
           EVENT_PATH: ${{ github.event_path }}
         run: |
@@ -44,6 +46,10 @@ jobs:
           fi
           if [ "$HEAD_REPO" != "$BASE_REPO" ]; then
             echo "External fork PR; auto-merge disabled."
+            exit 0
+          fi
+          if [ "$PR_AUTHOR" != "10-01" ]; then
+            echo "Untrusted PR author; auto-merge disabled."
             exit 0
           fi
           if ! printf '%s\n%s\n' "$PR_TITLE" "$HEAD_REF" | grep -Eq 'ROL-[0-9]+'; then

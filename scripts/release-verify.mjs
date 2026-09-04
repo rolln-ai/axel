@@ -5,8 +5,9 @@
 // Runs the real per-workspace suite (typecheck / test / build), the root
 // `biome check`, `pnpm audit`, the in-process e2e golden path, and (optionally)
 // the deployed-env smoke checks. Captures every error verbatim and writes a
-// per-version ledger under releases/<version>.json plus a cross-version
-// releases/index.json and releases/CHANGELOG.md.
+// per-version ledger under artifacts/release-ledger/<version>.json plus a
+// cross-version index and generated changelog. The ledger is local evidence,
+// not the public project changelog.
 //
 // Why per-workspace via `pnpm --filter` instead of `turbo run`: turbo.json gives
 // test/typecheck/lint empty `outputs`, so turbo caches their exit status and
@@ -20,7 +21,7 @@
 // Usage:
 //   node scripts/release-verify.mjs [--version x.y.z | --bump patch|minor|major]
 //        [--skip-build] [--no-audit] [--smoke] [--smoke-required]
-//        [--json-only] [--dry-run] [--out releases] [--notes "..."]
+//        [--json-only] [--dry-run] [--out <dir>] [--notes "..."]
 //   node scripts/release-verify.mjs --merge-ai <ai-audit.json> [--version x.y.z]
 //
 // Exit codes: 0 green · 1 red (ledger still written) · 2 usage/precondition
@@ -35,7 +36,7 @@ import {
   readdirSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 
@@ -73,7 +74,7 @@ try {
 
 if (values.help) {
   process.stdout.write(
-    "release-verify.mjs — run the Axel release suite and write releases/<version>.json\n" +
+    "release-verify.mjs: run the Axel release suite and write a local verification ledger\n" +
       "  --version x.y.z         verify this version (strips a leading v)\n" +
       "  --bump patch|minor|major  bump VERSION, then verify the new value\n" +
       "  --skip-build            skip app builds (libraries still build for ^build)\n" +
@@ -83,12 +84,12 @@ if (values.help) {
       "  --dry-run               print the check matrix and exit\n" +
       "  --merge-ai <file>       merge an AI-audit JSON under aiAudit (clobber-safe)\n" +
       "  --notes \"...\"          release note for the changelog\n" +
-      "  --out <dir>             ledger dir (default releases)\n",
+      "  --out <dir>             ledger dir (default artifacts/release-ledger)\n",
   );
   process.exit(0);
 }
 
-const OUT_DIR = join(REPO_ROOT, values.out || "releases");
+const OUT_DIR = resolve(REPO_ROOT, values.out || "artifacts/release-ledger");
 const log = values["json-only"] ? () => {} : (m) => process.stdout.write(`${m}\n`);
 
 // ---------------------------------------------------------------------------
@@ -277,19 +278,23 @@ function runWorkspaceScript(ws, kind, opts = {}) {
 }
 
 function runAudit() {
-  const check = makeCheck("root:audit", "(root)", "audit", "pnpm audit --audit-level high --json");
+  const check = makeCheck("root:audit", "(root)", "audit", "pnpm audit --audit-level low --json");
   log(`  → ${check.name}`);
-  const { res, durationMs } = exec("pnpm", ["audit", "--audit-level", "high", "--json"]);
+  const { res, durationMs } = exec("pnpm", ["audit", "--audit-level", "low", "--json"]);
   check.durationMs = durationMs;
   if (res.status === 0) return check;
   try {
     const vulns = JSON.parse(res.stdout || "{}").metadata?.vulnerabilities || {};
-    const high = (vulns.high || 0) + (vulns.critical || 0);
-    if (high > 0) {
+    const actionable =
+      (vulns.low || 0) + (vulns.moderate || 0) + (vulns.high || 0) + (vulns.critical || 0);
+    if (actionable > 0) {
       check.status = "fail";
-      check.errorExcerpt = `${high} high/critical advisories: ${JSON.stringify(vulns)}`;
+      check.errorExcerpt = `${actionable} low-or-higher advisories: ${JSON.stringify(vulns)}`;
+    } else {
+      check.status = "fail";
+      check.transient = true;
+      check.errorExcerpt = `pnpm audit exited ${res.status} without an advisory summary:\n${excerpt(res)}`;
     }
-    // non-zero exit but no high/critical (e.g. only moderate) → still a pass at this level
   } catch {
     check.status = "fail";
     check.transient = true;
@@ -466,7 +471,7 @@ function main() {
     fail(ERR_USAGE, "node_modules missing — run `pnpm install --frozen-lockfile` first");
   }
 
-  const version = resolveVersion({ allowWrite: true });
+  const version = resolveVersion({ allowWrite: !values["dry-run"] });
   const skipBuild = Boolean(values["skip-build"]);
   const workspaces = discoverWorkspaces();
 

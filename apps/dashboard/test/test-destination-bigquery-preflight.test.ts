@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   mintToken: vi.fn(async () => "ya29.test"),
+  parseServiceAccount: vi.fn((raw: string) => JSON.parse(raw)),
 }));
 
 vi.mock("../lib/session", () => ({
@@ -11,7 +12,7 @@ vi.mock("../lib/session", () => ({
 vi.mock("../lib/bigquery-auth", () => ({
   BIGQUERY_API_ROOT: "https://bigquery.googleapis.com/bigquery/v2",
   BIGQUERY_SCOPE: "https://www.googleapis.com/auth/bigquery",
-  parseServiceAccountJson: (raw: string) => JSON.parse(raw),
+  parseServiceAccountJson: mocks.parseServiceAccount,
   mintGoogleAccessToken: mocks.mintToken,
 }));
 
@@ -42,7 +43,12 @@ const TEST_PERMS = /\/tables\/events:testIamPermissions$/;
 const TABLE_GET = /\/tables\/events$/;
 
 describe("BigQuery write pre-flight (preflightPipelineDestination)", () => {
-  beforeEach(() => mocks.mintToken.mockClear());
+  beforeEach(() => {
+    mocks.mintToken.mockReset();
+    mocks.mintToken.mockResolvedValue("ya29.test");
+    mocks.parseServiceAccount.mockReset();
+    mocks.parseServiceAccount.mockImplementation((raw: string) => JSON.parse(raw));
+  });
   afterEach(() => vi.unstubAllGlobals());
 
   it("passes when the service account can write to an existing table", async () => {
@@ -94,5 +100,68 @@ describe("BigQuery write pre-flight (preflightPipelineDestination)", () => {
     expect(result.severity).toBe("fail");
     expect(blocksActivation(result)).toBe(true);
     expect(result.message).toMatch(/Data Editor/i);
+  });
+
+  it("omits provider response bodies from pre-flight errors", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string) => {
+      const url = String(input);
+      if (DATASET_GET.test(url)) {
+        return json(500, { error: "provider-private-response" });
+      }
+      throw new Error(`unexpected ${url}`);
+    }));
+
+    const result = await preflightPipelineDestination(bqForm("warehouse.events"));
+    expect(result).toMatchObject({
+      ok: false,
+      severity: "fail",
+      message: "BigQuery returned HTTP 500.",
+    });
+    expect(result.message).not.toContain("provider-private-response");
+  });
+
+  it("does not reflect service-account parser details", async () => {
+    const marker = "marker-private-key-parser-content";
+    mocks.parseServiceAccount.mockImplementationOnce(() => {
+      throw new Error(`invalid key near ${marker}`);
+    });
+
+    const result = await preflightPipelineDestination(bqForm("warehouse.events"));
+
+    expect(result).toEqual({
+      ok: false,
+      severity: "fail",
+      message: "Service account key JSON is invalid.",
+    });
+    expect(JSON.stringify(result)).not.toContain(marker);
+  });
+
+  it("does not reflect authentication exceptions", async () => {
+    const marker = "postgresql://user:marker-secret@private-db.internal/schema";
+    mocks.mintToken.mockRejectedValueOnce(new Error(marker));
+
+    const result = await preflightPipelineDestination(bqForm("warehouse.events"));
+
+    expect(result).toEqual({
+      ok: false,
+      severity: "fail",
+      message: "Could not authenticate with BigQuery. Check the service account key.",
+    });
+    expect(JSON.stringify(result)).not.toContain(marker);
+    expect(JSON.stringify(result)).not.toContain("private-db.internal");
+  });
+
+  it("does not reflect project, dataset, or table identifiers in provider failures", async () => {
+    const form = bqForm("marker_dataset.marker_table");
+    form.set("dest_field_project_id", "marker-project");
+    vi.stubGlobal("fetch", vi.fn(async () => json(403, { error: "accessDenied" })));
+
+    const result = await preflightPipelineDestination(form);
+    const serialized = JSON.stringify(result);
+
+    expect(result.severity).toBe("fail");
+    expect(serialized).not.toContain("marker-project");
+    expect(serialized).not.toContain("marker_dataset");
+    expect(serialized).not.toContain("marker_table");
   });
 });

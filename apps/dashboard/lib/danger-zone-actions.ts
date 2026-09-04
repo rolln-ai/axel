@@ -6,7 +6,10 @@ import { redirect } from "next/navigation";
 import { withTransaction } from "./db";
 import { bustWorkspaceTags } from "./repositories";
 import { setActiveWorkspaceId } from "./session";
-import { requireEdgeSourceCacheInvalidations } from "./edge-invalidation";
+import {
+  requireEdgeSourceAuthoritySyncs,
+  requireEdgeSourceFences,
+} from "./edge-invalidation";
 import { withWorkspaceMutation } from "./with-mutation";
 import { flushAllDestinationData, flushDestinationData, wipeWorkspaceData } from "./data-reset";
 import { formValue } from "./form";
@@ -51,8 +54,8 @@ export async function wipeWorkspaceSystemData(_state: ActionState, formData: For
       return {
         notice: `Workspace event data wipe pass completed. Advanced ClickHouse cleanup for: ${result.clickhouseTables.join(", ") || "none"}. Removed ${result.postgresRows} operational row${result.postgresRows === 1 ? "" : "s"}.${r2Text}${limitText}`,
       };
-    } catch (err) {
-      return { error: err instanceof Error ? err.message : "Could not wipe workspace event data." };
+    } catch {
+      return { error: "Could not wipe workspace event data." };
     }
   });
 }
@@ -79,8 +82,8 @@ export async function flushDestinationTargetData(_state: ActionState, formData: 
       });
       bustWorkspaceTags(workspaceId);
       return { notice: result.detail };
-    } catch (err) {
-      return { error: err instanceof Error ? err.message : "Could not flush destination data." };
+    } catch {
+      return { error: "Could not flush destination data." };
     }
   });
 }
@@ -141,8 +144,11 @@ export async function wipeAllWorkspaceData(_state: ActionState, formData: FormDa
       return {
         notice: `Wipe pass completed and flushed ${targetResult.flushed.length} target destination${targetResult.flushed.length === 1 ? "" : "s"}.${pauseText}${r2Text}${pendingText}${failedText}`,
       };
-    } catch (err) {
-      return { error: err instanceof Error ? err.message : "Could not wipe all data." };
+    } catch (error) {
+      if (error instanceof Error && error.message === "workspace_not_active") {
+        return { error: "workspace_not_active" };
+      }
+      return { error: "Could not wipe all data." };
     }
   });
 }
@@ -187,7 +193,7 @@ export async function deleteCurrentWorkspace(_state: ActionState, formData: Form
     // Running that inline hung the UI for minutes and could exceed the 300s
     // function limit, leaving a half-wiped shell. See lib/workspace-teardown.ts.
     try {
-      const sourceIds = await withTransaction(async (client) => {
+      const sourceFences = await withTransaction(async (client) => {
         // Lock + re-verify under the lock so concurrent deletes / double-clicks /
         // server-action retries serialize instead of double-scheduling.
         const wsRow = await client.query<{ name: string; status: string }>(
@@ -201,7 +207,7 @@ export async function deleteCurrentWorkspace(_state: ActionState, formData: Form
             "SELECT id FROM sources WHERE workspace_id = $1",
             [workspaceId],
           );
-          return sources.rows.map((source) => source.id);
+          return requireEdgeSourceFences(sources.rows.map((source) => source.id));
         }
         if (row.name !== typedName) throw new Error("name_mismatch");
 
@@ -210,7 +216,7 @@ export async function deleteCurrentWorkspace(_state: ActionState, formData: Form
           [workspaceId],
         );
         const ids = sources.rows.map((source) => source.id);
-        await requireEdgeSourceCacheInvalidations(ids);
+        const fences = await requireEdgeSourceFences(ids);
 
         // Audit row written while workspace_id is still a live FK target; the
         // eventual hard DELETE in teardown SET NULLs it but the row survives.
@@ -234,19 +240,17 @@ export async function deleteCurrentWorkspace(_state: ActionState, formData: Form
             WHERE workspace_id = $1 AND status <> 'disabled'`,
           [workspaceId],
         );
-        return ids;
+        return fences;
       });
 
-      // Close the narrow race where an ingest miss repopulated an old active
-      // row between the pre-delete and the transaction commit.
-      await requireEdgeSourceCacheInvalidations(sourceIds);
+      await requireEdgeSourceAuthoritySyncs(sourceFences, workspaceId);
       bustWorkspaceTags(workspaceId);
     } catch (err) {
       if (err instanceof Error && err.message === "name_mismatch") {
         return { error: "Typed name does not match the workspace name." };
       }
-      console.error("[deleteCurrentWorkspace] failed to schedule teardown:", err);
-      return { error: err instanceof Error ? err.message : "Could not delete the workspace." };
+      console.error("[deleteCurrentWorkspace] failed to schedule teardown");
+      return { error: "Could not delete the workspace." };
     }
 
     // Move the user somewhere valid: another ACTIVE workspace they belong to, or
@@ -279,7 +283,7 @@ async function pauseWorkspaceSources(workspaceId: string): Promise<number> {
       [workspaceId],
     );
     const ids = sources.rows.map((source) => source.id);
-    await requireEdgeSourceCacheInvalidations(ids);
+    const fences = await requireEdgeSourceFences(ids);
     const updated = await client.query(
       `UPDATE sources
           SET status = 'disabled', updated_at = now()
@@ -287,8 +291,8 @@ async function pauseWorkspaceSources(workspaceId: string): Promise<number> {
         RETURNING id`,
       [workspaceId],
     );
-    return { sourceIds: ids, pausedCount: updated.rowCount ?? 0 };
+    return { fences, pausedCount: updated.rowCount ?? 0 };
   });
-  await requireEdgeSourceCacheInvalidations(result.sourceIds);
+  await requireEdgeSourceAuthoritySyncs(result.fences, workspaceId);
   return result.pausedCount;
 }

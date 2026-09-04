@@ -6,7 +6,7 @@ import { requestIpFromHeaders } from "./request-ip";
 
 /**
  * ROL-204 — rate limits for the public /api/v1 bearer-auth path. Postgres-backed
- * (fail-open) so a stolen/guessed token isn't unthrottled.
+ * and fail-closed so a stolen or guessed token is never unthrottled.
  *   - per-IP counts only FAILED auths → blunts credential-stuffing / token
  *     brute-force without touching legitimate valid-token traffic.
  *   - per-key caps throughput of a valid token → bounds a stolen key's blast
@@ -15,6 +15,7 @@ import { requestIpFromHeaders } from "./request-ip";
 const API_RL_WINDOW_MS = 5 * 60_000;
 const API_RL_IP_FAILED_MAX = 30;
 const API_RL_KEY_MAX = 3_000;
+export const MAX_API_JSON_BODY_BYTES = 1024 * 1024;
 
 function clientIp(req: NextRequest): string | null {
   return requestIpFromHeaders(req.headers);
@@ -91,7 +92,7 @@ export async function withApiAuth(
   if (!auth) {
     // Throttle repeated failed auths per source IP (credential-stuffing / token
     // brute-force). Only failures record a hit, so valid-token clients sharing an
-    // IP are unaffected. Fail-open if the limiter store is unavailable.
+    // IP are unaffected. Store failures fail closed for a short retry window.
     const ip = clientIp(req);
     if (ip) {
       const breach = await enforceAuthRateLimits([
@@ -129,11 +130,11 @@ export async function withApiAuth(
   }
   try {
     return await handler(auth, req);
-  } catch (err) {
+  } catch {
     // Log the real error server-side, but NEVER forward err.message to the
     // caller — raw PG/driver errors leak DB hostnames/IPs + schema/index names to
     // any bearer-key holder (audit). Return a generic, fixed message.
-    console.error("[api] handler failed:", err);
+    console.error("[api] handler failed");
     return apiError({ error: "Internal server error.", code: "internal_error" }, 500);
   }
 }
@@ -143,14 +144,55 @@ export async function withApiAuth(
  * endpoint from duplicating the try/catch.
  */
 export async function readJsonBody<T = unknown>(req: NextRequest): Promise<{ ok: true; body: T } | { ok: false; response: NextResponse }> {
+  const declaredLength = req.headers.get("content-length");
+  if (declaredLength !== null) {
+    const bytes = Number(declaredLength);
+    if (Number.isFinite(bytes) && bytes > MAX_API_JSON_BODY_BYTES) {
+      return {
+        ok: false,
+        response: apiError(
+          { error: "Request body exceeds the allowed size.", code: "request_too_large" },
+          413,
+        ),
+      };
+    }
+  }
+
   try {
-    const body = (await req.json()) as T;
+    const reader = req.body?.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    let totalBytes = 0;
+    if (reader) {
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          totalBytes += value.byteLength;
+          if (totalBytes > MAX_API_JSON_BODY_BYTES) {
+            await reader.cancel().catch(() => undefined);
+            return {
+              ok: false,
+              response: apiError(
+                { error: "Request body exceeds the allowed size.", code: "request_too_large" },
+                413,
+              ),
+            };
+          }
+          text += decoder.decode(value, { stream: true });
+        }
+        text += decoder.decode();
+      } finally {
+        reader.releaseLock();
+      }
+    }
+    const body = JSON.parse(text) as T;
     return { ok: true, body };
-  } catch (err) {
+  } catch {
     return {
       ok: false,
       response: apiError(
-        { error: `Body isn't valid JSON: ${err instanceof Error ? err.message : String(err)}`, code: "invalid_body" },
+        { error: "Body isn't valid JSON.", code: "invalid_body" },
         400,
       ),
     };

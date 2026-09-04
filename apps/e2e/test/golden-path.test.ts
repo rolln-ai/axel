@@ -104,9 +104,9 @@ describe("e2e: ingest -> router -> delivery", () => {
     });
 
     const payload = { type: "ping", index: 1, when: "2026-05-15T12:00:00Z" };
-    const req = new Request("https://ingest.test/in/src_e2e?token=tok-e2e", {
+    const req = new Request("https://ingest.test/in/src_e2e", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "x-axel-token": "tok-e2e" },
       body: JSON.stringify(payload),
     });
     const res = await worker.fetch(req, env, ctx);
@@ -216,9 +216,9 @@ describe("e2e: ingest -> router -> delivery", () => {
       src_e2e: { workspace_id: "ws_e2e", secret_token: tokenHash("tok"), status: "active" },
     });
 
-    const req = new Request("https://ingest.test/in/src_e2e?token=tok", {
+    const req = new Request("https://ingest.test/in/src_e2e", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "x-axel-token": "tok" },
       body: JSON.stringify({ type: "test" }),
     });
     const ack = (await (await worker.fetch(req, env, ctx)).json()) as { event_id: string };
@@ -275,9 +275,9 @@ describe("e2e: ingest -> router -> delivery", () => {
       src_e2e: { workspace_id: "ws_e2e", secret_token: tokenHash("tok"), status: "active" },
     });
     const ack = (await (await worker.fetch(
-      new Request("https://ingest.test/in/src_e2e?token=tok", {
+      new Request("https://ingest.test/in/src_e2e", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "x-axel-token": "tok" },
         body: JSON.stringify({ original: true }),
       }),
       env,
@@ -393,9 +393,12 @@ describe("e2e: ingest -> router -> delivery", () => {
 
     const big = new Uint8Array(2048);
     const res = await worker.fetch(
-      new Request("https://ingest.test/in/src_e2e?token=tok", {
+      new Request("https://ingest.test/in/src_e2e", {
         method: "POST",
-        headers: { "content-length": String(big.byteLength) },
+        headers: {
+          "content-length": String(big.byteLength),
+          "x-axel-token": "tok",
+        },
         body: big,
       }),
       env,
@@ -438,9 +441,12 @@ describe("e2e: ingest -> router -> delivery", () => {
       });
       const payload = { type: "ping", index: 1 };
       const res = await worker.fetch(
-        new Request("https://ingest.test/in/src_e2e?token=tok-e2e", {
+        new Request("https://ingest.test/in/src_e2e", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            "x-axel-token": "tok-e2e",
+          },
           body: JSON.stringify(payload),
         }),
         env,
@@ -466,8 +472,8 @@ describe("e2e: ingest -> router -> delivery", () => {
       expect(eventInsert!.row.workspace_id).toBe("ws_e2e");
       expect(eventInsert!.row.source_id).toBe("src_e2e");
       expect(eventInsert!.row.r2_key).toBe(queueMessage.r2_key);
-      // event-type discriminator extracted from the body `type` field at ingest.
-      expect(eventInsert!.row.event_type).toBe("ping");
+      // Custom-source body values stay out of the analytics type index.
+      expect(eventInsert!.row.event_type).toBe("");
       // CH DateTime64(3) wire format: space separator, no trailing Z.
       expect(String(eventInsert!.row.received_at)).not.toContain("T");
       expect(String(eventInsert!.row.received_at)).not.toMatch(/Z$/);

@@ -20,7 +20,7 @@ export default function AppError({
   reset: () => void;
 }) {
   useEffect(() => {
-    console.error("[dashboard]", error);
+    console.error("[dashboard] route error");
   }, [error]);
 
   return (

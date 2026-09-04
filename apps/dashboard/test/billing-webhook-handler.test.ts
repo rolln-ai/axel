@@ -76,6 +76,38 @@ function makeEvent(
 }
 
 describe("processStripeWebhook", () => {
+  it("stores no Stripe event or customer metadata in the idempotency journal", async () => {
+    const { pg, queries } = makeFakePg({ workspaceByCustomer: { cus_sensitive: "ws_a" } });
+    await processStripeWebhook(
+      makeEvent(
+        "customer.subscription.created",
+        {
+          id: "sub_sensitive",
+          customer: "cus_sensitive",
+          customer_email: "private@example.test",
+          metadata: { private_marker: "must-not-persist" },
+          status: "active",
+          current_period_start: 1716000000,
+          current_period_end: 1718592000,
+        },
+        { id: "evt_sensitive" },
+      ),
+      { pg },
+    );
+
+    const journalInsert = queries.find((query) => /INSERT INTO billing_events/.test(query.sql));
+    expect(journalInsert?.sql).toContain("'{}'::jsonb");
+    expect(journalInsert?.sql).not.toContain("$4::jsonb");
+    expect(journalInsert?.params).toEqual([
+      "evt_sensitive",
+      "customer.subscription.created",
+      "ws_a",
+    ]);
+    expect(JSON.stringify(journalInsert?.params)).not.toContain("cus_sensitive");
+    expect(JSON.stringify(journalInsert?.params)).not.toContain("private@example.test");
+    expect(JSON.stringify(journalInsert?.params)).not.toContain("must-not-persist");
+  });
+
   it("returns alreadySeen=true and skips state changes on PK conflict", async () => {
     const { pg, queries } = makeFakePg({ duplicateEventId: "evt_dup" });
     const event = makeEvent(

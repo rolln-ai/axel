@@ -453,7 +453,6 @@ The authoritative, maintained list of Sub-processors is published at the **Sub-p
 | 4 | Stripe, Inc. | Subscription billing and payment processing | Billing contact data and payment method (card data held by Stripe; rolln does not store card numbers) | United States |
 | 5 | Resend (Plus Five Five, Inc.) | Transactional email delivery (invitations, password resets, notifications) | Recipient email address and email content | United States |
 | 6 | Sentry (Functional Software, Inc.) | Application error and performance monitoring | Error diagnostics, which may incidentally include request metadata | United States |
-| 7 | PostHog (PostHog Inc.) | Product analytics for the customer dashboard (feature-usage measurement and product improvement) | Authorized User account identifiers (email, name), Workspace identifier, dashboard usage/event data, device/analytics identifier, and request metadata | United States |
 
 Where a Sub-processor effects a Restricted Transfer, rolln relies on the applicable Transfer Mechanism (Section 8) and imposes data-protection terms on the Sub-processor in accordance with Section 5.2.
 

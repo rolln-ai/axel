@@ -1,60 +1,83 @@
-# Axel Webhook Tester (Postman)
+# Axel webhook tester for Postman
 
 Two files in this directory:
 
 | File | Purpose |
-|---|---|
-| `axel-webhooks.postman_collection.json` | The collection — 21 requests across 5 folders |
-| `axel-webhooks.postman_environment.json` | Environment with placeholders for `baseUrl`, `sourceId`, `sourceToken`, `adminToken` |
+| --- | --- |
+| `axel-webhooks.postman_collection.json` | Ingest examples and negative tests grouped by purpose |
+| `axel-webhooks.postman_environment.json` | Environment with placeholders for `baseUrl`, `sourceId`, and `sourceToken` |
+
+This public collection contains no operator endpoints or infrastructure-wide
+credentials. Use a disposable source that receives only synthetic data. Do not
+reuse a production source, share or export a populated environment, or paste
+real webhook bodies into a request.
 
 ## Setup (90 seconds)
 
-1. **Sign up.** Open <https://app.axelapp.ai/signup>, create your workspace.
-2. **Create a source.** Go to <https://app.axelapp.ai/sources> → **Create source** → save the plaintext token shown ONCE (format: `axt_…`).
+1. **Sign up.** Open <https://app.axelapp.ai/signup> and create your workspace.
+2. **Create a disposable custom source.** Go to <https://app.axelapp.ai/sources> →
+   **Create source**, leave the inbound provider set to **Custom / other service**, and save the
+   plaintext token shown once. The collection sends that value only in the
+   `x-axel-token` request header.
 3. **Import both files into Postman.** File menu → Import → select both JSON files.
-4. **Select the environment.** Top-right dropdown → "Axel — production".
+4. **Select the environment.** Top-right dropdown → "Axel cloud, synthetic tests".
 5. **Edit the environment.** Click the eye icon next to the dropdown → set:
-   - `sourceId` to your new `src_…` id (visible in the dashboard URL or the source row)
+   - `sourceId` to your disposable source ID
    - `sourceToken` to the plaintext token from step 2
-6. **Hit Send on `Hello → 202`.** If you see `event_id` and `received_at` in the response, you're wired up.
+6. **Hit Send on `Hello → 202`.** A response with `event_id` and `received_at` confirms the setup.
+
+Keep the populated environment private. Rotate the disposable source token and
+delete the local value when testing is finished.
+
+Do not switch this synthetic collection to a named-provider source. Stripe,
+GitHub, and Shopify require a valid provider signature. Chargebee requires its
+configured webhook Basic Auth. Named-provider sources do not use an Axel source token.
 
 ## What's in each folder
 
 ### Hello
-The minimum viable request. Use it first to verify your env is filled in correctly.
+
+This is the smallest request in the collection. Use it first to check the
+environment values.
 
 ### Real-world payloads
-Exact-shape examples that match what these services would actually POST:
-- **Stripe** — `payment_intent.succeeded`, `customer.subscription.created` (with `stripe-signature` header)
-- **GitHub** — `push`, `pull_request.opened` (with `x-github-event`, `x-github-delivery`)
-- **Twilio** — `MessageStatusCallback` (form-urlencoded — Twilio doesn't use JSON)
-- **Slack** — `message.channels` event API
-- **Generic** — deeply-nested object
 
-Useful for sanity-checking your routes + transforms against real shapes.
+These synthetic payloads use field shapes from common webhook senders:
+
+- **Stripe:** `payment_intent.succeeded`, `customer.subscription.created` with a fake `stripe-signature` header
+- **GitHub:** `push`, `pull_request.opened` with fake event headers
+- **Twilio:** a synthetic form-encoded `MessageStatusCallback`
+- **Slack:** a synthetic `message.channels` event
+- **Generic:** a deeply nested object
+
+The values are synthetic. Use them to check route and transform shapes.
 
 ### Batch & throughput
 
-**Important model note:** Axel ingests **one event per POST**. There's no native batch endpoint that splits an array into N events. Two patterns:
+Axel ingests one event per POST. It does not split an array into separate
+events. The collection shows two patterns:
 
-1. **One event with array body** (`Single event — array of 10 records`, `Single event — top-level array`)
-   Each request sends one event whose body happens to be an array. The destination receives one document/row per webhook with the whole array inside. Right model when you control producer + consumer and want to amortize round-trip cost.
+1. **One event with an array body.** The requests named `Single event, array of
+   10 records` and `Single event, top-level array` each send one event. The
+   destination receives the whole array in one delivery.
 
-2. **N events via Postman Collection Runner** (`Run-runner sample`)
-   Postman's Runner fires this request N times. Each iteration produces a unique event. Right model for stress testing, or when each record is conceptually its own event.
+2. **Many events through Postman Collection Runner.** The `Run-runner sample`
+   request sends a distinct synthetic event on each iteration.
 
 To run the Runner sample:
+
 - Click the **▶** icon next to the collection → **Run collection**
 - Select only `Run-runner sample — fire many distinct events`
-- Set **Iterations** to whatever you want (100, 1000, …)
+- Set **Iterations** to a small value that stays within your plan limits
 - Click **Run**
 - Watch the count climb on <https://app.axelapp.ai/usage>
 
 ### Edge cases / errors
+
 Each request intentionally violates the ingest contract and asserts the expected non-2xx response:
 
 | Request | Status | Error |
-|---|---|---|
+| --- | --- | --- |
 | Missing token | 401 | `missing_token` |
 | Wrong token | 401 | `invalid_token` |
 | Unknown source | 404 | `unknown_source` |
@@ -64,29 +87,23 @@ Each request intentionally violates the ingest contract and asserts the expected
 
 If any of these stop returning the right code, something's broken on the worker.
 
-### Admin
-Operator-only endpoints. Set `adminToken` in the env first (same value as the worker's `ADMIN_TOKEN` secret). Two requests:
-
-- **Invalidate source cache** — drops the cached entry at the edge. Useful right after rotating a token in the dashboard.
-- **Push source to cache (manual)** — force-write a source into the edge cache without going through the dashboard. Note the `secret_token` field expects the SHA-256 hex of the plaintext token (`echo -n PLAINTEXT | sha256sum`).
-
 ### Replay & inspect
-Not actual requests — pointers to dashboard pages where the events you POST land:
 
-- <https://app.axelapp.ai/usage> — month-to-date count, top sources, daily volume
-- <https://app.axelapp.ai/deliveries> — failed deliveries + replay button
-- <https://app.axelapp.ai/sources> — per-source status, rate caps
+This folder has pointers to dashboard pages where the events you POST land:
 
-## Tip: see deliveries instantly
+- <https://app.axelapp.ai/usage> for month-to-date count, top sources, and daily volume
+- <https://app.axelapp.ai/deliveries> for failed deliveries and replay
+- <https://app.axelapp.ai/sources> for per-source status and rate caps
 
-If you want immediate visual feedback without setting up Postgres / Mongo / S3 destinations, create an HTTP destination pointing at <https://webhook.site> (free, gives you a public URL with a live request log) or <https://requestbin.com>. Every webhook you POST through Postman will appear there within ~1 second.
+Do not point a route at a public request-bin service. Those services can retain
+request bodies and headers. For HTTP delivery tests, use an endpoint you
+operate and send synthetic payloads only.
 
 ## Tests
 
-Each request has assertions in the **Tests** tab. Successful POSTs all check:
-  - response status === 202
-  - `event_id` is a valid UUID v7
-  - `received_at` is an ISO timestamp
-  - environment variable `lastEventId` gets set for downstream use
+Each request has assertions in the **Tests** tab. The `Hello` request checks the
+202 status, UUID-shaped `event_id`, and ISO `received_at` value. The other
+success examples check the 202 status. Negative tests check their documented
+error status and code.
 
-Run **Run collection** with all requests selected and you should see green checks for every test.
+Run **Run collection** with all requests selected. Every assertion should pass.

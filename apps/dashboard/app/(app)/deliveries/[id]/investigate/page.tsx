@@ -1,7 +1,6 @@
 import { Suspense } from "react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { unstable_cache } from "next/cache";
 import {
   ArrowLeft,
   AlertTriangle,
@@ -50,6 +49,7 @@ import {
 } from "../../../../../lib/replay-jobs";
 import { ReplayJobProgressCard } from "../../../../_components/ReplayJobProgressCard";
 import { dataTypeRepairFor, type DeadLetterRepair } from "../../../../../lib/dead-letter-repair";
+import { sanitizeConnectorDiagnosticForStorage } from "@axel/shared";
 
 export const dynamic = "force-dynamic";
 // Explain involves an LLM call + R2 fetches + ClickHouse + Postgres.
@@ -107,8 +107,12 @@ export default async function InvestigateDeadLetterPage({
       LIMIT 1`,
     [id, workspaceId],
   );
-  const dl = dlResult.rows[0];
-  if (!dl) notFound();
+  const rawDeadLetter = dlResult.rows[0];
+  if (!rawDeadLetter) notFound();
+  const dl: DeadLetterFull = {
+    ...rawDeadLetter,
+    message: sanitizeConnectorDiagnosticForStorage(rawDeadLetter.message, 500),
+  };
   const repair = dataTypeRepairFor({
     reason: dl.reason,
     message: dl.message,
@@ -541,7 +545,12 @@ async function findRelatedDeadLetters(
   ]);
 
   return {
-    rows: rowsResult.rows,
+    rows: rowsResult.rows.map((row) => ({
+      ...row,
+      message: row.message
+        ? sanitizeConnectorDiagnosticForStorage(row.message, 500)
+        : null,
+    })),
     total: Number(countResult.rows[0]?.count ?? "0"),
   };
 }
@@ -813,7 +822,8 @@ function AiPatchSkeleton({ dataContractName }: { dataContractName: string }) {
       </h2>
       <p className="mb-3 text-xs text-muted-foreground">
         Preparing a patch proposal from Data Contract{" "}
-        <span className="font-mono text-foreground">{dataContractName}</span>.
+        <span className="font-mono text-foreground">{dataContractName}</span>. OpenRouter receives
+        field paths, type markers, and DSL shape. Payload values and diagnostic text stay in Axel.
       </p>
       <div className="grid gap-2">
         <div className="h-3 w-5/6 animate-pulse rounded bg-muted" />
@@ -855,9 +865,9 @@ function NoDataContractNotice({ sourceId }: { sourceId: string }) {
         <ShieldCheck className="size-3.5" /> No active Data Contract for this source
       </h2>
       <p className="mb-3">
-        Investigations use the source's Data Contract to reason about the failure — the
-        schema, current transform, and recent samples are the model's context. There
-        isn't one for this source yet.
+        Investigations use the source's Data Contract to reason about the failure. The model sees
+        field paths, type markers, and the current transform shape, not sample values. There isn't
+        a Data Contract for this source yet.
       </p>
       <Link
         href={`/sources/${sourceId}`}
@@ -868,22 +878,6 @@ function NoDataContractNotice({ sourceId }: { sourceId: string }) {
     </section>
   );
 }
-
-// The Archive / Replay-all buttons call router.refresh() on success, which
-// re-runs this whole server tree — including the billable LLM call below.
-// The proposal's inputs (failed payload, transform, schema) are fixed for a
-// given (dead letter, contract version), so cache on exactly that key: a
-// refresh after archiving reuses the proposal instead of re-paying for a
-// fresh inference + R2 fetch. React's cache() only dedupes within one
-// request, so this needs unstable_cache; the wrapper lives here (not in
-// explainFailure itself) because drift triage reuses explainFailure with
-// genuinely fresh contexts.
-const cachedExplainFailure = unstable_cache(
-  async (_deadLetterId: string, _versionId: string, context: FailureContext) =>
-    explainFailure(context),
-  ["investigate-explain-failure"],
-  { revalidate: 60 * 60 },
-);
 
 // Server component: actually fires the LLM call. Streams in as the page
 // loads. Doing this in the request lifecycle (vs a client-fired action)
@@ -913,7 +907,11 @@ async function InvestigationBody({
   // momentarily unavailable we still render the page with whatever
   // context we have.
   const [failedPayload, samples] = await Promise.all([
-    fetchPayloadForR2Key(dl.r2_key).catch(() => null),
+    fetchPayloadForR2Key(dl.r2_key, {
+      workspaceId: dl.workspace_id,
+      eventId: dl.event_id,
+      sourceId: dl.source_id,
+    }).catch(() => null),
     sampleSourceEvents(dl.workspace_id, dl.source_id, { maxEvents: 30 }).catch(
       () => [],
     ),
@@ -944,12 +942,15 @@ async function InvestigationBody({
           ],
     response: {
       status: 0,
-      body_excerpt: dl.message ?? "",
+      body_excerpt: "",
     },
-    connector_message: dl.message ?? null,
+    connector_message: sanitizeConnectorDiagnosticForStorage(dl.message, 500),
   };
 
-  const patch = await cachedExplainFailure(dl.id, dataContractVersion.id, failureContext);
+  // Do not pass FailureContext through Next's persistent cache. Framework
+  // cache diagnostics can serialize invocation arguments, and this context
+  // includes the raw failed payload before the AI structure-only projection.
+  const patch = await explainFailure(failureContext);
 
   // Compute a preview using the EXISTING fixtures from the version
   // (if any). If there are none, the patch-gate will block on approval
@@ -978,6 +979,11 @@ async function InvestigationBody({
               {patch.ms !== null && patch.ms !== undefined ? ` (${patch.ms}ms)` : ""}
             </>
           )}
+        </p>
+        <p className="mb-2 text-xs text-muted-foreground">
+          OpenRouter received field paths, type markers, operational status, and DSL shape. Axel
+          withheld payload values, connector and response text, destination names, and route
+          filter/transform values.
         </p>
         <p className="text-sm text-foreground">{patch.likely_cause}</p>
         {patch.rationale ? (

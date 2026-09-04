@@ -129,7 +129,12 @@ describe("processErasureRequest", () => {
       ...executed(false),
       storeResults: [
         { store: "r2:axel-events-raw", status: "deleted", count: 4 },
-        { store: "clickhouse:route_evaluations", status: "failed", count: 0, detail: "Code: 47" },
+        {
+          store: "clickhouse:route_evaluations",
+          status: "failed",
+          count: 0,
+          detail: "private-db.internal marker-secret raw provider failure",
+        },
       ],
     };
     const res = await processErasureRequest("ws_1", [{ kind: "email", value: "a@b.com" }], "usr_1", {}, {
@@ -144,6 +149,10 @@ describe("processErasureRequest", () => {
     expect(terminal?.params[1]).toBe("failed");
     // Audit preserved: store_results JSON + manifest hash are NOT null.
     expect(String(terminal?.params[2])).toMatch(/route_evaluations/);
+    expect(String(terminal?.params[2])).toContain("store_operation_failed");
+    expect(String(terminal?.params[2])).not.toContain("marker-secret");
+    expect(String(terminal?.params[2])).not.toContain("private-db.internal");
+    expect(JSON.stringify(res.storeResults)).not.toContain("marker-secret");
     expect(terminal?.params[3]).toMatch(/^[0-9a-f]{64}$/);
     expect(String(terminal?.params[4])).toMatch(/incomplete_erasure/);
   });
@@ -158,7 +167,32 @@ describe("processErasureRequest", () => {
     });
 
     expect(res.state).toBe("failed");
-    expect(res.error).toBe("index_unavailable");
+    expect(res.error).toBe("erasure_find_failed");
+    expect(JSON.stringify(calls)).not.toContain("index_unavailable");
     expect(calls.some((c) => /state = 'failed'/.test(c.sql))).toBe(true);
+  });
+
+  it("does not persist or return executor exception text", async () => {
+    const { query, calls } = capturingQuery();
+    const marker = "DELETE failed at private-db.internal with marker-secret";
+    const res = await processErasureRequest(
+      "ws_1",
+      [{ kind: "email", value: "a@b.com" }],
+      "usr_1",
+      {},
+      {
+        query,
+        find: (async () => foundResult(1)) as never,
+        execute: (async () => {
+          throw new Error(marker);
+        }) as never,
+        newId: () => "ers_7",
+      },
+    );
+
+    expect(res.state).toBe("failed");
+    expect(res.error).toBe("erasure_execute_failed");
+    expect(JSON.stringify(res)).not.toContain(marker);
+    expect(JSON.stringify(calls)).not.toContain(marker);
   });
 });

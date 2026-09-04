@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { sanitizeConnectorDiagnosticForStorage } from "@axel/shared";
 import { db } from "../db";
 import { enqueueReplays } from "../replay-enqueue";
 import { requireActiveWorkspace, replayBillingGateError, requireWritableRole } from "../auth-guards";
@@ -108,11 +109,9 @@ export async function understandSourceImpl(
   let samples: SampledEvent[];
   try {
     samples = await sampler(workspaceId, sourceId);
-  } catch (err) {
+  } catch {
     return {
-      error: `Couldn't sample events: ${
-        err instanceof Error ? err.message : "unknown error"
-      }`,
+      error: "Couldn't sample events. Check the source storage connection and try again.",
     };
   }
   if (samples.length === 0) {
@@ -125,9 +124,9 @@ export async function understandSourceImpl(
   let inferred: Awaited<ReturnType<typeof inferDataContract>>;
   try {
     inferred = await inferer(samples);
-  } catch (err) {
+  } catch {
     return {
-      error: `Inference failed: ${err instanceof Error ? err.message : "unknown error"}`,
+      error: "Could not infer a Data Contract from the sampled events. Try again.",
     };
   }
 
@@ -150,14 +149,13 @@ export async function understandSourceImpl(
     });
     versionId = version.id;
   } catch (err) {
-    const message = err instanceof Error ? err.message : "unknown error";
-    if (message.includes("data_contracts_workspace_lower_name_idx")) {
+    if (isDuplicateDataContractNameError(err)) {
       return {
         error:
-          "An Data Contract with this name already exists in this workspace. Pick a different name.",
+          "A Data Contract with this name already exists in this workspace. Pick a different name.",
       };
     }
-    return { error: `Could not create the Data Contract: ${message}` };
+    return { error: "Could not create the Data Contract. Try again." };
   }
 
   return {
@@ -319,8 +317,8 @@ export async function setDataContractStatusImpl(
   const statusUpdater = deps.statusUpdater ?? updateDataContractStatus;
   try {
     await statusUpdater(dataContractId, workspaceId, status);
-  } catch (err) {
-    console.error("setDataContractStatus failed", err);
+  } catch {
+    console.error("setDataContractStatus failed");
     return { error: "Could not change the Data Contract status. Try again." };
   }
   return { notice: `Status set to ${status}.` };
@@ -470,10 +468,13 @@ export async function approvePatchImpl(
       };
     }
     if (err instanceof InvalidApprovalReplayTargetsError) {
-      return { error: err.message };
+      return {
+        error:
+          "One or more failed deliveries are unavailable or do not belong to this Data Contract. Refresh and try again.",
+      };
     }
     return {
-      error: `Approval failed: ${err instanceof Error ? err.message : String(err)}`,
+      error: "Approval failed. No changes were applied. Try again.",
     };
   }
 }
@@ -615,7 +616,11 @@ export async function quickFixWithAiAction(
   }
 
   const [failedPayload, samples] = await Promise.all([
-    fetchPayloadForR2Key(seed.r2_key).catch(() => null),
+    fetchPayloadForR2Key(seed.r2_key, {
+      workspaceId,
+      eventId: seed.event_id,
+      sourceId: seed.source_id,
+    }).catch(() => null),
     sampleSourceEvents(workspaceId, seed.source_id, { maxEvents: 30 }).catch(
       () => [] as SampledEvent[],
     ),
@@ -647,16 +652,18 @@ export async function quickFixWithAiAction(
         shape_hash: "quickfix",
       },
     ],
-    response: { status: 0, body_excerpt: seed.message ?? "" },
-    connector_message: seed.message ?? null,
+    response: { status: 0, body_excerpt: "" },
+    connector_message: seed.message
+      ? sanitizeConnectorDiagnosticForStorage(seed.message, 500)
+      : null,
   };
 
   let patch: Awaited<ReturnType<typeof explainFailure>>;
   try {
     patch = await explainFailure(failureContext);
-  } catch (err) {
+  } catch {
     return {
-      error: `AI service error: ${err instanceof Error ? err.message : String(err)}`,
+      error: "AI service error. Try again or use manual review.",
       fallback_href: investigateHref,
     };
   }
@@ -755,4 +762,13 @@ function parseFilterSerialized(serialized: string | null): GeneratedFilter | nul
   } catch {
     return null;
   }
+}
+
+function isDuplicateDataContractNameError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const candidate = err as { code?: unknown; constraint?: unknown };
+  return (
+    candidate.code === "23505" &&
+    candidate.constraint === "data_contracts_workspace_lower_name_idx"
+  );
 }

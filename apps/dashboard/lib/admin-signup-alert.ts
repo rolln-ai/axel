@@ -29,8 +29,13 @@ export interface SuperAdminRecipient {
 export interface AdminSignupAlertSummary {
   recipients_scanned: number;
   emails_sent: number;
-  errors: Array<{ user_id: string; message: string }>;
+  errors: Array<{ code: AdminSignupAlertErrorCode }>;
 }
+
+export type AdminSignupAlertErrorCode =
+  | "recipient_lookup_failed"
+  | "email_send_rejected"
+  | "email_send_failed";
 
 export async function listSuperAdminRecipients(
   client: Queryable = db(),
@@ -111,11 +116,8 @@ export async function sendAdminSignupAlert(
   let recipients: SuperAdminRecipient[];
   try {
     recipients = await listRecipients();
-  } catch (err) {
-    summary.errors.push({
-      user_id: "recipient_lookup",
-      message: err instanceof Error ? err.message : String(err),
-    });
+  } catch {
+    summary.errors.push({ code: "recipient_lookup_failed" });
     return summary;
   }
 
@@ -126,16 +128,10 @@ export async function sendAdminSignupAlert(
       const result = await send({ to: recipient.email, ...message });
       if (result.ok) summary.emails_sent += 1;
       else {
-        summary.errors.push({
-          user_id: recipient.user_id,
-          message: result.error ?? "unknown send failure",
-        });
+        summary.errors.push({ code: "email_send_rejected" });
       }
-    } catch (err) {
-      summary.errors.push({
-        user_id: recipient.user_id,
-        message: err instanceof Error ? err.message : String(err),
-      });
+    } catch {
+      summary.errors.push({ code: "email_send_failed" });
     }
   }
 

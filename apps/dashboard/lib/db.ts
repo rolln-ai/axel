@@ -52,10 +52,10 @@ export function db(): pg.Pool {
       connectionTimeoutMillis: IS_VERCEL ? 30_000 : 8_000,
       keepAlive: true,
     });
-    pool.on("error", (err) => {
+    pool.on("error", () => {
       // pg auto-evicts the failing client; this listener just prevents the
       // unhandled 'error' event from crashing the worker.
-      console.error("[db] idle client error:", err);
+      console.error("[db] idle client error");
     });
     // Wrap pool.query with bounded retries on transient connection errors.
     // When a Vercel function instance resumes from suspension, sockets in the

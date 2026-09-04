@@ -66,25 +66,24 @@ export async function linear(query, variables = {}) {
       if (json === null) {
         // Never a legitimate GraphQL response — an edge/proxy error page.
         retryable = true;
-        throw new Error(
-          `Linear API returned HTTP ${res.status} with a non-JSON body: ${body.trim().slice(0, 200)}`,
-        );
+        throw new Error(`Linear API returned HTTP ${res.status} with a non-JSON body`);
       }
       if (!res.ok && RETRY_STATUS.has(res.status)) {
         retryable = true;
-        throw new Error(`Linear API returned HTTP ${res.status}: ${body.trim().slice(0, 200)}`);
+        throw new Error(`Linear API returned retryable HTTP ${res.status}`);
       }
       // GraphQL-level errors are the API answering us — a real problem with
-      // the query or the data, so surface them without retrying.
-      if (json.errors) throw new Error(JSON.stringify(json.errors, null, 2));
+      // the query or data. The response can include private issue values, so
+      // keep CI output stable and inspect the provider directly when needed.
+      if (json.errors) throw new Error("Linear GraphQL request failed");
       return json.data;
     } catch (error) {
       // fetch() throws TypeError for DNS/TLS/socket failures — also transient.
       if (error instanceof TypeError) retryable = true;
-      if (!retryable || attempt >= MAX_ATTEMPTS) throw error;
-      console.warn(
-        `Linear API attempt ${attempt}/${MAX_ATTEMPTS} failed, retrying: ${error.message}`,
-      );
+      if (!retryable || attempt >= MAX_ATTEMPTS) {
+        throw new Error("Linear API request failed");
+      }
+      console.warn(`Linear API attempt ${attempt}/${MAX_ATTEMPTS} failed; retrying`);
       await sleep(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
     }
   }

@@ -1,5 +1,8 @@
 import { sentryClientFromEnv, withCronCheckIn } from "@axel/observability";
-import { runAutoDraftCronJob } from "../../../../lib/data-contracts/auto-draft";
+import {
+  publicAutoDraftCronSummary,
+  runAutoDraftCronJob,
+} from "../../../../lib/data-contracts/auto-draft";
 import { captureDashboardException } from "../../../../lib/sentry-capture";
 
 export const runtime = "nodejs";
@@ -41,30 +44,29 @@ async function handle(request: Request): Promise<Response> {
       async () => {
         const s = await runAutoDraftCronJob();
         if (s.errors.length > 0) {
-          for (const err of s.errors.slice(0, 20)) {
+          for (const error of s.errors.slice(0, 20)) {
             await captureDashboardException(
-              new Error(`data-contracts-auto-draft: ${err.message}`),
+              new Error("data_contracts_auto_draft_item_failed"),
               {
                 level: "warning",
                 tags: {
                   component: "data_contracts_auto_draft_cron",
-                  source_id: err.source_id,
-                  workspace_id: err.workspace_id,
+                  error_code: error.code,
                 },
               },
             );
           }
         }
-        return s;
+        return publicAutoDraftCronSummary(s);
       },
     );
     return Response.json({ ok: true, summary });
-  } catch (err) {
-    await captureDashboardException(err, {
+  } catch {
+    await captureDashboardException(new Error("data_contracts_auto_draft_failed"), {
       tags: { component: "data_contracts_auto_draft_cron", phase: "job" },
     });
     return Response.json(
-      { ok: false, error: err instanceof Error ? err.message : String(err) },
+      { ok: false, error: "data_contracts_auto_draft_failed" },
       { status: 500 },
     );
   }

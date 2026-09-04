@@ -1,4 +1,5 @@
 import "server-only";
+import { isTransientPlatformHttpError } from "@axel/observability";
 import {
   clusterIdFor,
   inferDeterministic,
@@ -486,9 +487,56 @@ export interface DriftCronSummary {
   total_notifications_emitted: number;
   /** Maps that were auto-extended (new_event_type fed back into a new version). */
   maps_auto_extended: number;
-  /** Per-map errors so a failure on one workspace doesn't hide the rest. */
-  errors: Array<{ data_contract_id: string; workspace_id: string; message: string }>;
+  /** Fixed error classes so a failure on one map doesn't hide the rest. */
+  errors: Array<{ code: DriftCronErrorCode }>;
   duration_ms: number;
+}
+
+export type DriftCronErrorCode =
+  | "data_contract_scan_failed"
+  | "notification_failed"
+  | "auto_extend_failed"
+  | "transient_platform_failure";
+
+export interface PublicDriftCronSummary {
+  total_maps: number;
+  scanned_maps: number;
+  maps_with_drift: number;
+  total_drift_inserted: number;
+  total_notifications_emitted: number;
+  maps_auto_extended: number;
+  error_count: number;
+  error_counts: Record<DriftCronErrorCode, number>;
+  duration_ms: number;
+}
+
+/** Project the cron result to aggregate, identifier-free response data. */
+export function publicDriftCronSummary(summary: DriftCronSummary): PublicDriftCronSummary {
+  const errorCounts: Record<DriftCronErrorCode, number> = {
+    data_contract_scan_failed: 0,
+    notification_failed: 0,
+    auto_extend_failed: 0,
+    transient_platform_failure: 0,
+  };
+  for (const error of summary.errors) errorCounts[error.code] += 1;
+  return {
+    total_maps: summary.total_maps,
+    scanned_maps: summary.scanned_maps,
+    maps_with_drift: summary.maps_with_drift,
+    total_drift_inserted: summary.total_drift_inserted,
+    total_notifications_emitted: summary.total_notifications_emitted,
+    maps_auto_extended: summary.maps_auto_extended,
+    error_count: summary.errors.length,
+    error_counts: errorCounts,
+    duration_ms: summary.duration_ms,
+  };
+}
+
+function driftCronErrorCode(
+  error: unknown,
+  fallback: Exclude<DriftCronErrorCode, "transient_platform_failure">,
+): DriftCronErrorCode {
+  return isTransientPlatformHttpError(error) ? "transient_platform_failure" : fallback;
 }
 
 export interface DriftCronDeps {
@@ -571,9 +619,7 @@ export async function runDriftCronJob(
           summary.total_notifications_emitted += emitted;
         } catch (err) {
           summary.errors.push({
-            data_contract_id: map.id,
-            workspace_id: map.workspace_id,
-            message: `notify: ${err instanceof Error ? err.message : String(err)}`,
+            code: driftCronErrorCode(err, "notification_failed"),
           });
         }
 
@@ -583,18 +629,14 @@ export async function runDriftCronJob(
             if (result.extended) summary.maps_auto_extended += 1;
           } catch (err) {
             summary.errors.push({
-              data_contract_id: map.id,
-              workspace_id: map.workspace_id,
-              message: `auto_extend: ${err instanceof Error ? err.message : String(err)}`,
+              code: driftCronErrorCode(err, "auto_extend_failed"),
             });
           }
         }
       }
     } catch (err) {
       summary.errors.push({
-        data_contract_id: map.id,
-        workspace_id: map.workspace_id,
-        message: err instanceof Error ? err.message : String(err),
+        code: driftCronErrorCode(err, "data_contract_scan_failed"),
       });
     }
   }

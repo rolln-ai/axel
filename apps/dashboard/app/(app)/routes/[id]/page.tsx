@@ -89,16 +89,16 @@ export default async function RouteDetailPage({
   const routeStatsPromise =
     canUseAnalytics && tab === "overview"
       ? resolveWithin(
-          getRouteDeliveryStats24h(workspaceId).catch((err): { error: string } => ({
-            error: err instanceof Error ? err.message : "ClickHouse unreachable.",
+          getRouteDeliveryStats24h(workspaceId).catch((): { error: string } => ({
+            error: "Route analytics are temporarily unavailable.",
           })),
           1_200,
         )
       : Promise.resolve(null);
   const recentEventsPromise =
     canUseAnalytics && tab === "events"
-      ? listRecentRouteEvents(workspaceId, id, 30).catch((err): { error: string } => ({
-          error: err instanceof Error ? err.message : "ClickHouse unreachable.",
+      ? listRecentRouteEvents(workspaceId, id, 30).catch((): { error: string } => ({
+          error: "Recent route events are temporarily unavailable.",
         }))
       : Promise.resolve(null);
 
@@ -332,11 +332,11 @@ export default async function RouteDetailPage({
       {tab === "events" ? (
       <Section title="Recent events" pill={`last ${recentEvents.length} · 24h window`}>
         {chError ? (
-          <EmptyState title="ClickHouse query failed" body={chError} />
+          <EmptyState title="Couldn't load route events" body={chError} />
         ) : !canUseAnalytics ? (
           <EmptyState
-            title="ClickHouse not configured"
-            body="Per-route event history needs CLICKHOUSE_URL on the dashboard."
+            title="Route analytics unavailable"
+            body="Per-route event history is unavailable for this deployment."
           />
         ) : recentEvents.length === 0 ? (
           <EmptyState

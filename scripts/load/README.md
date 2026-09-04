@@ -15,10 +15,11 @@ unbenchmarked.
 ## Prerequisites
 
 - Install k6: `brew install k6` (macOS) or see https://k6.io/docs/get-started/installation/
-- A source to receive the traffic. **Use a dedicated load-test source on
+- A custom source to receive the traffic. **Use a dedicated load-test source on
   staging**, not a production source — every accepted request is a real event
   that routes, delivers, and (unless the source is `transient_mode`) counts
   toward usage. Mark the source `transient_mode` so payloads aren't retained.
+  The harness sends its token only in the `x-axel-token` request header.
 
 ## Run
 
@@ -36,8 +37,7 @@ Tunables (all via `-e KEY=value`):
 | Var | Default | Meaning |
 | --- | --- | --- |
 | `INGEST_URL` | _(required)_ | Full ingest URL incl. the source path |
-| `SOURCE_TOKEN` | `""` | Source secret token |
-| `AUTH_MODE` | `bearer` | How the token is sent: `bearer` header, `query` (`?token=`), or `none` |
+| `SOURCE_TOKEN` | _(required)_ | One-time token for the dedicated custom source, sent as `x-axel-token` |
 | `RATE` | `300` | Target accepted requests/second |
 | `DURATION` | `2m` | Hold time at the target rate |
 
@@ -54,9 +54,9 @@ The run fails (non-zero exit) if any threshold is breached:
 
 ## Interpreting results
 
-- **p95/p99 latency** — ingest is just a signature check + R2 write + queue
+- **p95/p99 latency** — ingest is just an authentication check + R2 write + queue
   enqueue, so it should stay well under the thresholds. Rising latency at higher
-  `RATE` points at R2/queue or the source-cache lookup.
+  `RATE` points at R2/queue or the source-authority lookup.
 - **202 rate** — non-202s under load usually mean rate-limit/backpressure (429)
   or queue-overload 503s. That's the ingest shedding; note the `RATE` at which it
   starts.

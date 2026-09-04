@@ -469,10 +469,14 @@ export async function archiveInvestigationFailures(
 
 export async function fetchDeadLetterPayload(
   deadLetterId: string,
-): Promise<{ payload?: unknown; r2_key?: string; error?: string }> {
+): Promise<{ payload?: unknown; error?: string }> {
   const session = await requireSession();
-  const result = await db().query<{ r2_key: string }>(
-    `SELECT r2_key
+  const result = await db().query<{
+    r2_key: string;
+    event_id: string;
+    source_id: string;
+  }>(
+    `SELECT r2_key, event_id, source_id
        FROM dead_letters
       WHERE id = $1::bigint AND workspace_id = $2
       LIMIT 1`,
@@ -481,11 +485,15 @@ export async function fetchDeadLetterPayload(
   const row = result.rows[0];
   if (!row) return { error: "Failed-delivery row not found in this workspace." };
   try {
-    const payload = await fetchPayloadForR2Key(row.r2_key);
+    const payload = await fetchPayloadForR2Key(row.r2_key, {
+      workspaceId: session.activeWorkspace.workspace_id,
+      eventId: row.event_id,
+      sourceId: row.source_id,
+    });
     if (payload === null) {
       return { error: "Could not load the saved payload from storage." };
     }
-    return { payload, r2_key: row.r2_key };
+    return { payload };
   } catch {
     return { error: "Could not load the saved payload from storage." };
   }

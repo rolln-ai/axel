@@ -78,9 +78,17 @@ export async function loadDiffPair(
     current.received_at,
   );
   const [afterPayload, beforePayload] = await Promise.all([
-    fetchPayloadForR2Key(current.r2_key).catch(() => null),
+    fetchPayloadForR2Key(current.r2_key, {
+      workspaceId,
+      eventId: current.event_id,
+      sourceId,
+    }).catch(() => null),
     previousRef
-      ? fetchPayloadForR2Key(previousRef.r2_key).catch(() => null)
+      ? fetchPayloadForR2Key(previousRef.r2_key, {
+          workspaceId,
+          eventId: previousRef.event_id,
+          sourceId,
+        }).catch(() => null)
       : Promise.resolve(null),
   ]);
   return {

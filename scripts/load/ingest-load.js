@@ -24,9 +24,6 @@ const SOURCE_TOKEN = __ENV.SOURCE_TOKEN || "";
 // Target accepted requests/second. 278 rps ~= 1M/hour; default 300 (~1.08M/hr).
 const RATE = Number(__ENV.RATE || 300);
 const DURATION = __ENV.DURATION || "2m";
-// How the source token is presented. Default: Authorization: Bearer <token>.
-// Override to "query" if your source expects ?token=, or "none" for token-less.
-const AUTH_MODE = __ENV.AUTH_MODE || "bearer";
 
 const accepted = new Counter("accepted_202");
 const rejected = new Counter("rejected_non_202");
@@ -48,7 +45,7 @@ export const options = {
     },
   },
   thresholds: {
-    // Ingest is a signature check + R2 write + queue enqueue — it must stay
+    // Ingest is an authentication check + R2 write + queue enqueue. It must stay
     // fast and almost never error to sustain the millions/hour target.
     http_req_failed: ["rate<0.01"], // <1% transport-level errors
     http_req_duration: ["p(95)<500", "p(99)<1500"],
@@ -62,9 +59,11 @@ function buildUrl() {
       "INGEST_URL is required, e.g. -e INGEST_URL=https://ingest.axelapp.ai/in/<source_id>",
     );
   }
-  if (AUTH_MODE === "query" && SOURCE_TOKEN) {
-    const sep = INGEST_URL.includes("?") ? "&" : "?";
-    return `${INGEST_URL}${sep}token=${encodeURIComponent(SOURCE_TOKEN)}`;
+  if (/[?&]token(?:=|&|$)/i.test(INGEST_URL)) {
+    throw new Error("INGEST_URL must not contain a source credential");
+  }
+  if (!SOURCE_TOKEN) {
+    throw new Error("SOURCE_TOKEN is required for the dedicated custom load-test source");
   }
   return INGEST_URL;
 }
@@ -76,10 +75,10 @@ export default function () {
     occurred_at: new Date().toISOString(),
     data: { vu: __VU, iter: __ITER, filler: "x".repeat(512) },
   });
-  const headers = { "content-type": "application/json" };
-  if (AUTH_MODE === "bearer" && SOURCE_TOKEN) {
-    headers.authorization = `Bearer ${SOURCE_TOKEN}`;
-  }
+  const headers = {
+    "content-type": "application/json",
+    "x-axel-token": SOURCE_TOKEN,
+  };
   const res = http.post(buildUrl(), payload, { headers });
   check(res, { "status is 202": (r) => r.status === 202 });
   if (res.status === 202) {

@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { COMMUNITY_SUPPORT_URL, SUPPORT_HREF } from "../../lib/contact";
 import { SiteFooter, SiteHeader } from "../_components/SiteChrome";
 import { JsonLd } from "../_components/JsonLd";
 import { DashboardMock, PipelineMock, RouteMock, SourceMock } from "../_components/ProductMocks";
@@ -30,7 +31,7 @@ const sections: Array<{ kicker: string; title: string; body: string; items: Arra
     title: "Send your first event in 5 minutes",
     body: "The fastest path is: create a workspace, create a source, point your producer at the ingest URL, and watch the event arrive in the dashboard.",
     items: [
-      { label: "Quickstart — webhook → destination", href: "#quickstart", note: "5 min" },
+      { label: "Quickstart: webhook → destination", href: "#quickstart", note: "5 min" },
       { label: "Custom / generic webhook source", href: "#custom-http", note: "5 min" },
     ],
   },
@@ -83,7 +84,7 @@ export default function DocsPage() {
           </h1>
           <p className="heroLede">
             Axel docs are split into four lanes: get started, primitives, operate, and reference. Each page is
-            short by design — if a page can&apos;t be skimmed in 60 seconds, it&apos;s split into smaller ones.
+            short by design. If a page can&apos;t be skimmed in 60 seconds, it&apos;s split into smaller ones.
           </p>
           <div className="heroActions">
             <a className="btn" href="https://app.axelapp.ai/signup">
@@ -124,7 +125,7 @@ export default function DocsPage() {
         <div className="container">
           <div className="sectionHead">
             <span className="kicker">Get started</span>
-            <h2 id="quickstart">Quickstart — accept your first webhook</h2>
+            <h2 id="quickstart">Quickstart: accept your first webhook</h2>
             <p className="lede">
               CLI or curl. Accept an event, store its payload, and send it to a destination.
             </p>
@@ -410,12 +411,12 @@ axel replay evt_01HZQ8R7XK --forward-to http://localhost:3000/webhook`}</code></
           <div className="ctaInner">
             <h2>Need a question answered?</h2>
             <p>
-              Docs are intentionally concise. If something is missing or unclear, email the founders — we read every
-              message and improve the site from real questions.
+              Ask in GitHub Discussions. Axel Cloud customers can also use the configured support address for private
+              account or billing questions.
             </p>
             <div className="heroActions">
-              <a className="btn" href="mailto:founders@axelapp.ai">
-                Email the founders <span className="arrow">→</span>
+              <a className="btn" href={SUPPORT_HREF ?? COMMUNITY_SUPPORT_URL}>
+                {SUPPORT_HREF ? "Email support" : "Ask the community"} <span className="arrow">→</span>
               </a>
               <Link className="btn ghost" href="/security">
                 Security

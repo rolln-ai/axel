@@ -168,13 +168,11 @@ describe("extractEventType (shared, used by ingest index + inference)", () => {
     expect(extractEventTypeFromHeaders({ "x-event-type": emoji81 })).toBeNull();
   });
 
-  it("stamps event_type the same way the ingest + admin trigger paths do", () => {
-    // Both the public /in/<id> path (index.ts) and the admin /trigger-event
-    // path (admin.ts) derive the type from the ORIGINAL body bytes + headers
-    // and only attach `event_type` when one was found, so the queued message
-    // stays byte-identical to baseline for untyped sources. Locking the
-    // helper's contract here guards both producers against regressing into the
-    // untyped '' bucket (the admin path previously omitted the field entirely).
+  it("derives candidate types independently of producer egress policy", () => {
+    // Ingest applies a stricter boundary after this helper: only signed named
+    // providers may publish a bounded canonical type. Admin, pull, and custom
+    // events stay untyped. This locks the pure extraction primitive used by
+    // inference without implying that every caller may persist its result.
     const stamp = (bytes: Uint8Array, headers?: Record<string, string>) => {
       const eventType = extractEventTypeFromBody(bytes, headers);
       return { is_test: true, ...(eventType ? { event_type: eventType } : {}) };
@@ -585,7 +583,7 @@ describe("sampleSourceEvents", () => {
 
   it("does NOT apply a per-day cap by default, so high-volume older days keep their rare types", async () => {
     // Synthetic high-volume regression: a newsletter source with 500,000
-    // events across 11 days showed a Data Contract with only 2 event types.
+    // events across 10 days showed a Data Contract with only 2 event types.
     // The old default decay budget (perDayBudgetToday=50, halving) trimmed
     // the hash-distributed candidate pool to ~100 and gave the BIGGEST day
     // (5+ days back, half of all traffic) a budget of 2 — dropping the rare
@@ -677,8 +675,8 @@ describe("sampleSourceEvents", () => {
   it("throws SamplerPayloadFetchError when creds are absent and every R2 fetch returns null", async () => {
     // Prod regression: when CLOUDFLARE_R2_API_TOKEN was empty,
     // fetchPayloadForR2Key fell back to GENERIC_SAMPLE for every event,
-    // producing a fake `payment_intent.succeeded` cluster on a newsletter provider
-    // source with 800,000 real events. After the fix, null returns mean
+    // producing a fake `payment_intent.succeeded` cluster on a synthetic
+    // newsletter source with 800,000 events. After the fix, null returns mean
     // "couldn't read R2" and — WHEN CREDS ARE MISSING — the sampler must
     // escalate so refresh.ts can show "fix your R2 creds" instead of "no
     // events yet".
@@ -742,7 +740,7 @@ describe("sampleSourceEvents", () => {
     expect(out.map((e) => e.event_id)).toEqual(["ok1", "ok2"]);
   });
 
-  it("parses headers_json into the SampledEvent.headers field", async () => {
+  it("does not expose historical headers_json through sampled events", async () => {
     const rows = [
       row({
         event_id: "e1",
@@ -754,10 +752,7 @@ describe("sampleSourceEvents", () => {
       clickhouseClient: ch(rows),
       fetchPayload: async () => ({ ok: true }),
     });
-    expect(out[0]!.headers).toEqual({
-      "content-type": "application/json",
-      "x-foo": "bar",
-    });
+    expect(out[0]!.headers).toEqual({});
   });
 
   it("survives malformed headers_json", async () => {
@@ -796,8 +791,8 @@ describe("sampleSourceEvents", () => {
     expect(sql).toMatch(/toString\(received_at\)\s+AS\s+received_at_text\b/);
   });
 
-  // Synthetic skew regression: a payment source with
-  // 20 event types but 95% `payment_intent.succeeded` was sampled into
+  // Synthetic skew regression: a payment source with 20 event types and
+  // 95% `payment_intent.succeeded` was sampled into
   // a Data Contract with just 1 cluster, because the previous newest-first
   // candidate pull was saturated with the dominant shape and never saw
   // the long tail. Two protections now keep diversity:

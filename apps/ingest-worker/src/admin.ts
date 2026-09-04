@@ -1,14 +1,21 @@
-import { extractEventTypeFromBody, QUEUE_SPILL_KEY_PREFIX, redactJsonPayload } from "@axel/shared";
+import { QUEUE_SPILL_KEY_PREFIX, redactJsonPayload } from "@axel/shared";
 import type { QueueMessage, Source, WorkspacePlanState } from "@axel/shared";
 import type { PlanCache } from "./plan-cache.js";
 import type { SourceCache } from "./source-cache.js";
+import {
+  isSource,
+  type SourceAuthorityAdminClient,
+  type SourceAuthorityResolution,
+} from "./source-authority.js";
 
 /**
  * Admin endpoint surface for the ingest worker.
  *
  * Routes:
- *   POST /admin/source-cache/invalidate   — drop an entry by source_id
- *   POST /admin/source-cache/put          — write a fresh source config
+ *   POST /admin/source-authority/fence  — block authorization before mutation
+ *   POST /admin/source-authority/sync   — publish committed config and unblock
+ *   POST /admin/source-cache/invalidate   — refresh committed config (rolling-upgrade compatibility)
+ *   POST /admin/source-cache/put          — bootstrap fresh authority state
  *   POST /admin/workspace-payloads/delete-batch — delete one native R2 page
  *   POST /admin/trigger-event             — synthesize a webhook event for a
  *                                            source as if it had arrived via
@@ -18,8 +25,8 @@ import type { SourceCache } from "./source-cache.js";
  *                                            dashboard's "send test event").
  *
  * The dashboard uses `put` as a best-effort creation warm-up. Existing-source
- * security changes use required invalidation and repopulate through the
- * authenticated control-plane lookup.
+ * mutations use the required fence and sync pair. The old route names remain
+ * during the rolling upgrade, but source config is not written to KV.
  *
  * Auth: a single shared admin token (env `ADMIN_TOKEN`) compared in
  * constant time. This is a service-to-service interface, not a customer
@@ -29,6 +36,7 @@ import type { SourceCache } from "./source-cache.js";
 
 export interface AdminContext {
   cache: SourceCache | null;
+  authority?: SourceAuthorityAdminClient | null;
   adminToken: string | undefined;
 }
 
@@ -39,39 +47,6 @@ export interface InvalidatePayload {
 export interface PutPayload {
   source_id?: unknown;
   source?: unknown;
-  /** Optional shorter TTL in seconds; capped at 300 (5 min). */
-  ttl_seconds?: unknown;
-}
-
-function isSource(value: unknown): value is Source {
-  if (!value || typeof value !== "object") return false;
-  const v = value as Record<string, unknown>;
-  // AXE-23 — provider/signing_secret are optional but if present must
-  // match the supported set so the worker never tries to dispatch an
-  // unknown provider verifier.
-  const providerOk =
-    v.provider === undefined
-    || v.provider === "custom"
-    || v.provider === "stripe"
-    || v.provider === "github"
-    || v.provider === "shopify"
-    || v.provider === "chargebee";
-  const signingSecretOk =
-    (v.signing_secret === undefined || typeof v.signing_secret === "string")
-    && (v.signing_secret_previous === undefined || typeof v.signing_secret_previous === "string");
-  const redactPathsOk =
-    v.redact_paths === undefined
-    || (Array.isArray(v.redact_paths) && v.redact_paths.every((p) => typeof p === "string"));
-  return (
-    typeof v.source_id === "string"
-    && typeof v.workspace_id === "string"
-    && typeof v.name === "string"
-    && typeof v.secret_token === "string"
-    && (v.status === "active" || v.status === "disabled")
-    && providerOk
-    && signingSecretOk
-    && redactPathsOk
-  );
 }
 
 export async function handleSourceCachePut(
@@ -80,7 +55,6 @@ export async function handleSourceCachePut(
 ): Promise<Response> {
   const authError = checkAdminAuth(request, ctx);
   if (authError) return authError;
-  if (!ctx.cache) return new Response(null, { status: 204 });
 
   let body: PutPayload;
   try {
@@ -97,13 +71,92 @@ export async function handleSourceCachePut(
     return adminJson({ error: "source_id_mismatch" }, 400);
   }
 
-  // Keep positive entries short-lived so a missed invalidation cannot preserve
-  // stale credentials or privacy policy indefinitely. Expired entries safely
-  // repopulate through the authenticated control-plane lookup.
-  const ttl = typeof body.ttl_seconds === "number" && body.ttl_seconds > 0
-    ? Math.min(300, Math.floor(body.ttl_seconds))
-    : 300;
-  await ctx.cache.put(sourceId, { kind: "hit", source: body.source }, ttl);
+  // Never persist secret-bearing source config in KV. A bound authority stores
+  // only a config digest; without it, ingest resolves through the authenticated
+  // origin on every request.
+  try {
+    await ctx.authority?.bootstrap(sourceId, body.source);
+  } catch {
+    return adminJson({ error: "source_authority_bootstrap_failed" }, 503);
+  }
+  return new Response(null, { status: 204 });
+}
+
+export interface SourceAuthorityFencePayload {
+  source_id?: unknown;
+  fence_token?: unknown;
+}
+
+export interface SourceAuthoritySyncPayload extends SourceAuthorityFencePayload {
+  source?: unknown;
+}
+
+function parseFencePayload(body: SourceAuthorityFencePayload): {
+  sourceId: string;
+  fenceToken: string;
+} | null {
+  const sourceId = typeof body.source_id === "string" ? body.source_id.trim() : "";
+  const fenceToken = typeof body.fence_token === "string" ? body.fence_token.trim() : "";
+  if (!sourceId || !/^[A-Za-z0-9_-]{16,128}$/.test(fenceToken)) return null;
+  return { sourceId, fenceToken };
+}
+
+export async function handleSourceAuthorityFence(
+  request: Request,
+  ctx: AdminContext,
+): Promise<Response> {
+  const authError = checkAdminAuth(request, ctx);
+  if (authError) return authError;
+
+  let body: SourceAuthorityFencePayload;
+  try {
+    body = (await request.json()) as SourceAuthorityFencePayload;
+  } catch {
+    return adminJson({ error: "invalid_json" }, 400);
+  }
+  const parsed = parseFencePayload(body);
+  if (!parsed) return adminJson({ error: "invalid_fence_payload" }, 400);
+
+  try {
+    await ctx.authority?.fence(parsed.sourceId, parsed.fenceToken);
+    // KV is not an authorization source after this release. Delete it anyway so
+    // a rollback cannot revive the pre-mutation credential.
+    await ctx.cache?.invalidate(parsed.sourceId);
+  } catch {
+    return adminJson({ error: "source_authority_fence_failed" }, 503);
+  }
+  return new Response(null, { status: 204 });
+}
+
+export async function handleSourceAuthoritySync(
+  request: Request,
+  ctx: AdminContext,
+): Promise<Response> {
+  const authError = checkAdminAuth(request, ctx);
+  if (authError) return authError;
+
+  let body: SourceAuthoritySyncPayload;
+  try {
+    body = (await request.json()) as SourceAuthoritySyncPayload;
+  } catch {
+    return adminJson({ error: "invalid_json" }, 400);
+  }
+  const parsed = parseFencePayload(body);
+  if (!parsed) return adminJson({ error: "invalid_fence_payload" }, 400);
+  if (body.source !== null && !isSource(body.source)) {
+    return adminJson({ error: "invalid_source_shape" }, 400);
+  }
+  if (body.source !== null && body.source.source_id !== parsed.sourceId) {
+    return adminJson({ error: "source_id_mismatch" }, 400);
+  }
+
+  try {
+    await ctx.authority?.sync(parsed.sourceId, parsed.fenceToken, body.source);
+  } catch {
+    // No fallback or automatic un-fence. The source stays blocked until a
+    // later authenticated reconciliation publishes committed state.
+    return adminJson({ error: "source_authority_sync_failed" }, 503);
+  }
   return new Response(null, { status: 204 });
 }
 
@@ -168,7 +221,6 @@ export async function handleSourceCacheInvalidate(
 ): Promise<Response> {
   const authError = checkAdminAuth(request, ctx);
   if (authError) return authError;
-  if (!ctx.cache) return new Response(null, { status: 204 });
 
   let body: InvalidatePayload;
   try {
@@ -183,11 +235,16 @@ export async function handleSourceCacheInvalidate(
   }
 
   try {
-    await ctx.cache.invalidate(sourceId);
+    // Old dashboards call this only after committing the database mutation.
+    // The authority first enters a fail-closed refresh state, then loads the
+    // committed source directly from the authenticated origin. A failed load
+    // remains self-repairing and fail-closed on subsequent ingest resolves.
+    await ctx.authority?.invalidate(sourceId);
+    // KV is not an authorization source, but delete any historical positive so
+    // a rollback cannot revive the pre-mutation credential.
+    await ctx.cache?.invalidate(sourceId);
   } catch {
-    // A 204 must mean the revocation really reached the cache. Returning 503
-    // lets required dashboard invalidations abort the control-plane mutation.
-    return adminJson({ error: "cache_invalidation_failed" }, 503);
+    return adminJson({ error: "source_authority_fence_failed" }, 503);
   }
   return new Response(null, { status: 204 });
 }
@@ -206,7 +263,7 @@ export interface TriggerEventPayload {
   source_id?: unknown;
   /** Inline JSON body — serialised to bytes server-side. */
   body?: unknown;
-  /** Optional headers to capture alongside the event. */
+  /** Optional request-local headers used only for erasure-subject derivation. */
   headers?: Record<string, string>;
   content_type?: unknown;
   /** Marker the caller can populate (e.g. "cli" or "dashboard"). */
@@ -215,10 +272,14 @@ export interface TriggerEventPayload {
 
 export interface TriggerEventDeps {
   /**
-   * Uses the same cache plus authenticated control-plane fallback as public
-   * ingest. The self-host profile intentionally has no SOURCE_CACHE binding.
+   * Uses the same source authority or authenticated direct-origin fallback as
+   * public ingest. The self-host profile has no authority binding.
    */
-  lookupSource: (sourceId: string) => Promise<Source | null>;
+  beginSourceAuthorization: (sourceId: string) => Promise<SourceAuthorityResolution>;
+  confirmSourceAuthorization: (
+    sourceId: string,
+    authorizationVersion: string | undefined,
+  ) => Promise<void>;
   adminToken: string | undefined;
   /** R2 bucket for raw payload storage. */
   rawPayloads: R2Bucket;
@@ -258,9 +319,8 @@ export interface TriggerEventDeps {
    * `logEventToClickhouse`; without the same insert here, triggered/seeded
    * events never get an `events` row, so they are invisible to every
    * FROM-events surface (usage analytics, the event inspector, and all the
-   * Data Contract samplers) regardless of the event_type stamp on the queue
-   * message. Best-effort + fire-and-forget: must never block or fail the 202
-   * (the underlying helper already swallows ClickHouse failures).
+   * Data Contract samplers). Best-effort + fire-and-forget: must never block
+   * or fail the 202 (the underlying helper already swallows failures).
    */
   logEvent?: (message: QueueMessage) => Promise<void>;
 }
@@ -282,12 +342,13 @@ export async function handleTriggerEvent(
   const sourceId = typeof payload.source_id === "string" ? payload.source_id.trim() : "";
   if (!sourceId) return adminJson({ error: "missing_source_id" }, 400);
 
-  // Resolve exactly as the public /in/<id> path does. In Axel Cloud this uses
-  // the edge cache first; in the no-KV self-host profile it calls the
-  // authenticated delivery-service source endpoint. Upstream failures throw a
-  // SourceLookupUnavailableError and the worker-level handler returns a
+  // Begin authorization exactly as the public /in/<id> path does. Axel Cloud
+  // consults the per-source authority. Self-host calls the authenticated
+  // delivery-service source endpoint on every request. Upstream failures throw
+  // a SourceLookupUnavailableError, and the worker-level handler returns a
   // retryable 503 without writing R2 or Queue state.
-  const source = await deps.lookupSource(sourceId);
+  const authorization = await deps.beginSourceAuthorization(sourceId);
+  const source = authorization.source;
   if (!source) return adminJson({ error: "unknown_source" }, 404);
   if (source.status !== "active") {
     return adminJson({ error: "source_disabled" }, 403);
@@ -314,6 +375,14 @@ export async function handleTriggerEvent(
   const receivedAt = new Date().toISOString();
   const r2Key = `events/${source.workspace_id}/${receivedAt.slice(0, 10)}/${eventId}`;
 
+  // The source can be fenced while the admin request is prepared. Confirm the
+  // exact authority version immediately before the first durable write, just
+  // like public ingest. A concurrent disable/delete/rotation stays fail closed.
+  await deps.confirmSourceAuthorization(
+    sourceId,
+    authorization.authorizationVersion,
+  );
+
   await deps.rawPayloads.put(r2Key, storedBody, {
     httpMetadata: { contentType },
     customMetadata: {
@@ -322,21 +391,18 @@ export async function handleTriggerEvent(
       source_id: source.source_id,
       received_at: receivedAt,
       is_test: "true",
-      actor_kind: typeof payload.actor_kind === "string" ? payload.actor_kind : "admin",
+      actor_kind:
+        payload.actor_kind === "cli" || payload.actor_kind === "dashboard"
+          ? payload.actor_kind
+          : "admin",
     },
   });
 
-  const headers: Record<string, string> = {
+  const derivedHeaders: Record<string, string> = {
     "x-axel-test": "1",
     "content-type": contentType,
     ...(payload.headers ?? {}),
   };
-  // Stamp the event type the SAME way the public /in/<id> path does (index.ts):
-  // derive it from the ORIGINAL body bytes + headers, and only include the
-  // field when one was found so the message stays byte-identical to baseline
-  // for untyped sources. Without this, triggered/test events all land in the
-  // untyped '' bucket and are invisible to Data Contract type discovery.
-  const eventType = extractEventTypeFromBody(bodyBytes, headers);
   const message: QueueMessage = {
     event_id: eventId,
     workspace_id: source.workspace_id,
@@ -346,10 +412,11 @@ export async function handleTriggerEvent(
     content_type: contentType,
     size_bytes: storedBody.byteLength,
     shard: deps.shardFor(eventId),
-    headers,
-    query: {} as Record<string, string>,
+    // Admin-supplied maps and body-derived event types are arbitrary customer
+    // input. Keep them out of Queue, ClickHouse, CLI, and dashboard surfaces.
+    headers: {},
+    query: {},
     is_test: true,
-    ...(eventType ? { event_type: eventType } : {}),
   };
   await deps.queueForShard(message.shard).send(message);
 
@@ -372,7 +439,7 @@ export async function handleTriggerEvent(
     const indexing = deps.indexSubjects({
       source,
       rawBody: bodyBytes,
-      headers,
+      headers: derivedHeaders,
       query: {},
       eventId,
       r2Key,

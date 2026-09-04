@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   autoDraftDataContract,
+  publicAutoDraftCronSummary,
   runAutoDraftCronJob,
 } from "../lib/data-contracts/auto-draft";
 import type { InferredDataContract } from "../lib/data-contracts/inference";
@@ -208,7 +209,7 @@ describe("autoDraftDataContract", () => {
       },
       notifier: async () => null,
     });
-    expect(outcome.kind).toBe("errored");
+    expect(outcome).toEqual({ kind: "errored", code: "create_failed" });
     expect(appended).toBe(false);
   });
 
@@ -353,11 +354,15 @@ describe("runAutoDraftCronJob", () => {
     expect(summary.drafted).toBe(1);
     expect(summary.skipped_no_samples).toBe(1);
     expect(summary.skipped_too_few).toBe(1);
-    expect(summary.errors).toHaveLength(1);
-    expect(summary.errors[0]).toMatchObject({
-      source_id: "src_c",
-      workspace_id: "ws_2",
-    });
+    expect(summary.errors).toEqual([{ code: "sample_failed" }]);
+    expect(JSON.stringify(summary)).not.toContain("clickhouse broke");
+    expect(JSON.stringify(summary)).not.toContain("src_c");
+    expect(JSON.stringify(summary)).not.toContain("ws_2");
+
+    const responseSummary = publicAutoDraftCronSummary(summary);
+    expect(responseSummary.error_count).toBe(1);
+    expect(responseSummary.error_counts.sample_failed).toBe(1);
+    expect(responseSummary).not.toHaveProperty("errors");
   });
 
   it("honors maxSources cap so a backlog can't run unbounded", async () => {

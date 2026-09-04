@@ -56,9 +56,9 @@ describe("ingest worker billing gate", () => {
   });
 
   function makeRequest(): Request {
-    return new Request("https://axel.app/in/src_test?token=secret-abc", {
+    return new Request("https://axel.app/in/src_test", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "x-axel-token": "secret-abc" },
       body: JSON.stringify({ hello: "world" }),
     });
   }
@@ -135,10 +135,10 @@ describe("ingest worker billing gate", () => {
       300,
     );
     (env as Env & { __PLAN_CACHE_OVERRIDE?: unknown }).__PLAN_CACHE_OVERRIDE = planCache;
-    const badTokenReq = new Request("https://axel.app/in/src_test?token=wrong", {
+    const badTokenReq = new Request("https://axel.app/in/src_test", {
       method: "POST",
       body: JSON.stringify({}),
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "x-axel-token": "wrong" },
     });
     const res = await worker.fetch(badTokenReq, env, ctx);
     expect(res.status).toBe(401);

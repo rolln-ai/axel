@@ -416,7 +416,13 @@ describe("GET /api/v1/config", () => {
           name: "prod-warehouse",
           type: "webhook",
           status: "active",
-          config: { url: "https://example.com" },
+          config: {
+            url: "https://example.com/hooks/url-private-marker?token=query-private-marker",
+            headers: {
+              "X-Custom-Context": "header-private-marker",
+              Authorization: "auth-private-marker",
+            },
+          },
           credentials_ref: null,
           rate_limit_rps: null,
           request_timeout_ms: 30_000,
@@ -447,6 +453,7 @@ describe("GET /api/v1/config", () => {
     );
     expect(res.status).toBe(200);
     const body = await res.json() as {
+      destinations: Array<{ config: Record<string, unknown> }>;
       routes: Array<{
         destination_ids: string[];
         destination_bindings: Record<string, Record<string, unknown> | null>;
@@ -462,6 +469,22 @@ describe("GET /api/v1/config", () => {
         dst_a91f02: { dataset: "analytics", table: "events" },
       },
     });
+    expect(body.destinations[0]?.config).toEqual({
+      url: "[REDACTED]",
+      headers: {
+        "X-Custom-Context": "[REDACTED]",
+        Authorization: "[REDACTED]",
+      },
+    });
+    const serialized = JSON.stringify(body.destinations);
+    for (const marker of [
+      "url-private-marker",
+      "query-private-marker",
+      "header-private-marker",
+      "auth-private-marker",
+    ]) {
+      expect(serialized).not.toContain(marker);
+    }
   });
 });
 

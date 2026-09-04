@@ -37,14 +37,24 @@ beforeEach(() => {
 });
 
 describe("captureDashboardException", () => {
-  it("captures through the official SDK with the supplied event context", async () => {
+  it("captures through the official SDK with sanitized, identity-free context", async () => {
     const error = new Error("checkout failed");
     const tags = {
       component: "billing_checkout",
       workspace_id: "ws_123",
       retryable: false,
     };
-    const extra = { stripe_request_id: "req_123" };
+    const extra = {
+      stripe_request_id: "req_customer_private",
+      destination_url: "https://customer.example/hook?token=private",
+      provider_error: "transport rejected customer@example.com at private.internal",
+      nested: {
+        customer_id: "cus_private",
+        destination_id: "dst_private",
+        event_id: "evt_private",
+        authorization: "Bearer private",
+      },
+    };
     const user = { id: "user_123", email: "owner@example.com" };
 
     await captureDashboardException(error, {
@@ -56,24 +66,49 @@ describe("captureDashboardException", () => {
 
     expect(sentryMocks.withScope).toHaveBeenCalledOnce();
     expect(sentryMocks.scope.setLevel).toHaveBeenCalledWith("warning");
-    expect(sentryMocks.scope.setTags).toHaveBeenCalledWith(tags);
-    expect(sentryMocks.scope.setExtras).toHaveBeenCalledWith(extra);
-    expect(sentryMocks.scope.setUser).toHaveBeenCalledWith(user);
+    expect(sentryMocks.scope.setTags).toHaveBeenCalledWith({
+      component: "billing_checkout",
+      workspace_id: "[REDACTED]",
+      retryable: false,
+    });
+    expect(sentryMocks.scope.setExtras).toHaveBeenCalledWith({
+      stripe_request_id: "operation_failed",
+      destination_url: "operation_failed",
+      provider_error: "operation_failed",
+      nested: {
+        customer_id: "[REDACTED]",
+        destination_id: "[REDACTED]",
+        event_id: "[REDACTED]",
+        authorization: "[REDACTED]",
+      },
+    });
+    const serializedContext = JSON.stringify([
+      sentryMocks.scope.setTags.mock.calls,
+      sentryMocks.scope.setExtras.mock.calls,
+    ]);
+    expect(serializedContext).not.toContain("req_customer_private");
+    expect(serializedContext).not.toContain("customer.example");
+    expect(serializedContext).not.toContain("customer@example.com");
+    expect(serializedContext).not.toContain("private.internal");
+    expect(serializedContext).not.toContain("cus_private");
+    expect(serializedContext).not.toContain("dst_private");
+    expect(serializedContext).not.toContain("evt_private");
+    expect(serializedContext).not.toContain("owner@example.com");
+    expect(sentryMocks.scope.setUser).not.toHaveBeenCalled();
     expect(sentryMocks.captureException).toHaveBeenCalledWith(error);
     expect(sentryMocks.flush).toHaveBeenCalledWith(2_000);
   });
 
   it("swallows SDK flush failures so reporting cannot break the caller", async () => {
-    const captureError = new Error("transport unavailable");
-    sentryMocks.flush.mockRejectedValueOnce(captureError);
+    sentryMocks.flush.mockRejectedValueOnce(
+      new Error("transport unavailable for ws_private"),
+    );
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     await expect(captureDashboardException(new Error("handled failure"))).resolves.toBeUndefined();
 
-    expect(consoleError).toHaveBeenCalledWith(
-      "[sentry] dashboard capture failed",
-      captureError,
-    );
+    expect(consoleError).toHaveBeenCalledWith("[sentry] dashboard capture failed");
+    expect(JSON.stringify(consoleError.mock.calls)).not.toContain("ws_private");
   });
 
   it("quietly skips best-effort capture when the SDK is not configured", async () => {

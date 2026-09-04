@@ -23,9 +23,8 @@ apps/*/src/*.js
 apps/*/src/*.d.ts
 apps/*/src/*.map
 
-# Local diagnostic / scratch scripts (underscore-prefixed convention).
-_*.mjs
-_*.ts
+# Keep scratch work in one explicit directory. Ad hoc source files remain
+# visible to git status and working-tree secret scans.
 _scratch/
 .vercel
 .playwright-mcp/
@@ -74,6 +73,5 @@ service-account*.json
 .env*
 
 # Open-source repo: these stay local / in the private ops repo.
-releases/*.json
 linear.config.json
 CLAUDE.local.md

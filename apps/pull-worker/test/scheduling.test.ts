@@ -93,17 +93,13 @@ describe("pull worker scheduling", () => {
     expect(aggregate).toMatchObject({
       attempted: 3,
       failures: [
-        { sourceId: "src_pre", kind: "pre_run" },
-        { sourceId: "src_failed", kind: "stream" },
+        { kind: "pre_run", error: "operation_failed" },
+        { kind: "stream", error: "operation_failed" },
       ],
     });
-    expect(aggregate?.summaries.map((summary) => ({
-      sourceId: summary.source_id,
-      status: summary.streams[0]?.status,
-    }))).toEqual([
-      { sourceId: "src_failed", status: "failed" },
-      { sourceId: "src_ok", status: "success" },
-    ]);
+    expect(JSON.stringify(aggregate)).not.toContain("src_pre");
+    expect(JSON.stringify(aggregate)).not.toContain("src_failed");
+    expect(JSON.stringify(aggregate)).not.toContain("ws_1");
     expect(failedRead).toHaveBeenCalledOnce();
     expect(successfulRead).toHaveBeenCalledOnce();
     expect(connect).toHaveBeenCalledTimes(3);
@@ -162,7 +158,7 @@ describe("pull worker scheduling", () => {
     };
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const attackerDetail =
-      'HTTP 500: payload={"email":"victim@example.com","api_key":"sk_live_response_secret"}';
+      'HTTP 500: source=src_private workspace=ws_private stream=customers customer=cus_private payload={"email":"victim@example.com","api_key":"sk_live_response_secret"}';
     const connectors = new Map([
       ["stripe", connector("stripe", vi.fn(async () => {
         throw new Error(attackerDetail);
@@ -180,19 +176,20 @@ describe("pull worker scheduling", () => {
       aggregate = error as PullBatchError;
     }
 
-    expect(aggregate?.failures[0]?.error).toContain("HTTP 500: [REDACTED]");
+    expect(aggregate?.failures[0]?.error).toBe("http_error_500");
     const terminalUpdate = clientQueries.find((call) =>
       call.sql.includes("SET status = $2")
     );
-    expect(terminalUpdate?.params[4]).toBe("HTTP 500: [REDACTED]");
-    expect(JSON.parse(String(terminalUpdate?.params[5]))).toMatchObject({
-      streams: [{ status: "failed", cursor_present: false, error: "HTTP 500: [REDACTED]" }],
-    });
+    expect(terminalUpdate?.params[4]).toBe("http_error_500");
     const allDiagnostics = JSON.stringify({
-      params: clientQueries.map((call) => call.params),
+      errorMessage: terminalUpdate?.params[4],
       failures: aggregate?.failures,
       logs: consoleError.mock.calls,
     });
+    expect(allDiagnostics).not.toContain("src_private");
+    expect(allDiagnostics).not.toContain("ws_private");
+    expect(allDiagnostics).not.toContain("customers");
+    expect(allDiagnostics).not.toContain("cus_private");
     expect(allDiagnostics).not.toContain("victim@example.com");
     expect(allDiagnostics).not.toContain("sk_live_response_secret");
   });

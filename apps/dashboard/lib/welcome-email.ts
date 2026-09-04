@@ -63,9 +63,9 @@ export interface WelcomeEmail {
 }
 
 /**
- * The ingest request a new source produces, with the ID and token left as
- * placeholders — exactly how the product prints it on the source page. Keep in
- * step with `SourceQuickView`.
+ * A custom-source ingest request with the ID and one-shot token left as
+ * placeholders. Named-provider sources use their provider authentication
+ * instead, which the onboarding UI explains after selection.
  */
 export function endpointLines(): string[] {
   return [

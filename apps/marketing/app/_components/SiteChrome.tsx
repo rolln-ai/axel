@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { CookiePreferencesButton } from "./CookiePreferencesButton";
+import { COMMUNITY_SUPPORT_URL, SUPPORT_HREF } from "../../lib/contact";
 import { Logo } from "./Logo";
 import { NewsletterSignup } from "./NewsletterSignup";
 
@@ -116,8 +116,9 @@ export function SiteFooter() {
           <Link href="/privacy">Privacy</Link>
           <Link href="/dpa">DPA</Link>
           <Link href="/legal">Legal</Link>
-          <CookiePreferencesButton />
-          <a href="mailto:founders@axelapp.ai">Contact</a>
+          <a href={SUPPORT_HREF ?? COMMUNITY_SUPPORT_URL}>
+            {SUPPORT_HREF ? "Contact" : "Discussions"}
+          </a>
         </nav>
         <span>© {new Date().getFullYear()} Axel</span>
       </div>

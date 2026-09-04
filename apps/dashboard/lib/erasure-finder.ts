@@ -48,7 +48,6 @@ interface CoverageRow {
  * request as out-of-scope-for-automated-erasure (design §3.5 / §9.4).
  */
 const OUT_OF_SCOPE_DISCLOSURE: Array<{ store: string; reason: string }> = [
-  { store: "postgres:billing_events.payload", reason: "Stripe customer PII, no event_id linkage — manual review" },
   { store: "postgres:notifications", reason: "body_md/metadata, no event_id linkage — manual review" },
   { store: "postgres:dead_letter_mutes", reason: "keyed by fingerprint, not event_id — manual review" },
   { store: "clickhouse:events_daily", reason: "uniqExact aggregate cannot be surgically retracted; non-PII counts, expires at 30-day TTL" },

@@ -3,13 +3,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const {
   auditMock,
   flushAllMock,
-  invalidateAllMock,
+  fenceAllMock,
+  syncAllMock,
   wipeMock,
   withTransactionMock,
 } = vi.hoisted(() => ({
   auditMock: vi.fn(),
   flushAllMock: vi.fn(),
-  invalidateAllMock: vi.fn(),
+  fenceAllMock: vi.fn(),
+  syncAllMock: vi.fn(),
   wipeMock: vi.fn(),
   withTransactionMock: vi.fn(),
 }));
@@ -19,7 +21,8 @@ vi.mock("../lib/db", () => ({
   withTransaction: withTransactionMock,
 }));
 vi.mock("../lib/edge-invalidation", () => ({
-  requireEdgeSourceCacheInvalidations: invalidateAllMock,
+  requireEdgeSourceFences: fenceAllMock,
+  requireEdgeSourceAuthoritySyncs: syncAllMock,
 }));
 vi.mock("../lib/repositories", () => ({
   bustWorkspaceTags: vi.fn(),
@@ -66,7 +69,10 @@ function wipeForm(): FormData {
 describe("workspace source-lock invariant", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    invalidateAllMock.mockResolvedValue(undefined);
+    fenceAllMock.mockImplementation(async (sourceIds: string[]) => (
+      sourceIds.map((sourceId) => ({ sourceId, fenceToken: `fence_${sourceId}_00000000` }))
+    ));
+    syncAllMock.mockResolvedValue(undefined);
     auditMock.mockResolvedValue(undefined);
     flushAllMock.mockResolvedValue({ attempted: 0, flushed: [], skipped: [], failed: [] });
     wipeMock.mockResolvedValue({
@@ -99,8 +105,11 @@ describe("workspace source-lock invariant", () => {
     expect(sql[0]).toMatch(/FROM workspaces[\s\S]*FOR UPDATE/i);
     expect(sql[1]).toMatch(/SELECT id FROM sources/i);
     expect(sql[2]).toMatch(/UPDATE sources/i);
-    expect(invalidateAllMock).toHaveBeenNthCalledWith(1, ["src_1", "src_2"]);
-    expect(invalidateAllMock).toHaveBeenNthCalledWith(2, ["src_1", "src_2"]);
+    expect(fenceAllMock).toHaveBeenCalledWith(["src_1", "src_2"]);
+    expect(syncAllMock).toHaveBeenCalledWith([
+      { sourceId: "src_1", fenceToken: "fence_src_1_00000000" },
+      { sourceId: "src_2", fenceToken: "fence_src_2_00000000" },
+    ], "ws_1");
   });
 
   it("does not enumerate, disable, or wipe after a locked inactive status", async () => {
@@ -113,7 +122,8 @@ describe("workspace source-lock invariant", () => {
 
     expect(result.error).toBe("workspace_not_active");
     expect(client.query).toHaveBeenCalledOnce();
-    expect(invalidateAllMock).not.toHaveBeenCalled();
+    expect(fenceAllMock).not.toHaveBeenCalled();
+    expect(syncAllMock).not.toHaveBeenCalled();
     expect(flushAllMock).not.toHaveBeenCalled();
     expect(wipeMock).not.toHaveBeenCalled();
   });

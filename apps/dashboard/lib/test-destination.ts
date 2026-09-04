@@ -129,8 +129,8 @@ export async function testDestination(formData: FormData): Promise<TestDestinati
         pgSslNoVerify: formData.get("pg_ssl_no_verify") === "true",
         mongoTlsNoVerify: formData.get("mongo_tls_no_verify") === "true",
       });
-    } catch (err) {
-      return { ok: false, severity: "fail", message: err instanceof Error ? err.message : String(err) };
+    } catch {
+      return { ok: false, severity: "fail", message: "Destination connection test failed." };
     }
     },
   );
@@ -190,8 +190,8 @@ export async function preflightPipelineDestination(
         pgSslNoVerify: formData.get("dest_field_pg_ssl_no_verify") === "true",
         mongoTlsNoVerify: formData.get("dest_field_mongo_tls_no_verify") === "true",
       });
-    } catch (err) {
-      return { ok: false, severity: "fail", message: err instanceof Error ? err.message : String(err) };
+    } catch {
+      return { ok: false, severity: "fail", message: "Destination connection test failed." };
     }
     },
   );
@@ -253,15 +253,17 @@ async function probeHttp(values: Record<string, string>): Promise<TestDestinatio
   // Vercel host's private network (e.g. 169.254.169.254 metadata).
   // Same rules as the connector-time check at delivery.
   const ssrf = validateDestinationUrl(url);
-  if (ssrf) return { ok: false, message: ssrf };
+  if (ssrf) {
+    return { ok: false, message: "Receiver URL is invalid or blocked by the outbound network policy." };
+  }
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
-    return { ok: false, message: `Receiver URL is malformed: ${url}` };
+    return { ok: false, message: "Receiver URL is malformed." };
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    return { ok: false, message: `Receiver URL must use http or https (got ${parsed.protocol}).` };
+    return { ok: false, message: "Receiver URL must use HTTP or HTTPS." };
   }
 
   const controller = new AbortController();
@@ -277,23 +279,23 @@ async function probeHttp(values: Record<string, string>): Promise<TestDestinatio
     if (parsed.protocol === "http:") {
       return {
         ok: true,
-        message: `Reachable. ${parsed.host} returned HTTP ${res.status} on HEAD. Axel will deliver via ${values.method ?? "POST"}; the receiver will see real events at ingest time. Warning: this is a plain-HTTP (not HTTPS) endpoint, so signed payloads — including the HMAC Signature header — will be sent in the clear. Use HTTPS in production.`,
+        message: `Receiver returned HTTP ${res.status} on HEAD. The configured endpoint uses plain HTTP, so signed payloads and signature headers will travel without transport encryption. Use HTTPS in production.`,
       };
     }
     return {
       ok: true,
-      message: `Reachable. ${parsed.host} returned HTTP ${res.status} on HEAD. Axel will deliver via ${values.method ?? "POST"}; the receiver will see real events at ingest time.`,
+      message: `Receiver returned HTTP ${res.status} on HEAD. Axel will use the configured delivery method for events.`,
     };
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
       return {
         ok: false,
-        message: `Connection timed out after ${PROBE_TIMEOUT_MS / 1000}s — host unreachable from Vercel egress, or firewalled.`,
+        message: `Connection timed out after ${PROBE_TIMEOUT_MS / 1000}s. Check the receiver's network and firewall settings.`,
       };
     }
     return {
       ok: false,
-      message: `Couldn't reach ${parsed.host}: ${err instanceof Error ? err.message : String(err)}`,
+      message: "Couldn't reach the receiver. Check DNS, firewall, and TLS settings.",
     };
   } finally {
     clearTimeout(timer);
@@ -315,7 +317,9 @@ async function probePostgres(
   // metadata hosts (parity with probeMongo; an authenticated user must not be
   // able to use this as a port scanner against Vercel's egress network).
   const pgSsrf = connectionHostSsrfReason(rawConnStr);
-  if (pgSsrf) return { ok: false, message: pgSsrf };
+  if (pgSsrf) {
+    return { ok: false, message: "The Postgres target is blocked by the outbound network policy." };
+  }
 
   // When the operator has ticked "connect without certificate verification",
   // probe with the exact DSN we'll persist (sslmode=no-verify) so the test's
@@ -343,12 +347,11 @@ async function probePostgres(
     if (!r.rows[0]?.oid) {
       return {
         ok: false,
-        message: `Connected, but table "${table}" doesn't exist (or this role can't see it). Create it before pointing Axel at it.`,
+        message: "Connected, but the target table does not exist or is not visible to this role.",
       };
     }
-    return { ok: true, message: `Connected to Postgres. Table "${table}" is visible to this role.` };
+    return { ok: true, message: "Connected to Postgres. The target table is visible to this role." };
   } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
     // A cert-chain verification failure is recoverable from this dialog: the DB
     // (e.g. Railway's proxy, Heroku Postgres) presents a self-signed/private-CA
     // cert. Flag it so the UI can offer the no-verify toggle instead of leaving
@@ -357,10 +360,10 @@ async function probePostgres(
       return {
         ok: false,
         certError: true,
-        message: `Postgres rejected the probe: ${detail}. This database presents a self-signed or private-CA certificate. If you trust the network path to it, enable "Connect without certificate verification" below and test again.`,
+        message: "Postgres rejected the probe because its TLS certificate could not be verified. If you trust the network path to it, enable \"Connect without certificate verification\" below and test again.",
       };
     }
-    return { ok: false, message: `Postgres rejected the probe: ${detail}` };
+    return { ok: false, message: "Postgres rejected the connection probe. Check the credentials, host, network access, and database permissions." };
   } finally {
     await pool.end().catch(() => {});
   }
@@ -375,7 +378,9 @@ async function probeMongo(
   if (!rawConnStr) return { ok: false, message: "Missing connection string." };
   if (!database) return { ok: false, message: "Missing database." };
   const mongoSsrf = connectionHostSsrfReason(rawConnStr);
-  if (mongoSsrf) return { ok: false, message: mongoSsrf };
+  if (mongoSsrf) {
+    return { ok: false, message: "The MongoDB target is blocked by the outbound network policy." };
+  }
 
   // Probe with the exact URI we'll persist when the operator ticked "connect
   // without certificate verification", so the test's TLS posture matches delivery.
@@ -389,9 +394,8 @@ async function probeMongo(
   try {
     await client.connect();
     await client.db(database).command({ ping: 1 });
-    return { ok: true, message: `Connected to MongoDB and pinged "${database}".` };
+    return { ok: true, message: "Connected to MongoDB and verified database access." };
   } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
     // Same recoverable case as Postgres: a self-signed / private-CA Mongo (e.g. a
     // self-hosted replica set) fails chain verification. Flag it so the UI can
     // offer the toggle rather than leave the operator to decode the TLS error.
@@ -399,10 +403,10 @@ async function probeMongo(
       return {
         ok: false,
         certError: true,
-        message: `MongoDB rejected the probe: ${detail}. This database presents a self-signed or private-CA certificate. If you trust the network path to it, enable "Connect without certificate verification" below and test again.`,
+        message: "MongoDB rejected the probe because its TLS certificate could not be verified. If you trust the network path to it, enable \"Connect without certificate verification\" below and test again.",
       };
     }
-    return { ok: false, message: `MongoDB rejected the probe: ${detail}` };
+    return { ok: false, message: "MongoDB rejected the connection probe. Check the credentials, host, network access, and database permissions." };
   } finally {
     await client.close().catch(() => {});
   }
@@ -441,7 +445,9 @@ async function probeDatabricksSql(values: Record<string, string>): Promise<TestD
   const token = values.access_token;
   if (!host) return { ok: false, message: "Missing workspace host." };
   const sqlSsrf = validateDestinationUrl(`https://${host}`);
-  if (sqlSsrf) return { ok: false, message: sqlSsrf };
+  if (sqlSsrf) {
+    return { ok: false, message: "The Databricks target is blocked by the outbound network policy." };
+  }
   if (!warehouseId) return { ok: false, message: "Missing SQL warehouse ID." };
   if (!token) return { ok: false, message: "Missing access token." };
 
@@ -464,24 +470,22 @@ async function probeDatabricksSql(values: Record<string, string>): Promise<TestD
       };
     }
     if (res.status === 404) {
-      return { ok: false, message: `Warehouse ${warehouseId} not found in this workspace.` };
+      return { ok: false, message: "The SQL warehouse was not found or is not visible to this token." };
     }
     if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      return { ok: false, message: `Databricks returned HTTP ${res.status}: ${body.slice(0, 200)}` };
+      await res.body?.cancel().catch(() => undefined);
+      return { ok: false, message: `Databricks returned HTTP ${res.status}.` };
     }
-    const data = (await res.json().catch(() => ({}))) as { state?: string; name?: string };
-    const state = data.state ?? "UNKNOWN";
-    const name = data.name ?? warehouseId;
+    await res.body?.cancel().catch(() => undefined);
     return {
       ok: true,
-      message: `Connected. Warehouse "${name}" state: ${state}. Auto-starts on first query if STOPPED.`,
+      message: "Connected to Databricks SQL. Credentials and warehouse access were verified.",
     };
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
-      return { ok: false, message: `Databricks workspace ${host} unreachable after ${PROBE_TIMEOUT_MS / 1000}s.` };
+      return { ok: false, message: `Databricks did not respond within ${PROBE_TIMEOUT_MS / 1000}s.` };
     }
-    return { ok: false, message: `Databricks error: ${err instanceof Error ? err.message : String(err)}` };
+    return { ok: false, message: "Databricks connection test failed. Check the workspace host, network access, and credentials." };
   } finally {
     clearTimeout(timer);
   }
@@ -500,7 +504,9 @@ async function probeDatabricksVolume(values: Record<string, string>): Promise<Te
   const token = values.access_token;
   if (!host) return { ok: false, message: "Missing workspace host." };
   const volSsrf = validateDestinationUrl(`https://${host}`);
-  if (volSsrf) return { ok: false, message: volSsrf };
+  if (volSsrf) {
+    return { ok: false, message: "The Databricks target is blocked by the outbound network policy." };
+  }
   if (!catalog || !schemaName) {
     return { ok: false, message: "Missing catalog or schema." };
   }
@@ -533,25 +539,25 @@ async function probeDatabricksVolume(values: Record<string, string>): Promise<Te
       return {
         ok: false,
         message: fullName
-          ? `Volume "${fullName}" doesn't exist (or the token can't see it). Create it in the Catalog Explorer first.`
-          : `Catalog/schema "${catalog}.${schemaName}" not found (or the token can't see it).`,
+          ? "The volume does not exist or is not visible to this token."
+          : "The catalog or schema does not exist or is not visible to this token.",
       };
     }
     if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      return { ok: false, message: `Databricks returned HTTP ${res.status}: ${body.slice(0, 200)}` };
+      await res.body?.cancel().catch(() => undefined);
+      return { ok: false, message: `Databricks returned HTTP ${res.status}.` };
     }
     return {
       ok: true,
       message: fullName
-        ? `Connected. Volume "${fullName}" is visible to the token.`
-        : `Connected to ${catalog}.${schemaName}. Token is valid; the per-route volume is checked at delivery.`,
+        ? "Connected to Databricks. The volume is visible to this token."
+        : "Connected to Databricks. The token can access the configured catalog and schema.",
     };
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
-      return { ok: false, message: `Databricks workspace ${host} unreachable after ${PROBE_TIMEOUT_MS / 1000}s.` };
+      return { ok: false, message: `Databricks did not respond within ${PROBE_TIMEOUT_MS / 1000}s.` };
     }
-    return { ok: false, message: `Databricks error: ${err instanceof Error ? err.message : String(err)}` };
+    return { ok: false, message: "Databricks connection test failed. Check the workspace host, network access, and credentials." };
   } finally {
     clearTimeout(timer);
   }
@@ -572,8 +578,8 @@ async function probeBigQuery(
   let sa: ReturnType<typeof parseServiceAccountJson>;
   try {
     sa = parseServiceAccountJson(saJson);
-  } catch (err) {
-    return { ok: false, severity: "fail", message: err instanceof Error ? err.message : String(err) };
+  } catch {
+    return { ok: false, severity: "fail", message: "Service account key JSON is invalid." };
   }
 
   const controller = new AbortController();
@@ -583,8 +589,12 @@ async function probeBigQuery(
     let token: string;
     try {
       token = await mintGoogleAccessToken(sa, BIGQUERY_SCOPE);
-    } catch (err) {
-      return { ok: false, severity: "fail", message: err instanceof Error ? err.message : String(err) };
+    } catch {
+      return {
+        ok: false,
+        severity: "fail",
+        message: "Could not authenticate with BigQuery. Check the service account key.",
+      };
     }
     if (!dataset) {
       return {
@@ -603,26 +613,26 @@ async function probeBigQuery(
       return {
         ok: false,
         severity: "fail",
-        message: `The service account can't access dataset ${projectId}.${dataset} (HTTP ${res.status}). Grant it BigQuery Data Editor on the dataset, then retry.`,
+        message: `The service account cannot access the target dataset (HTTP ${res.status}). Grant it BigQuery Data Editor, then retry.`,
       };
     }
     if (res.status === 404) {
       return {
         ok: false,
         severity: "fail",
-        message: `Dataset ${projectId}.${dataset} not found (or the service account can't see it). Axel creates tables, not datasets — create the dataset in BigQuery first.`,
+        message: "The target dataset was not found or is not visible to the service account. Create the dataset in BigQuery first.",
       };
     }
     if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      return { ok: false, severity: "fail", message: `BigQuery returned HTTP ${res.status}: ${body.slice(0, 200)}` };
+      await res.body?.cancel().catch(() => undefined);
+      return { ok: false, severity: "fail", message: `BigQuery returned HTTP ${res.status}.` };
     }
     // Dataset is readable. Now the part that actually bit us: can it WRITE?
     if (!table) {
       return {
         ok: true,
         severity: "warn",
-        message: `Dataset ${projectId}.${dataset} is reachable. Pick a table to verify write access.`,
+        message: "The target dataset is reachable. Pick a table to verify write access.",
       };
     }
     return await bqCheckWrite(token, projectId, dataset, table, controller.signal);
@@ -630,9 +640,9 @@ async function probeBigQuery(
     // Transient/unreachable — can't verify, but not a provable failure, so
     // "warn" (don't block a valid setup on a momentary blip).
     if (err instanceof Error && err.name === "AbortError") {
-      return { ok: false, severity: "warn", message: `Couldn't reach BigQuery within ${PROBE_TIMEOUT_MS / 1000}s to verify write access — check the destination if deliveries fail.` };
+      return { ok: false, severity: "warn", message: `BigQuery did not respond within ${PROBE_TIMEOUT_MS / 1000}s. Check the destination if deliveries fail.` };
     }
-    return { ok: false, severity: "warn", message: `Couldn't verify BigQuery write access: ${err instanceof Error ? err.message : String(err)}` };
+    return { ok: false, severity: "warn", message: "Couldn't verify BigQuery write access. Check network access and credentials if deliveries fail." };
   } finally {
     clearTimeout(timer);
   }
@@ -660,8 +670,6 @@ async function bqCheckWrite(
   const base =
     `${BIGQUERY_API_ROOT}/projects/${encodeURIComponent(projectId)}` +
     `/datasets/${encodeURIComponent(dataset)}/tables/${encodeURIComponent(table)}`;
-  const fq = `${projectId}.${dataset}.${table}`;
-
   const permRes = await fetch(`${base}:testIamPermissions`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
@@ -671,7 +679,7 @@ async function bqCheckWrite(
   if (permRes.ok) {
     const body = (await permRes.json().catch(() => ({}))) as { permissions?: string[] };
     if (body.permissions?.includes("bigquery.tables.updateData")) {
-      return { ok: true, severity: "pass", message: `Verified: the service account can write to ${fq}.` };
+      return { ok: true, severity: "pass", message: "Verified that the service account can write to the target table." };
     }
   }
 
@@ -686,27 +694,27 @@ async function bqCheckWrite(
     return {
       ok: false,
       severity: "fail",
-      message: `The service account can read but not write to ${fq} (missing bigquery.tables.updateData). Grant it BigQuery Data Editor on the ${dataset} dataset, then retry.`,
+      message: "The service account can read but not write to the target table. Grant it BigQuery Data Editor, then retry.",
     };
   }
   if (getRes.status === 404) {
     return {
       ok: true,
       severity: "warn",
-      message: `Credentials and dataset ${projectId}.${dataset} look good. The table "${table}" doesn't exist yet — Axel creates it on the first delivery, which needs BigQuery Data Editor on the dataset. That write permission can't be verified in advance for a table that doesn't exist, so double-check the role if deliveries fail.`,
+      message: "Credentials and dataset access look good. The target table does not exist yet. Axel creates it on the first delivery, which needs BigQuery Data Editor. Check that role if deliveries fail.",
     };
   }
   if (getRes.status === 401 || getRes.status === 403) {
     return {
       ok: false,
       severity: "fail",
-      message: `The service account can't access table ${fq} (HTTP ${getRes.status}). Grant it BigQuery Data Editor on the ${dataset} dataset, then retry.`,
+      message: `The service account cannot access the target table (HTTP ${getRes.status}). Grant it BigQuery Data Editor, then retry.`,
     };
   }
-  const body = await getRes.text().catch(() => "");
+  await getRes.body?.cancel().catch(() => undefined);
   return {
     ok: false,
     severity: "fail",
-    message: `BigQuery returned HTTP ${getRes.status} checking ${fq}: ${body.slice(0, 200)}`,
+    message: `BigQuery returned HTTP ${getRes.status} while checking the target table.`,
   };
 }

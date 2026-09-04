@@ -16,12 +16,16 @@ using the deployment workflows in `.github/workflows/`.
 - Lint with `pnpm lint` (biome), types with `pnpm typecheck`.
 - Postgres migrations are append-only numbered files in
   `infra/postgres/migrations/`; never edit an applied migration.
-- Optional integrations (Stripe, Resend, Sentry, PostHog, ClickHouse,
-  OpenRouter) must degrade gracefully when unconfigured — self-hosted installs
+- Optional integrations (Stripe, Resend, Sentry, ClickHouse, OpenRouter) must
+  degrade gracefully when unconfigured — self-hosted installs
   rely on it. The pattern is a `has*Configured()` probe, not a crash.
 - The dashboard test suite models the cloud deployment; `test/setup-env.ts`
   sets a Stripe fixture key. Self-hosted behavior is tested in
   `apps/dashboard/test/billing-self-hosted.test.ts`.
+- UI work: read `DESIGN.md` before creating or changing anything user-facing
+  in `apps/dashboard` or `apps/marketing`. It documents the existing tokens,
+  composites, and named anti-patterns; match them. Run `pnpm visual:smoke`
+  after UI changes.
 
 ## Docs
 

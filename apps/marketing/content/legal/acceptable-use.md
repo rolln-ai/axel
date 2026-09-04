@@ -1,17 +1,22 @@
 ---
 title: Acceptable Use Policy
 slug: acceptable-use
-version: "1.0"
-effectiveDate: "2026-06-04"
-lastUpdated: "2026-07-31"
-summary: The rules governing what you may send, process, and deliver through Axel — and the conduct we prohibit to keep the platform, its tenants, and the broader internet safe.
+version: "1.1"
+effectiveDate: "2026-09-03"
+lastUpdated: "2026-09-03"
+summary: The rules governing what you may send, process, and deliver through Axel, and the conduct we prohibit to keep the platform, its tenants, and the broader internet safe.
 ---
 
 # Acceptable Use Policy
 
-**Version 1.0 — Effective 2026-06-04. Last updated 2026-07-31.**
+**Version 1.1. Effective 2026-09-03.**
 
 This Acceptable Use Policy (the "**AUP**" or "**Policy**") governs your access to and use of the Axel platform and service ("**Axel**" or the "**Service**"), provided by rolln, Inc. ("**rolln**", "**we**", "**us**", or "**our**"). This AUP is incorporated by reference into, and forms part of, the [Terms of Service / Master Subscription Agreement](https://axelapp.ai/terms) (the "**Terms**"). Capitalized terms used but not defined in this AUP have the meanings given to them in the Terms.
+
+This Policy governs use of the hosted Axel Cloud Service. It does not restrict
+rights in source code granted by the applicable open-source license included
+with that code. Activity that uses the hosted Service remains subject to this
+Policy.
 
 You ("**Customer**", "**you**", or "**your**") agree to this Policy when you accept the Terms (which acceptance occurs through the affirmative click-through or order process by which you enter into the Terms), and your continued access to or use of the Service constitutes your ongoing agreement to comply with this Policy. You are responsible for ensuring that everyone who uses the Service through your Workspace complies with it as well. **If you do not agree to this Policy, you may not use the Service.**
 

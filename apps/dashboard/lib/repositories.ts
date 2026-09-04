@@ -1,5 +1,7 @@
 import "server-only";
+import { createHash } from "node:crypto";
 import { unstable_cache, updateTag } from "next/cache";
+import { sanitizeConnectorDiagnosticForStorage, type SourceProvider } from "@axel/shared";
 import type { Queryable } from "./db";
 import { db } from "./db";
 
@@ -9,14 +11,22 @@ import { db } from "./db";
  * cached readers and mutating writers from drifting out of sync — a stale
  * tag string means stale data on the dashboard.
  */
+export function workspaceCacheScope(workspaceId: string): string {
+  return createHash("sha256")
+    .update("axel-dashboard-cache\0")
+    .update(workspaceId)
+    .digest("hex")
+    .slice(0, 24);
+}
+
 export const cacheTags = {
-  metrics: (ws: string) => `ws-${ws}-metrics`,
-  sources: (ws: string) => `ws-${ws}-sources`,
-  deadLetters: (ws: string) => `ws-${ws}-dead-letters`,
-  replays: (ws: string) => `ws-${ws}-replays`,
-  replayJobs: (ws: string) => `ws-${ws}-replay-jobs`,
-  routes: (ws: string) => `ws-${ws}-routes`,
-  destinations: (ws: string) => `ws-${ws}-destinations`,
+  metrics: (ws: string) => `ws-${workspaceCacheScope(ws)}-metrics`,
+  sources: (ws: string) => `ws-${workspaceCacheScope(ws)}-sources`,
+  deadLetters: (ws: string) => `ws-${workspaceCacheScope(ws)}-dead-letters`,
+  replays: (ws: string) => `ws-${workspaceCacheScope(ws)}-replays`,
+  replayJobs: (ws: string) => `ws-${workspaceCacheScope(ws)}-replay-jobs`,
+  routes: (ws: string) => `ws-${workspaceCacheScope(ws)}-routes`,
+  destinations: (ws: string) => `ws-${workspaceCacheScope(ws)}-destinations`,
 };
 
 /**
@@ -58,6 +68,7 @@ export interface SourceRow {
    * the previous narrower union was simply wrong for that data.
    */
   source_kind: "webhook" | "chargebee" | "stripe" | "shopify" | "postgres" | "mongodb" | "bigquery";
+  provider: SourceProvider;
   max_events_per_minute: number | null;
   created_at: string;
 }
@@ -166,6 +177,7 @@ export async function listSources(workspaceId: string, client: Queryable = db())
             s.name,
             s.status,
             COALESCE(ps.type, 'webhook') AS source_kind,
+            COALESCE(s.provider, 'custom') AS provider,
             s.max_events_per_minute,
             s.created_at::text
        FROM sources s
@@ -233,7 +245,13 @@ export async function listDeadLettersFull(workspaceId: string, client: Queryable
        LIMIT 50`,
     [workspaceId],
   );
-  return result.rows;
+  return result.rows.map((row) => ({
+    ...row,
+    message: sanitizeConnectorDiagnosticForStorage(row.message, 500),
+    replay_error_message: row.replay_error_message
+      ? sanitizeConnectorDiagnosticForStorage(row.replay_error_message, 500)
+      : null,
+  }));
 }
 
 export async function listReplayRequests(workspaceId: string, client: Queryable = db()): Promise<ReplayRequestRow[]> {
@@ -395,9 +413,10 @@ export async function listInvites(workspaceId: string, client: Queryable = db())
 // doesn't bust workspace B's entries.
 
 export function getDashboardMetricsCached(workspaceId: string): Promise<DashboardMetric[]> {
+  const scope = workspaceCacheScope(workspaceId);
   return unstable_cache(
     () => getDashboardMetrics(workspaceId),
-    ["dashboard-metrics-v2", workspaceId],
+    ["dashboard-metrics-v2", scope],
     {
       tags: [
         cacheTags.metrics(workspaceId),
@@ -412,33 +431,37 @@ export function getDashboardMetricsCached(workspaceId: string): Promise<Dashboar
 }
 
 export function listSourcesCached(workspaceId: string): Promise<SourceRow[]> {
+  const scope = workspaceCacheScope(workspaceId);
   return unstable_cache(
     () => listSources(workspaceId),
-    ["dashboard-sources", workspaceId],
+    ["dashboard-sources", scope],
     { tags: [cacheTags.sources(workspaceId)], revalidate: DASHBOARD_REVALIDATE_SECONDS },
   )();
 }
 
 export function listReplayRequestsCached(workspaceId: string): Promise<ReplayRequestRow[]> {
+  const scope = workspaceCacheScope(workspaceId);
   return unstable_cache(
     () => listReplayRequests(workspaceId),
-    ["dashboard-replays", workspaceId],
+    ["dashboard-replays", scope],
     { tags: [cacheTags.replays(workspaceId)], revalidate: DASHBOARD_REVALIDATE_SECONDS },
   )();
 }
 
 export function countReplayRequestsCached(workspaceId: string): Promise<number> {
+  const scope = workspaceCacheScope(workspaceId);
   return unstable_cache(
     () => countReplayRequests(workspaceId),
-    ["dashboard-replays-count", workspaceId],
+    ["dashboard-replays-count", scope],
     { tags: [cacheTags.replays(workspaceId)], revalidate: DASHBOARD_REVALIDATE_SECONDS },
   )();
 }
 
 export function countUnresolvedDeadLettersCached(workspaceId: string): Promise<number> {
+  const scope = workspaceCacheScope(workspaceId);
   return unstable_cache(
     () => countUnresolvedDeadLetters(workspaceId),
-    ["dashboard-dead-letters-count-v2", workspaceId],
+    ["dashboard-dead-letters-count-v2", scope],
     { tags: [cacheTags.deadLetters(workspaceId)], revalidate: DASHBOARD_REVALIDATE_SECONDS },
   )();
 }
@@ -446,9 +469,10 @@ export function countUnresolvedDeadLettersCached(workspaceId: string): Promise<n
 export function countUnresolvedDeadLettersByReasonCached(
   workspaceId: string,
 ): Promise<UnresolvedReasonRow[]> {
+  const scope = workspaceCacheScope(workspaceId);
   return unstable_cache(
     () => countUnresolvedDeadLettersByReason(workspaceId),
-    ["dashboard-dead-letters-by-reason-v2", workspaceId],
+    ["dashboard-dead-letters-by-reason-v2", scope],
     { tags: [cacheTags.deadLetters(workspaceId)], revalidate: DASHBOARD_REVALIDATE_SECONDS },
   )();
 }
@@ -456,9 +480,10 @@ export function countUnresolvedDeadLettersByReasonCached(
 export function countActiveReplayRequestsByReasonCached(
   workspaceId: string,
 ): Promise<ActiveReplayReasonRow[]> {
+  const scope = workspaceCacheScope(workspaceId);
   return unstable_cache(
     () => countActiveReplayRequestsByReason(workspaceId),
-    ["dashboard-active-replays-by-reason", workspaceId],
+    ["dashboard-active-replays-by-reason", scope],
     { tags: [cacheTags.replays(workspaceId)], revalidate: DASHBOARD_REVALIDATE_SECONDS },
   )();
 }

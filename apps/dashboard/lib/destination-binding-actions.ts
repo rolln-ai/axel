@@ -103,8 +103,8 @@ export async function listSampleableStreamsAction(): Promise<
       [workspaceId],
     );
     return { ok: true, streams: rows.rows.map((r) => ({ id: r.id, name: r.name ?? r.id })) };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : "Couldn't list streams." };
+  } catch {
+    return { ok: false, error: "Couldn't list streams." };
   }
 }
 
@@ -187,8 +187,8 @@ export async function checkBigQueryCompatibilityAction(input: {
       result: compareBigQuerySchemas(expected, existing.fields),
       ...(preview ? { preview } : {}),
     };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : "Compatibility check failed." };
+  } catch {
+    return { ok: false, error: "Compatibility check failed." };
   }
 }
 
@@ -229,8 +229,8 @@ export async function listDestinationTargets(
     }
     // databricks_volume / s3 / r2 / http / webhook don't introspect.
     return { ok: true, type, targets: [] };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : "Could not list targets." };
+  } catch {
+    return { ok: false, error: "Could not list targets." };
   }
 }
 
@@ -262,8 +262,8 @@ export async function listBigQueryDatasetsAction(input: {
       return { ok: false, error: "Provide a destination or BigQuery credentials." };
     }
     return { ok: true, values };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : "Could not list datasets." };
+  } catch {
+    return { ok: false, error: "Could not list datasets." };
   }
 }
 
@@ -293,8 +293,8 @@ export async function listBigQueryTablesAction(input: {
       return { ok: false, error: "Provide a destination or BigQuery credentials." };
     }
     return { ok: true, values };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : "Could not list tables." };
+  } catch {
+    return { ok: false, error: "Could not list tables." };
   }
 }
 
@@ -397,8 +397,8 @@ export async function createPostgresTable(
     } finally {
       await pool.end();
     }
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : "Could not create table." };
+  } catch {
+    return { ok: false, error: "Could not create table." };
   }
 }
 
@@ -450,8 +450,8 @@ export async function createMongoCollection(
     } finally {
       await client.close();
     }
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : "Could not create collection." };
+  } catch {
+    return { ok: false, error: "Could not create collection." };
   }
 }
 
@@ -526,8 +526,8 @@ export async function listTablesForConnection(
       }
     }
     return { ok: true, type: type as DestinationType, targets: [] };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : "Could not list targets." };
+  } catch {
+    return { ok: false, error: "Could not list targets." };
   }
 }
 
@@ -594,7 +594,7 @@ export async function createTableForConnection(
       }
     }
     return { ok: false, error: "This destination type has no tables to create here." };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : "Could not create target." };
+  } catch {
+    return { ok: false, error: "Could not create target." };
   }
 }

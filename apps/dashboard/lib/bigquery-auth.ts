@@ -73,8 +73,8 @@ export async function mintGoogleAccessToken(
   let signature: string;
   try {
     signature = createSign("RSA-SHA256").update(signingInput).sign(sa.private_key, "base64url");
-  } catch (err) {
-    throw new Error(`Could not sign with the service-account key: ${err instanceof Error ? err.message : String(err)}`);
+  } catch {
+    throw new Error("service_account_jwt_sign_failed");
   }
 
   const controller = new AbortController();
@@ -90,11 +90,17 @@ export async function mintGoogleAccessToken(
       }).toString(),
       signal: controller.signal,
     });
-    const text = await res.text();
     if (!res.ok) {
-      throw new Error(`Google rejected the service-account key (HTTP ${res.status}): ${text.slice(0, 200)}`);
+      await res.body?.cancel().catch(() => undefined);
+      throw new Error(`google_token_http_${res.status}`);
     }
-    const body = JSON.parse(text) as { access_token?: string };
+    const text = await res.text();
+    let body: { access_token?: string };
+    try {
+      body = JSON.parse(text) as { access_token?: string };
+    } catch {
+      throw new Error("google_token_invalid_json");
+    }
     if (!body.access_token) throw new Error("Token endpoint returned no access_token.");
     return body.access_token;
   } finally {

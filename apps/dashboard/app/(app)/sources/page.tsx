@@ -137,6 +137,7 @@ export default async function SourcesPage() {
                           status: source.status,
                           max_events_per_minute: source.max_events_per_minute,
                           created_at: source.created_at,
+                          provider: source.provider,
                         }}
                         ingestUrl={`${ingestBase}/in/${source.id}`}
                       />

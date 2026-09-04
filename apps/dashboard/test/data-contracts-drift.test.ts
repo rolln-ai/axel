@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   autoExtendIfNeeded,
   detectDrift,
+  publicDriftCronSummary,
   runDriftCronJob,
   runDriftForDataContract,
   type DetectedDrift,
@@ -336,7 +337,7 @@ describe("runDriftForDataContract", () => {
   it("coverage check flags a long-tail type the payload sample never surfaced", async () => {
     // The proportional sample sees nothing new (empty here), but the CH
     // distinct-type lister reports two types the saved schema lacks — exactly
-    // the newsletter provider case where rare types can't win a proportional draw.
+    // the long-tail case where rare types cannot win a proportional draw.
     const inserts: Array<{ category: string; detail: unknown }> = [];
     const result = await runDriftForDataContract(
       "ws_1",
@@ -520,12 +521,15 @@ describe("runDriftCronJob", () => {
     });
     expect(okRuns).toBe(2);
     expect(summary.scanned_maps).toBe(3);
-    expect(summary.errors).toHaveLength(1);
-    expect(summary.errors[0]).toMatchObject({
-      data_contract_id: "em_bad",
-      workspace_id: "ws_1",
-      message: "clickhouse exploded",
-    });
+    expect(summary.errors).toEqual([{ code: "data_contract_scan_failed" }]);
+    expect(JSON.stringify(summary)).not.toContain("clickhouse exploded");
+    expect(JSON.stringify(summary)).not.toContain("em_bad");
+    expect(JSON.stringify(summary)).not.toContain("ws_1");
+
+    const responseSummary = publicDriftCronSummary(summary);
+    expect(responseSummary.error_count).toBe(1);
+    expect(responseSummary.error_counts.data_contract_scan_failed).toBe(1);
+    expect(responseSummary).not.toHaveProperty("errors");
   });
 
   it("treats notify failures as warnings, not fatal — drift inserts still count", async () => {
@@ -547,8 +551,8 @@ describe("runDriftCronJob", () => {
     expect(summary.total_drift_inserted).toBe(2);
     expect(summary.maps_with_drift).toBe(1);
     expect(summary.total_notifications_emitted).toBe(0);
-    expect(summary.errors).toHaveLength(1);
-    expect(summary.errors[0]!.message).toMatch(/notify:.*resend/);
+    expect(summary.errors).toEqual([{ code: "notification_failed" }]);
+    expect(JSON.stringify(summary)).not.toContain("resend timed out");
   });
 
   it("skips maps without a current_version_id (defensive against stale rows)", async () => {
@@ -599,7 +603,7 @@ describe("autoExtendIfNeeded", () => {
       workspace_id: "ws_1",
       source_id: "src_1",
       route_id: null,
-      name: "newsletter provider",
+      name: "Newsletter demo",
       status: "active",
       current_version_id: "emv_1",
       created_by_user_id: null,

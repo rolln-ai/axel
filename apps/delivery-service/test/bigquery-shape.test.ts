@@ -272,7 +272,7 @@ describe("bigQueryRowForEvent — typed_records keeps native values", () => {
 
 describe("compareBigQuerySchemas — typed_records vs an existing typed table", () => {
   it("clean typed data is compatible with a matching INT64/BOOL table", () => {
-    // The newsletter-provider case: source sends real numbers/bools, table is typed.
+    // Newsletter-provider case: source sends real numbers/bools, table is typed.
     const expected = expectedBigQuerySchema(
       [{ data: { lead_score: 42, prospect: true } }],
       "typed_records",

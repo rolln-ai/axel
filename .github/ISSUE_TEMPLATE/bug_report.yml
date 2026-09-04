@@ -2,6 +2,19 @@ name: Bug report
 description: Something is broken
 labels: [bug]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        GitHub issues are public. Use synthetic data only. Do not include webhook bodies, customer data, source or delivery IDs, credentials, signed URLs, full request headers, or unredacted logs and screenshots. Report suspected vulnerabilities through [SECURITY.md](https://github.com/rolln-ai/axel/blob/main/SECURITY.md) instead.
+  - type: checkboxes
+    id: public-safety
+    attributes:
+      label: Public issue safety
+      options:
+        - label: I used synthetic data and removed secrets, customer data, internal identifiers, and private endpoints from this report.
+          required: true
+        - label: This is not a suspected security vulnerability.
+          required: true
   - type: textarea
     id: what
     attributes:
@@ -13,7 +26,7 @@ body:
     id: repro
     attributes:
       label: Reproduction
-      description: Smallest set of steps or a failing payload. For delivery issues, include the destination type and the delivery/event ID if you have one.
+      description: Give the smallest set of steps and a synthetic payload shape. For delivery issues, name the destination type but do not post a delivery ID, event ID, request body, or receiver response.
     validations:
       required: true
   - type: input
@@ -21,5 +34,12 @@ body:
     attributes:
       label: Deployment
       description: Axel Cloud, or self-hosted (note which components and versions).
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Release version or commit SHA. Do not paste a private repository URL.
     validations:
       required: true

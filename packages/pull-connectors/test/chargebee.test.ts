@@ -52,8 +52,9 @@ describe("Chargebee pull connector", () => {
 
     expect(summary.streams[0]).toMatchObject({
       status: "failed",
-      error: expect.stringMatching(/custom API domains are not supported/),
+      error: "operation_failed",
     });
+    expect(JSON.stringify(summary)).not.toContain("attacker.example");
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
@@ -91,7 +92,11 @@ describe("Chargebee pull connector", () => {
       { now: fixedNow },
     );
 
-    expect(summary.streams[0]).toMatchObject({ status: "failed", error: "HTTP 302" });
+    expect(summary.streams[0]).toMatchObject({
+      status: "failed",
+      error: "http_error_302",
+    });
+    expect(JSON.stringify(summary)).not.toContain("127.0.0.1");
     expect(readBody).not.toHaveBeenCalled();
     expect(cancel).toHaveBeenCalledOnce();
     expect(calls).toEqual([{
@@ -120,7 +125,7 @@ describe("Chargebee pull connector", () => {
 
     expect(summary.streams[0]).toMatchObject({
       status: "failed",
-      error: "invalid JSON response",
+      error: "invalid_payload",
     });
     expect(JSON.stringify(summary)).not.toContain("victim@example.com");
     expect(JSON.stringify(summary)).not.toContain("sk_live_response_secret");
@@ -183,6 +188,9 @@ describe("Chargebee pull connector", () => {
       cursor: { value: 14 },
       status: "success",
     });
+    const serializedSummary = JSON.stringify(summary);
+    expect(serializedSummary).not.toContain("cus_1");
+    expect(serializedSummary).not.toContain("a@example.com");
     await expect(stateStore.get("src_cb")).resolves.toEqual({
       streams: {
         customers: {

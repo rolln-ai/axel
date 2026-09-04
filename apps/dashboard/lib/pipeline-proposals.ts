@@ -132,6 +132,17 @@ interface BuiltPipelineProposal {
   fixtures: SyntheticFixture[];
 }
 
+class PipelineInputError extends Error {
+  constructor(public readonly publicMessage: string) {
+    super("pipeline_input_error");
+    this.name = "PipelineInputError";
+  }
+}
+
+function pipelineActionError(err: unknown, fallback: string): string {
+  return err instanceof PipelineInputError ? err.publicMessage : fallback;
+}
+
 function normalizeInput(input: PipelineGoalInput): Required<PipelineGoalInput> {
   const backfillRaw = Number.isFinite(input.backfillDays)
     ? Math.floor(input.backfillDays ?? 0)
@@ -295,7 +306,7 @@ async function proposeMapping(input: {
 }): Promise<DestinationMapping> {
   if (input.destination.type === "postgres") {
     if (!input.target) {
-      throw new Error("Choose a target table for this Postgres destination.");
+      throw new PipelineInputError("Choose a target table for this Postgres destination.");
     }
     let intro: Awaited<ReturnType<typeof introspectPostgresDestination>>;
     try {
@@ -304,26 +315,21 @@ async function proposeMapping(input: {
         input.destination.id,
         input.target,
       );
-    } catch (err) {
-      // Postgres introspection surfaces connection/TLS failures (e.g. a
-      // self-signed certificate on a Railway proxy) — pass the real cause
-      // through instead of masking it.
-      throw new Error(
-        `Couldn't connect to the Postgres destination to read "${input.target}": ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+    } catch {
+      throw new PipelineInputError(
+        "Couldn't connect to the Postgres destination. Check its connection and TLS settings, then try again.",
       );
     }
     if (!intro) {
-      throw new Error(
-        `Table "${input.target}" wasn't found in the destination — create it first, or pick an existing table.`,
+      throw new PipelineInputError(
+        "That table wasn't found in the Postgres destination. Create it first or pick an existing table.",
       );
     }
     return proposePostgresMapping(input.destination.id, intro, input.inferred, input.samples);
   }
   if (input.destination.type === "mongodb") {
     if (!input.target) {
-      throw new Error("Choose a target collection for this MongoDB destination.");
+      throw new PipelineInputError("Choose a target collection for this MongoDB destination.");
     }
     const intro = await introspectMongoDestination(
       input.workspaceId,
@@ -331,8 +337,8 @@ async function proposeMapping(input: {
       input.target,
     );
     if (!intro) {
-      throw new Error(
-        `Couldn't read collection "${input.target}" — check the destination is reachable and the collection exists.`,
+      throw new PipelineInputError(
+        "Couldn't read that MongoDB collection. Check that the destination is reachable and the collection exists.",
       );
     }
     return proposeMongoMapping(input.destination.id, intro, input.inferred, input.samples);
@@ -340,7 +346,9 @@ async function proposeMapping(input: {
   if (input.destination.type === "bigquery") {
     const target = normalizeBigQueryTarget(input.target);
     if (!target) {
-      throw new Error("Choose a BigQuery dataset and table in dataset.table format.");
+      throw new PipelineInputError(
+        "Choose a BigQuery dataset and table in dataset.table format.",
+      );
     }
     const intro = await introspectBigQueryDestination(
       input.destination.id,
@@ -357,7 +365,9 @@ async function proposeMapping(input: {
       input.samples,
     ) as WebhookMapping;
   }
-  throw new Error(`Pipeline creation does not support destination type "${input.destination.type}" yet.`);
+  throw new PipelineInputError(
+    "Pipeline creation does not support this destination type yet.",
+  );
 }
 
 async function buildPipelineProposal(
@@ -370,21 +380,25 @@ async function buildPipelineProposal(
   // observed event type" (see selectEventTypesFromGoal + summarizeWarnings); the
   // mapping/filter/transform are derived from the destination + inferred schema,
   // not the goal text.
-  if (!input.sourceId) throw new Error("Pick a source.");
-  if (!input.destinationId) throw new Error("Pick a destination.");
+  if (!input.sourceId) throw new PipelineInputError("Pick a source.");
+  if (!input.destinationId) throw new PipelineInputError("Pick a destination.");
 
   const workspaceId = session.activeWorkspace.workspace_id;
   const source = await loadSource(workspaceId, input.sourceId);
-  if (!source) throw new Error("Source not found in this workspace.");
+  if (!source) throw new PipelineInputError("Source not found in this workspace.");
   const destination = await loadDestination(workspaceId, input.destinationId);
-  if (!destination) throw new Error("Destination not found in this workspace.");
+  if (!destination) {
+    throw new PipelineInputError("Destination not found in this workspace.");
+  }
 
   const samples = await sampleSourceEvents(workspaceId, source.id, {
     maxEvents: 30,
     maxBytes: 1 * 1024 * 1024,
   });
   if (samples.length === 0) {
-    throw new Error("No recent events are available. Send events to the source and try again.");
+    throw new PipelineInputError(
+      "No recent events are available. Send events to the source and try again.",
+    );
   }
 
   const existingContract = await loadBestContract(workspaceId, source.id);
@@ -422,8 +436,12 @@ async function buildPipelineProposal(
       attached_destination_ids: new Set([destination.id]),
     });
   } catch (err) {
-    const reason = err instanceof RouteEngineError ? err.reason : "graph_invalid";
-    throw new Error(`Generated graph failed validation: ${reason}`);
+    if (err instanceof RouteEngineError) {
+      throw new PipelineInputError(
+        "The generated pipeline did not pass validation. Review the source and destination settings.",
+      );
+    }
+    throw err;
   }
 
   const warnings = summarizeWarnings({
@@ -487,7 +505,7 @@ export async function proposePipelineGoalAction(
   } catch (err) {
     return {
       ok: false,
-      error: err instanceof Error ? err.message : "Could not prepare the pipeline preview.",
+      error: pipelineActionError(err, "Could not prepare the pipeline preview. Try again."),
     };
   }
 }
@@ -507,7 +525,7 @@ export async function applyPipelineGoalAction(
   } catch (err) {
     return {
       ok: false,
-      error: err instanceof Error ? err.message : "Could not prepare the pipeline.",
+      error: pipelineActionError(err, "Could not prepare the pipeline. Try again."),
     };
   }
   const { proposal } = built;
@@ -642,10 +660,9 @@ export async function applyPipelineGoalAction(
           job.total_estimated > 0
             ? ` Backfill queued (${job.total_estimated.toLocaleString()} event${job.total_estimated === 1 ? "" : "s"} estimated).`
             : " Backfill queued.";
-      } catch (err) {
-        backfillNote = ` Route created, but backfill could not be queued: ${
-          err instanceof Error ? err.message : "unknown error"
-        }.`;
+      } catch {
+        backfillNote =
+          " Route created, but the backfill could not be queued. Retry the backfill from the route page.";
       }
     }
 
@@ -661,10 +678,10 @@ export async function applyPipelineGoalAction(
       version_id: result.versionId,
       notice: `Created pipeline "${input.name}".${backfillNote}`,
     };
-  } catch (err) {
+  } catch {
     return {
       ok: false,
-      error: err instanceof Error ? err.message : "Could not create the pipeline.",
+      error: "Could not create the pipeline. No changes were saved. Try again.",
       proposal,
     };
   }

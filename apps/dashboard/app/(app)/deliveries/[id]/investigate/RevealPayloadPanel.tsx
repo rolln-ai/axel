@@ -65,11 +65,6 @@ export function RevealPayloadPanel({ deadLetterId }: { deadLetterId: string }) {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
           <FileJson className="size-3" /> Payload as received
-          {result.r2_key ? (
-            <span className="font-mono font-normal normal-case tracking-normal">
-              ({result.r2_key})
-            </span>
-          ) : null}
         </span>
         <Button
           type="button"

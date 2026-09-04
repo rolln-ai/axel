@@ -48,9 +48,7 @@ export async function sendEmail(
   const client = getClient();
   if (!client) {
     if (process.env.NODE_ENV === "development") {
-      console.log("\n[email:dev-fallback] would send →", args.to);
-      console.log("[email:dev-fallback] subject:", args.subject);
-      console.log("[email:dev-fallback] body:\n" + args.text + "\n");
+      console.log("[email:dev-fallback] message suppressed; email delivery is not configured");
       return { ok: true };
     }
     console.warn("[email] delivery is not configured; message was not sent");

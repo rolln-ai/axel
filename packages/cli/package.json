@@ -1,9 +1,9 @@
 {
   "name": "@axel/cli",
   "version": "0.1.0",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "description": "Axel CLI — talk to your webhook pipeline from the terminal.",
-  "private": false,
+  "private": true,
   "type": "module",
   "bin": {
     "axel": "./dist/bin.js"
@@ -19,10 +19,10 @@
     "dev": "node --watch dist/bin.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.13.0 <23"
   },
   "devDependencies": {
-    "@types/node": "^25.9.3",
+    "@types/node": "^22.20.1",
     "typescript": "^6.0.3",
     "vitest": "^4.1.9"
   },

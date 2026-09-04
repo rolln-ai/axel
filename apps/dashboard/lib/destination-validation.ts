@@ -95,7 +95,9 @@ export function validateDestinationValues(
     const raw = values[field.key];
     if (raw === undefined || raw === "") continue;
     const reason = validateDestinationUrl(raw.trim());
-    if (reason) return `${field.label}: ${reason}`;
+    if (reason) {
+      return `${field.label}: ${publicUrlValidationReason(reason)}`;
+    }
   }
   for (const field of schema.fields) {
     if (field.kind !== "secret") continue;
@@ -148,9 +150,25 @@ export function validateDestinationValues(
         const hostport = entry.trim();
         if (!hostport) continue;
         const ssrf = validateDestinationUrl(`https://${hostport}`);
-        if (ssrf) return `${field.label}: ${ssrf}`;
+        if (ssrf) {
+          return `${field.label}: The connection target is not allowed by the outbound network policy.`;
+        }
       }
     }
   }
   return null;
+}
+
+/** Keep field-level validation useful without reflecting a submitted host or scheme. */
+function publicUrlValidationReason(reason: string): string {
+  if (/username|password|credentials/i.test(reason)) {
+    return "URL credentials are not allowed. Use an encrypted authentication field instead.";
+  }
+  if (/malformed|required|hostname/i.test(reason)) {
+    return "URL is malformed or incomplete.";
+  }
+  if (/http or https|must use https/i.test(reason)) {
+    return "URL must use HTTP or HTTPS.";
+  }
+  return "The URL target is not allowed by the outbound network policy.";
 }

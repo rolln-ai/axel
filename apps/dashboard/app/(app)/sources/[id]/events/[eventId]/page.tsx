@@ -113,8 +113,8 @@ export default async function EventDetailPage({
         getEventDetail(workspaceId, eventId),
         listDeliveryAttemptsForEvent(workspaceId, eventId),
       ]);
-    } catch (err) {
-      clickhouseError = err instanceof Error ? err.message : "ClickHouse query failed.";
+    } catch {
+      clickhouseError = "Event details are temporarily unavailable.";
     }
   }
   if (!event && !clickhouseError && usageEnabled()) {
@@ -209,7 +209,11 @@ export default async function EventDetailPage({
   }
 
   const payloadPromise: Promise<unknown> = event
-    ? fetchPayloadForR2Key(event.r2_key)
+    ? fetchPayloadForR2Key(event.r2_key, {
+        workspaceId,
+        eventId: event.event_id,
+        sourceId: event.source_id,
+      })
         .then((p) => p ?? GENERIC_SAMPLE)
         .catch(() => GENERIC_SAMPLE)
     : Promise.resolve(null);
@@ -217,7 +221,11 @@ export default async function EventDetailPage({
   // a missing R2 object only degrades the replay snippet, not the
   // pretty-printed payload above.
   const rawBytesBase64Promise: Promise<string | null> = event
-    ? fetchRawPayloadBase64ForR2Key(event.r2_key).catch(() => null)
+    ? fetchRawPayloadBase64ForR2Key(event.r2_key, {
+        workspaceId,
+        eventId: event.event_id,
+        sourceId: event.source_id,
+      }).catch(() => null)
     : Promise.resolve(null);
   // AXE-55 — fetch the previous event from the same source for the diff
   // panel. Best-effort; if either ClickHouse or R2 hiccups we render an
@@ -260,8 +268,8 @@ export default async function EventDetailPage({
       {clickhouseError ? (
         <section className="mb-6 rounded-lg border border-border bg-card p-5">
           <EmptyState
-            title="Couldn't load event from ClickHouse"
-            body={`Query failed: ${clickhouseError}`}
+            title="Couldn't load event details"
+            body={clickhouseError}
           />
         </section>
       ) : null}
@@ -587,7 +595,7 @@ async function DiffLoader({
     return (
       <EmptyState
         title="Diff unavailable"
-        body="Couldn't load adjacent events from ClickHouse. Diff comes back once the analytics path is healthy."
+        body="Couldn't load adjacent events. The diff returns when analytics recover."
       />
     );
   }

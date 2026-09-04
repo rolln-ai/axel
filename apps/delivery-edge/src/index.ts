@@ -57,6 +57,9 @@ import {
   isNativeRuntimeDestinationType,
   isParquetObjectStoreBinding,
   postgresJsSslOption,
+  readBoundedJsonResponse,
+  resolveInternalServiceEndpoint,
+  validateInternalServiceEndpoint,
 } from "@axel/shared";
 import {
   createHttpConnector,
@@ -169,9 +172,16 @@ function maybeBeatDelivery(
   error?: string,
   force = false,
 ): void {
-  const url =
-    env.DELIVERY_HEARTBEAT_URL ??
-    (env.DELIVERY_SERVICE_URL ? `${env.DELIVERY_SERVICE_URL.replace(/\/$/, "")}/internal/heartbeat` : null);
+  let url: string | null = null;
+  try {
+    url = env.DELIVERY_HEARTBEAT_URL
+      ? validateInternalServiceEndpoint(env.DELIVERY_HEARTBEAT_URL, "/internal/heartbeat")
+      : env.DELIVERY_SERVICE_URL
+        ? resolveInternalServiceEndpoint(env.DELIVERY_SERVICE_URL, "/internal/heartbeat")
+        : null;
+  } catch {
+    return;
+  }
   const secret = env.DELIVERY_SHARED_SECRET;
   if (!url || !secret) return;
   const now = Date.now();
@@ -225,7 +235,7 @@ export default {
       if (!parsed.ok) {
         const finalAttempt = queueMessage.attempts >= DELIVERY_CONSUMER_MAX_ATTEMPTS;
         console.error(
-          `[delivery] queue contract rejected id=${queueMessage.id} code=${parsed.code}`
+          `[delivery] queue contract rejected code=${parsed.code}`
             + `${parsed.field ? ` field=${parsed.field}` : ""}`,
         );
         if (finalAttempt) {
@@ -293,7 +303,7 @@ export default {
                 await insertEdgeDeadLetter(client, hydrated, outcome);
               } catch (err) {
                 console.error(
-                  `[delivery] dead_letters insert failed for ${hydrated.event_id}: ${safeDeliveryDiagnostic(err)}`,
+                  `[delivery] dead_letters insert failed: ${safeDeliveryDiagnostic(err)}`,
                 );
                 ctx.waitUntil(captureException(sentry, err, {
                   tags: {
@@ -404,7 +414,7 @@ async function deliverOne(
 ): Promise<DeliveryOutcome> {
   const dest = await loadDestination(client, message.workspace_id, message.destination_id);
   if (!dest) {
-    console.error(`[delivery] unknown destination ${message.destination_id}`);
+    console.error("[delivery] unknown destination");
     return { result: "dead", response: { error: "unknown_destination" } };
   }
 
@@ -500,12 +510,12 @@ async function deliverOne(
           break;
       }
       console.log(
-        `[delivery] event=${message.event_id} dest=${message.destination_id} type=${dest.type} status=${result} latency=${Date.now() - startedAt}ms`,
+        `[delivery] type=${dest.type} status=${result} latency=${Date.now() - startedAt}ms`,
       );
       outcome = { result, response: { destination_type: dest.type, ...extra } };
     } catch (err) {
       const summary = safeDeliveryDiagnostic(err);
-      console.error(`[delivery] event=${message.event_id} dest=${message.destination_id} ERR ${summary}`);
+      console.error(`[delivery] failed: ${summary}`);
       outcome = {
         result: "retry",
         response: { destination_type: dest.type, error: summary },
@@ -748,7 +758,7 @@ async function evaluateEdgeBreaker(
                 })})
       `.catch((err) => {
         console.error(
-          `[delivery] breaker audit insert failed for ${dest.id}: ${safeDeliveryDiagnostic(err)}`,
+          `[delivery] breaker audit insert failed: ${safeDeliveryDiagnostic(err)}`,
         );
       });
     }
@@ -858,7 +868,7 @@ async function recordEdgeBreakerOutcome(
         ON CONFLICT DO NOTHING
       `.catch((err) => {
         console.error(
-          `[delivery] breaker notification insert failed for ${dest.id}: ${safeDeliveryDiagnostic(err)}`,
+          `[delivery] breaker notification insert failed: ${safeDeliveryDiagnostic(err)}`,
         );
       });
     }
@@ -872,7 +882,7 @@ async function forwardNativeDelivery(
 ): Promise<DeliveryOutcome> {
   if (!env.DELIVERY_SERVICE_URL || !env.DELIVERY_SHARED_SECRET) {
     console.error(
-      `[delivery] native destination ${message.destination_id} type=${destinationType} reached delivery-edge, ` +
+      `[delivery] native destination type=${destinationType} reached delivery-edge, ` +
       "but DELIVERY_SERVICE_URL or DELIVERY_SHARED_SECRET is not configured",
     );
     // Misconfiguration is transient — a missing DELIVERY_SERVICE_URL/SHARED_SECRET
@@ -888,7 +898,20 @@ async function forwardNativeDelivery(
     };
   }
 
-  const res = await fetch(`${env.DELIVERY_SERVICE_URL.replace(/\/$/, "")}/deliver`, {
+  let endpoint: string;
+  try {
+    endpoint = resolveInternalServiceEndpoint(env.DELIVERY_SERVICE_URL, "/deliver");
+  } catch {
+    return {
+      result: "retry",
+      response: {
+        destination_type: destinationType,
+        error: "native_delivery_unconfigured",
+      },
+    };
+  }
+
+  const res = await fetch(endpoint, {
     method: "POST",
     redirect: "manual",
     headers: {
@@ -897,7 +920,7 @@ async function forwardNativeDelivery(
     },
     body: JSON.stringify({ message }),
   });
-  const body = await res.json().catch(() => null) as
+  const body = await readBoundedJsonResponse(res, 256 * 1024).catch(() => null) as
     | { status?: DeliveryResult; response?: Record<string, unknown> | null; error?: string }
     | null;
   const response = {
@@ -907,6 +930,13 @@ async function forwardNativeDelivery(
     ...(body?.response && typeof body.response === "object" ? body.response : {}),
     ...(body?.error ? { error: body.error } : {}),
   };
+
+  if (!body || !["success", "retry", "dead", "rescheduled"].includes(body.status ?? "")) {
+    return {
+      result: "retry",
+      response: { ...response, error: "native_delivery_invalid_response" },
+    };
+  }
 
   if (body?.status === "rescheduled") {
     // delivery-service already re-enqueued the retry (attempt_no+1, backoff).
@@ -1192,7 +1222,7 @@ async function deliverS3(
   // write the wrong format and report success.
   if (isParquetObjectStoreBinding(message.binding)) {
     console.error(
-      `[delivery] parquet-format S3 message reached the edge (dest=${message.destination_id}, event=${message.event_id}); ` +
+      "[delivery] parquet-format S3 message reached the edge; " +
       "refusing to write JSON — route parquet-S3 through delivery-service",
     );
     return "dead";
@@ -1657,9 +1687,9 @@ async function drainDeadLetterQueue(
       try {
         const body = msg.body;
         if (!body || typeof body !== "object") {
-          // Unparseable payload — ack so we don't loop. We log the raw form
-          // so an operator can recover it from CF tail if needed.
-          console.error(`[dlq-recorder] dropping non-object message id=${msg.id}`);
+          // Unparseable payload — ack so we don't loop. Do not echo message
+          // identifiers or contents into provider logs.
+          console.error("[dlq-recorder] dropping non-object message");
           msg.ack();
           continue;
         }
@@ -1756,7 +1786,10 @@ function normalizeDeadLetterRow(body: Record<string, unknown>): RouterDeadLetter
       : null,
     r2_key: typeof f.r2_key === "string" ? f.r2_key : "",
     reason: "max_retries_exceeded",
-    message: `Cloudflare auto-DLQ after exceeding consumer max_retries${typeof f.destination_id === "string" ? ` (destination=${f.destination_id})` : ""}`,
+    // User-facing dead-letter diagnostics are fixed codes. Destination identity
+    // already has a dedicated, workspace-scoped column and must not be copied
+    // into message text that can flow into the dashboard or notifications.
+    message: "queue_max_retries_exceeded",
     errored_at: new Date().toISOString(),
   };
 }

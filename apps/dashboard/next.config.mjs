@@ -41,8 +41,7 @@ const nextConfig = {
   // there are no compiled `.js` files in the source trees.
   transpilePackages: ["@axel/shared", "@axel/observability", "@axel/pull-connectors"],
   // The authenticated app includes one-shot credentials in a few URL query
-  // strings. Never forward the current page URL as a Referer, including to the
-  // same-origin analytics proxy.
+  // strings. Never forward the current page URL as a Referer.
   async headers() {
     return [
       {
@@ -51,31 +50,6 @@ const nextConfig = {
       },
     ];
   },
-  // Reverse proxy for PostHog. The browser talks to same-origin `/ingest/*`,
-  // which we forward to PostHog US. This keeps analytics working behind ad
-  // blockers that block requests to posthog.com directly. Static/array assets
-  // come from the assets host; everything else (event capture, flags) goes to
-  // the ingestion host. Order matters — the catch-all must stay last.
-  // See https://posthog.com/docs/advanced/proxy/nextjs.
-  async rewrites() {
-    return [
-      {
-        source: "/ingest/static/:path*",
-        destination: "https://us-assets.i.posthog.com/static/:path*",
-      },
-      {
-        source: "/ingest/array/:path*",
-        destination: "https://us-assets.i.posthog.com/array/:path*",
-      },
-      {
-        source: "/ingest/:path*",
-        destination: "https://us.i.posthog.com/:path*",
-      },
-    ];
-  },
-  // PostHog endpoints are sensitive to trailing slashes; let the proxy forward
-  // `/ingest/decide` etc. without Next.js issuing a redirect first.
-  skipTrailingSlashRedirect: true,
   // Legacy redirect: Event Maps was renamed to Data Contracts. Bookmarks
   // and shared links to /event-maps/* should land on the new
   // /data-contracts/* path without a manual lookup.

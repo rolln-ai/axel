@@ -35,15 +35,15 @@ export async function POST(_request: Request): Promise<Response> {
       cancelUrl: `${baseUrl}/settings?tab=billing&checkout=cancel`,
     });
     return Response.json({ ok: true, url: result.url });
-  } catch (err) {
-    await captureDashboardException(err, {
+  } catch {
+    await captureDashboardException(new Error("checkout_session_failed"), {
       tags: {
         component: "billing_checkout",
         workspace_id: session.activeWorkspace.workspace_id,
       },
     });
     return Response.json(
-      { ok: false, error: err instanceof Error ? err.message : String(err) },
+      { ok: false, error: "checkout_session_failed" },
       { status: 500 },
     );
   }

@@ -19,7 +19,6 @@
  * cannot starve the others (they run on independent intervals).
  */
 
-import { sanitizeConnectorDiagnosticForStorage } from "@axel/shared";
 import type { AlertSink } from "./alerts.ts";
 import { silentAlertSink } from "./alerts.ts";
 
@@ -98,21 +97,14 @@ export function startPeriodicRunner(jobs: PeriodicJob[], options: RunnerOptions 
       const promise = (async () => {
         try {
           await job.run();
-        } catch (err) {
+        } catch {
           stat.failures += 1;
-          const safeError = sanitizeConnectorDiagnosticForStorage(
-            err instanceof Error ? err.message : String(err),
-            500,
-          );
           await alerts.notify({
             severity: "warn",
             rule: "periodic_job_failure",
-            summary: `Periodic job ${job.name} failed: ${safeError}`,
+            summary: "Periodic background job failed.",
             source: "router",
-            details: {
-              job: job.name,
-              error: safeError,
-            },
+            details: {},
             occurred_at: new Date().toISOString(),
           });
         } finally {

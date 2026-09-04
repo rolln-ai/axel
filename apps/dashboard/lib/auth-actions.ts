@@ -3,7 +3,7 @@
 // Auth server actions: signup, signin, signout, password reset, email verification.
 
 import { randomBytes } from "node:crypto";
-import { cookies, headers } from "next/headers";
+import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { db, withTransaction } from "./db";
 import { sendEmail } from "./email";
@@ -32,7 +32,6 @@ import {
 import { safeReturnTo } from "./return-to";
 import { createSession, destroySession } from "./session";
 import { CURRENT_TERMS_VERSION, acceptedDocumentVersions } from "./legal";
-import { captureServerEvent } from "./posthog-server";
 import { enforceAuthRateLimits, rateLimitMessage } from "./rate-limit";
 import { sendAdminSignupAlert } from "./admin-signup-alert";
 import { writeAudit } from "./audit";
@@ -89,7 +88,7 @@ async function sendAccountExistsEmail(email: string): Promise<void> {
   });
   const sent = await sendEmail({ to: email, subject, html, text });
   if (!sent.ok) {
-    console.error("[sendAccountExistsEmail] email failed:", sent.error);
+    console.error("[sendAccountExistsEmail] email failed");
   }
 }
 
@@ -251,8 +250,8 @@ export async function signUp(_state: ActionState, formData: FormData): Promise<A
       // the form leaking existence (same pattern as requestPasswordReset).
       try {
         await sendAccountExistsEmail(email);
-      } catch (emailErr) {
-        console.error("[signup] account-exists email threw", emailErr);
+      } catch {
+        console.error("[signup] account-exists email threw");
       }
       return { notice: SIGNUP_GENERIC_NOTICE };
     }
@@ -270,21 +269,7 @@ export async function signUp(_state: ActionState, formData: FormData): Promise<A
     viaInvite: signup.viaInvite,
   });
   if (signupAlert.errors.length > 0) {
-    console.error("[signup] admin notification email failed", signupAlert.errors);
-  }
-
-  // Backend-side signup event: the browser SDK isn't loaded during the server
-  // action, so capture it here and set the person's email/name. Analytics
-  // failures must never block or fail a successful signup.
-  try {
-    await captureServerEvent({
-      distinctId: signup.userId,
-      event: "user signed up",
-      properties: { $set: { email, name }, via_invite: signup.viaInvite },
-      groups: { workspace: signup.workspaceId },
-    });
-  } catch {
-    // non-fatal
+    console.error("[signup] admin notification email failed");
   }
 
   if (!signup.viaInvite) {
@@ -303,9 +288,9 @@ export async function signUp(_state: ActionState, formData: FormData): Promise<A
         html: welcome.html,
         text: welcome.text,
       });
-      if (!sent.ok) console.error("[signup] welcome email failed", sent.error);
-    } catch (err) {
-      console.error("[signup] welcome email threw", err);
+      if (!sent.ok) console.error("[signup] welcome email failed");
+    } catch {
+      console.error("[signup] welcome email threw");
     }
 
     // Verification link — confirming it stamps users.email_verified_at and
@@ -314,14 +299,13 @@ export async function signUp(_state: ActionState, formData: FormData): Promise<A
     // the dashboard's verify banner.
     try {
       await sendVerificationEmail(signup.userId, email);
-    } catch (err) {
-      console.error("[signup] verification email threw", err);
+    } catch {
+      console.error("[signup] verification email threw");
     }
 
     // No session and no redirect here: the response is the SAME generic
     // notice the already-registered branch returns, so signup output can't
-    // be used to enumerate accounts. The Google-Ads conversion marker moves
-    // to verifyEmail, where the first authenticated page follows.
+    // be used to enumerate accounts.
     return { notice: SIGNUP_GENERIC_NOTICE };
   }
 
@@ -338,29 +322,7 @@ export async function signUp(_state: ActionState, formData: FormData): Promise<A
     redirect("/login?created=1");
   }
 
-  await setSignupConversionCookie();
-
   redirect("/dashboard");
-}
-
-/**
- * Let the first authenticated page report the completed account creation to
- * Google Ads. The short-lived marker is cleared by the client immediately
- * after gtag accepts the event, preventing ordinary dashboard visits from
- * generating duplicate conversions. Set when a session is actually minted
- * (invite signup, or email verification for public signups) — never on the
- * public signup response itself, where a Set-Cookie that only appears for
- * new addresses would leak account existence.
- */
-async function setSignupConversionCookie(): Promise<void> {
-  const cookieJar = await cookies();
-  cookieJar.set("axel_signup_conversion", "1", {
-    httpOnly: false,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
-    path: "/",
-    maxAge: 10 * 60,
-  });
 }
 
 // A valid pbkdf2 hash of a random throwaway secret, computed once. When the
@@ -460,10 +422,10 @@ export async function requestPasswordReset(_state: ActionState, formData: FormDa
     });
     const sent = await sendEmail({ to: email, subject, html, text });
     if (!sent.ok) {
-      console.error("[requestPasswordReset] email failed:", sent.error);
+      console.error("[requestPasswordReset] email failed");
     }
-  } catch (err) {
-    console.error("[requestPasswordReset] token issue failed:", err);
+  } catch {
+    console.error("[requestPasswordReset] token issue failed");
   }
   return { notice: PASSWORD_RESET_GENERIC_NOTICE };
 }
@@ -504,8 +466,8 @@ export async function resetPassword(_state: ActionState, formData: FormData): Pr
         targetId: lookup.user_id,
       });
     });
-  } catch (err) {
-    console.error("[resetPassword] transaction failed:", err);
+  } catch {
+    console.error("[resetPassword] transaction failed");
     return { error: "Could not reset password. Try again — if it keeps failing, request a fresh link." };
   }
 
@@ -534,20 +496,17 @@ export async function verifyEmail(_state: ActionState, formData: FormData): Prom
     return { error: "This verification link has expired or already been used. Sign in and use “Resend email” to get a fresh one." };
   }
 
-  let firstVerification = false;
   try {
     await withTransaction(async (client) => {
       await markEmailVerificationUsed(lookup.verification_id, client);
       // Conditional on IS NULL so a later token can never move an existing
-      // verification timestamp; rowCount tells us whether THIS confirmation
-      // was the one that verified the account.
-      const updated = await client.query(
+      // verification timestamp.
+      await client.query(
         `UPDATE users
             SET email_verified_at = now(), updated_at = now()
           WHERE id = $1 AND email_verified_at IS NULL`,
         [lookup.user_id],
       );
-      firstVerification = updated.rowCount === 1;
       await writeAudit(client, {
         workspaceId: null,
         actorUserId: lookup.user_id,
@@ -556,16 +515,11 @@ export async function verifyEmail(_state: ActionState, formData: FormData): Prom
         targetId: lookup.user_id,
       });
     });
-  } catch (err) {
-    console.error("[verifyEmail] transaction failed:", err);
+  } catch {
+    console.error("[verifyEmail] transaction failed");
     return { error: "Could not verify your email. Try again — if it keeps failing, sign in and resend the link." };
   }
 
   await createSession(lookup.user_id);
-  if (firstVerification) {
-    // Completed public signup — the next page load is the first authenticated
-    // one, so the Google-Ads conversion marker belongs here (see signUp).
-    await setSignupConversionCookie();
-  }
   redirect("/dashboard");
 }

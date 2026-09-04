@@ -107,7 +107,7 @@ describe("export.toTypeScript", () => {
       { name: "Newsletter webhook" },
     );
     // tsIdentifier collapses non-alphanumerics into PascalCase words —
-    // "Newsletter webhook" → "NewsletterWebhook" and
+    // "Newsletter webhook" becomes "NewsletterWebhook" and
     // "payment_intent.succeeded" → "PaymentIntentSucceeded".
     expect(ts).toMatch(/export interface NewsletterWebhook_PaymentIntentSucceeded/);
     expect(ts).toMatch(/id: string;/);
@@ -152,7 +152,7 @@ describe("export.toJsonSchema", () => {
         },
         sensitive_fields: [{ path: "customer.email", reason: "deterministic" }],
       }),
-      { name: "newsletter provider" },
+      { name: "Newsletter demo" },
     );
     expect(out.$schema).toMatch(/2020-12/);
     expect((out.$defs as Record<string, unknown>).PaymentIntentSucceeded).toBeDefined();

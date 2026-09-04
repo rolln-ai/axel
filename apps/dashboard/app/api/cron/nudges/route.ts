@@ -32,12 +32,12 @@ async function handle(request: Request): Promise<Response> {
       async () => runNudgeScan(),
     );
     return Response.json({ ok: true, summary });
-  } catch (err) {
-    await captureDashboardException(err, {
+  } catch {
+    await captureDashboardException(new Error("nudges_failed"), {
       tags: { component: "nudges_cron", phase: "job" },
     });
     return Response.json(
-      { ok: false, error: err instanceof Error ? err.message : String(err) },
+      { ok: false, error: "nudges_failed" },
       { status: 500 },
     );
   }

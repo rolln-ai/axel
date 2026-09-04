@@ -210,7 +210,7 @@ export function buildErasurePlan(workspaceId: string, matches: ErasureMatch[]): 
       ],
     },
     outOfScope: [
-      { store: "postgres:billing_events / notifications / dead_letter_mutes", reason: "no event_id linkage — out of automated scope" },
+      { store: "postgres:notifications / dead_letter_mutes", reason: "no event_id linkage — out of automated scope" },
       { store: "clickhouse:events_daily", reason: "uniqExact aggregate — cannot surgically retract; expires at 30-day TTL" },
     ],
   };
@@ -252,10 +252,10 @@ export async function executeErasure(
 
   // Re-validate every inline id before any destructive statement runs.
   if (!SAFE_WORKSPACE_ID.test(workspaceId)) {
-    throw new Error(`erasure_unsafe_workspace_id:${workspaceId}`);
+    throw new Error("erasure_unsafe_workspace_id");
   }
   for (const id of plan.eventIds) {
-    if (!SAFE_EVENT_ID.test(id)) throw new Error(`erasure_unsafe_event_id:${id}`);
+    if (!SAFE_EVENT_ID.test(id)) throw new Error("erasure_unsafe_event_id");
   }
 
   const storeResults: ErasureStoreResult[] = [];
@@ -273,8 +273,13 @@ export async function executeErasure(
   if (ch) {
     try {
       spillKeys = await reconstructSpillKeys(ch, workspaceId, plan.eventIds);
-    } catch (err) {
-      storeResults.push({ store: "r2:queue-spill-locate", status: "failed", count: 0, detail: errMsg(err) });
+    } catch {
+      storeResults.push({
+        store: "r2:queue-spill-locate",
+        status: "failed",
+        count: 0,
+        detail: "spill_lookup_failed",
+      });
     }
   }
 
@@ -288,8 +293,13 @@ export async function executeErasure(
         : { store: "r2:axel-events-raw", status: "deleted", count: r2.deleted, detail: `${plan.r2.knownKeys.length} events/ + ${spillKeys.length} queue-spill/` },
     );
     mutationsIssued += r2.deleted;
-  } catch (err) {
-    storeResults.push({ store: "r2:axel-events-raw", status: "failed", count: 0, detail: errMsg(err) });
+  } catch {
+    storeResults.push({
+      store: "r2:axel-events-raw",
+      status: "failed",
+      count: 0,
+      detail: "r2_delete_failed",
+    });
   }
 
   // 3) ClickHouse — run each pre-built, partition-pruned mutation independently.
@@ -302,8 +312,13 @@ export async function executeErasure(
       await ch.query(stmt.statement);
       storeResults.push({ store: `clickhouse:${stmt.table}`, status: "deleted", count: 1, detail: "mutation issued (mutations_sync=1)" });
       mutationsIssued += 1;
-    } catch (err) {
-      storeResults.push({ store: `clickhouse:${stmt.table}`, status: "failed", count: 0, detail: errMsg(err) });
+    } catch {
+      storeResults.push({
+        store: `clickhouse:${stmt.table}`,
+        status: "failed",
+        count: 0,
+        detail: "clickhouse_delete_failed",
+      });
     }
   }
 
@@ -321,8 +336,13 @@ export async function executeErasure(
       }
       storeResults.push({ store: `postgres:${stmt.table}`, status: "deleted", count: deleted });
       mutationsIssued += deleted;
-    } catch (err) {
-      storeResults.push({ store: `postgres:${stmt.table}`, status: "failed", count: 0, detail: errMsg(err) });
+    } catch {
+      storeResults.push({
+        store: `postgres:${stmt.table}`,
+        status: "failed",
+        count: 0,
+        detail: "postgres_delete_failed",
+      });
     }
   };
   const indexStmt = plan.postgres.find((s) => s.table === "erasure_subjects");
@@ -401,9 +421,4 @@ async function reconstructSpillKeys(
 function deletionManifestHash(matches: ErasureMatch[]): string {
   const pairs = [...new Set(matches.map((m) => `${m.event_id}\0${m.r2_key ?? ""}`))].sort();
   return createHash("sha256").update(pairs.join("\n")).digest("hex");
-}
-
-/** Bounded, PII-free error detail for the per-store audit (never the raw value). */
-function errMsg(err: unknown): string {
-  return (err instanceof Error ? err.message : String(err)).slice(0, 300);
 }

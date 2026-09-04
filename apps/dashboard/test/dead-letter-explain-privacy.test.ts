@@ -41,6 +41,11 @@ describe("dead-letter OpenRouter privacy", () => {
     mocks.fetchPayload.mockResolvedValue({
       type: "invoice.paid",
       status: "complete",
+      amount: 1299,
+      customer_id: "cus_private_123",
+      street_address: "123 Private Street",
+      note_short: "tiny-private-value",
+      description: "Ordinary customer prose must stay local",
       password: "hunter2",
       headers: {
         Authorization: "Bearer short-auth-value",
@@ -58,8 +63,8 @@ describe("dead-letter OpenRouter privacy", () => {
               workspace_id: "ws_1",
               event_id: "evt_1",
               source_id: "src_1",
-              route_id: null,
-              destination_id: null,
+              route_id: "rt_1",
+              destination_id: "dst_1",
               r2_key: "raw/ws_1/evt_1.json",
               reason: "destination_rejected",
               message:
@@ -72,11 +77,41 @@ describe("dead-letter OpenRouter privacy", () => {
           rowCount: 1,
         };
       }
+      if (/FROM destinations/.test(sql)) {
+        return {
+          rows: [{ type: "webhook", name: "Private Partner Name" }],
+          rowCount: 1,
+        };
+      }
+      if (/FROM routes/.test(sql)) {
+        return {
+          rows: [
+            {
+              filter_expression: JSON.stringify({
+                kind: "event_type_in",
+                path: "type",
+                values: ["private.event.type"],
+              }),
+              transform_script: JSON.stringify({
+                kind: "collapse_arrays",
+                fields: [
+                  {
+                    path: "tags",
+                    format: "join",
+                    separator: "PRIVATE_SEPARATOR_LITERAL",
+                  },
+                ],
+              }),
+            },
+          ],
+          rowCount: 1,
+        };
+      }
       return { rows: [], rowCount: 1 };
     });
   });
 
-  it("redacts every prompt at the final fetch boundary", async () => {
+  it("sends only structural webhook and allowlisted operational context", async () => {
     let requestBody: Record<string, unknown> | null = null;
     let requestRedirect: RequestRedirect | undefined;
     vi.stubGlobal(
@@ -121,11 +156,28 @@ describe("dead-letter OpenRouter privacy", () => {
       OPAQUE,
       "tiny-token",
       "dXNlcjpwYXNz",
+      "invoice.paid",
+      "complete",
+      "1299",
+      "cus_private_123",
+      "123 Private Street",
+      "tiny-private-value",
+      "Ordinary customer prose must stay local",
+      "Private Partner Name",
+      "private.event.type",
+      "PRIVATE_SEPARATOR_LITERAL",
+      "column customer_id is missing",
     ]) {
       expect(prompt).not.toContain(secret);
     }
-    expect(prompt).toContain("complete");
     expect(prompt).toContain("customer_id");
+    expect(prompt).toContain('"amount":"[number]"');
+    expect(prompt).toContain('"street_address":"[string]"');
+    expect(prompt).toContain('"destination_type":"webhook"');
+    expect(prompt).toContain('"values_withheld":true');
+    expect(prompt).toContain('"kind":"collapse_arrays"');
+    expect(prompt).toContain('"path":"tags"');
+    expect(prompt).toContain('"separator_present":true');
     expect(body.provider).toEqual({ data_collection: "deny" });
     expect(requestRedirect).toBe("manual");
     expect(result.data?.summary).toContain("customer_id");

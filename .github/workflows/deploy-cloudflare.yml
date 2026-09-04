@@ -10,10 +10,9 @@ on:
       service:
         description: Worker to deploy
         required: true
-        default: all
+        default: ingest-worker
         type: choice
         options:
-          - all
           - ingest-worker
           - router-edge
           - delivery-edge
@@ -45,6 +44,10 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
 
+      - name: Mark the production mutation attempt
+        id: mutation_attempt
+        run: echo "attempted=true" >> "$GITHUB_OUTPUT"
+
       - name: Harden and verify the native delivery queue
         run: node scripts/harden-cloudflare-native-queue.mjs
         env:
@@ -59,7 +62,17 @@ jobs:
       - name: Apply pending Postgres migrations
         run: ./scripts/run-migrations.sh
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL: ${{ secrets.DATABASE_MIGRATION_URL }}
+          DATABASE_MIGRATION_ROLE: ${{ vars.DATABASE_MIGRATION_ROLE }}
+          DATABASE_MIGRATION_LOGIN_ROLE: ${{ vars.DATABASE_MIGRATION_LOGIN_ROLE }}
+          DATABASE_MIGRATION_EXISTING_LOGIN_ROLES: ${{ vars.DATABASE_MIGRATION_EXISTING_LOGIN_ROLES }}
+          DATABASE_MIGRATION_OWNER_PARENT_ROLES: ${{ vars.DATABASE_MIGRATION_OWNER_PARENT_ROLES }}
+          DATABASE_MIGRATION_OWNER_CAN_CREATE_ROLES: ${{ vars.DATABASE_MIGRATION_OWNER_CAN_CREATE_ROLES }}
+          DATABASE_TRANSITIONAL_OWNER_LOGIN_ROLE: ${{ vars.DATABASE_TRANSITIONAL_OWNER_LOGIN_ROLE }}
+          DATABASE_CANARY_WRITER_ROLE: ${{ vars.DATABASE_CANARY_WRITER_ROLE }}
+          DATABASE_RUNTIME_CAPABILITY_ROLES: ${{ vars.DATABASE_RUNTIME_CAPABILITY_ROLES }}
+          DATABASE_VERIFY_CAPABILITY_ROLE: ${{ vars.DATABASE_VERIFY_CAPABILITY_ROLE }}
+          DATABASE_MIGRATION_ROLE_REQUIRED: "1"
 
       - name: Prepare commit release in Sentry
         env:
@@ -72,7 +85,7 @@ jobs:
             "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
 
       - name: Verify ingest source-lookup control plane
-        if: ${{ inputs.service == 'all' || inputs.service == 'ingest-worker' }}
+        if: ${{ inputs.service == 'ingest-worker' }}
         env:
           DELIVERY_SERVICE_URL: ${{ vars.DELIVERY_SERVICE_URL || 'https://axel-delivery-native.onrender.com' }}
           SOURCE_LOOKUP_SHARED_SECRET: ${{ secrets.SOURCE_LOOKUP_SHARED_SECRET }}
@@ -92,15 +105,76 @@ jobs:
             }
           '
 
+      - name: Preflight required ingest Worker secrets
+        if: ${{ inputs.service == 'ingest-worker' }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ORDERING_KEY_HMAC_SECRET: ${{ secrets.ORDERING_KEY_HMAC_SECRET }}
+        run: |
+          set -euo pipefail
+          : "${ORDERING_KEY_HMAC_SECRET:?ORDERING_KEY_HMAC_SECRET is required}"
+          if [ "${#ORDERING_KEY_HMAC_SECRET}" -lt 32 ]; then
+            echo "ORDERING_KEY_HMAC_SECRET must be at least 32 characters" >&2
+            exit 1
+          fi
+          secret_list="$(pnpm --filter @axel/ingest-worker exec wrangler secret list --format json)"
+          SECRET_LIST="$secret_list" node -e '
+            const entries = JSON.parse(process.env.SECRET_LIST || "null");
+            const names = new Set(Array.isArray(entries) ? entries.map((entry) => entry?.name) : []);
+            if (!names.has("ORDERING_KEY_HMAC_SECRET")) {
+              throw new Error("Run Sync Cloudflare Runtime Secrets for ingest-worker before this deploy.");
+            }
+          '
+
       - name: Deploy ingest worker
-        if: ${{ inputs.service == 'all' || inputs.service == 'ingest-worker' }}
+        if: ${{ inputs.service == 'ingest-worker' }}
         run: pnpm --filter @axel/ingest-worker exec wrangler deploy --tag "$GITHUB_SHA" --message "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}" --upload-source-maps
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
+      - name: Read back required ingest Worker secrets
+        if: ${{ inputs.service == 'ingest-worker' }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          secret_list="$(pnpm --filter @axel/ingest-worker exec wrangler secret list --format json)"
+          SECRET_LIST="$secret_list" node -e '
+            const entries = JSON.parse(process.env.SECRET_LIST || "null");
+            const names = new Set(Array.isArray(entries) ? entries.map((entry) => entry?.name) : []);
+            if (!names.has("ORDERING_KEY_HMAC_SECRET")) {
+              throw new Error("Activated ingest Worker is missing its ordering-key HMAC binding.");
+            }
+          '
+
+      - name: Verify ingest source authority fence
+        if: ${{ inputs.service == 'ingest-worker' }}
+        env:
+          AXEL_INGEST_URL: ${{ vars.AXEL_INGEST_URL || 'https://ingest.axelapp.ai' }}
+          INGEST_ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          : "${INGEST_ADMIN_TOKEN:?ADMIN_TOKEN is required}"
+          probe_token="$(node -e 'process.stdout.write(crypto.randomUUID().replaceAll("-", ""))')"
+          probe_id="__source_authority_deploy_probe__"
+          curl -fsS --connect-timeout 10 --max-time 15 \
+            -X POST "${AXEL_INGEST_URL%/}/admin/source-authority/fence" \
+            -H 'content-type: application/json' \
+            -H "x-axel-admin-token: ${INGEST_ADMIN_TOKEN}" \
+            --data "{\"source_id\":\"${probe_id}\",\"fence_token\":\"${probe_token}\"}" \
+            -o /dev/null
+          curl -fsS --connect-timeout 10 --max-time 15 \
+            -X POST "${AXEL_INGEST_URL%/}/admin/source-authority/sync" \
+            -H 'content-type: application/json' \
+            -H "x-axel-admin-token: ${INGEST_ADMIN_TOKEN}" \
+            --data "{\"source_id\":\"${probe_id}\",\"fence_token\":\"${probe_token}\",\"source\":null}" \
+            -o /dev/null
+
       - name: Record ingest worker deploy in Sentry
-        if: ${{ inputs.service == 'all' || inputs.service == 'ingest-worker' }}
+        if: ${{ inputs.service == 'ingest-worker' }}
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: rolln
@@ -112,14 +186,14 @@ jobs:
             "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
       - name: Deploy router edge
-        if: ${{ inputs.service == 'all' || inputs.service == 'router-edge' }}
+        if: ${{ inputs.service == 'router-edge' }}
         run: pnpm --filter @axel/router-edge exec wrangler deploy --tag "$GITHUB_SHA" --message "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}" --upload-source-maps
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
       - name: Record router edge deploy in Sentry
-        if: ${{ inputs.service == 'all' || inputs.service == 'router-edge' }}
+        if: ${{ inputs.service == 'router-edge' }}
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: rolln
@@ -131,14 +205,14 @@ jobs:
             "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
       - name: Deploy delivery edge
-        if: ${{ inputs.service == 'all' || inputs.service == 'delivery-edge' }}
+        if: ${{ inputs.service == 'delivery-edge' }}
         run: pnpm --filter @axel/delivery-edge exec wrangler deploy --tag "$GITHUB_SHA" --message "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}" --upload-source-maps
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
       - name: Record delivery edge deploy in Sentry
-        if: ${{ inputs.service == 'all' || inputs.service == 'delivery-edge' }}
+        if: ${{ inputs.service == 'delivery-edge' }}
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: rolln
@@ -150,6 +224,7 @@ jobs:
             "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
       - name: Run post-deploy smoke
+        if: ${{ always() && steps.mutation_attempt.outputs.attempted == 'true' }}
         run: bash scripts/smoke.sh
         env:
           AXEL_MARKETING_URL: ${{ vars.AXEL_MARKETING_URL || 'https://axelapp.ai' }}

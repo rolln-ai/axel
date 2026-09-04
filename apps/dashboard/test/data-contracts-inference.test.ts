@@ -501,7 +501,7 @@ describe("inferDataContract — top-level orchestration", () => {
     expect(byPath.get("weird")).toBe("model");
   });
 
-  it("aliases clusters and redacts secret-like values before calling the LLM", async () => {
+  it("aliases clusters and sends only field names, shape, and type markers to the LLM", async () => {
     const secretType = ["sk", "live", "51Secret", "Webhook", "EventType"].join("_");
     const jwt = [
       "eyJhbGci",
@@ -517,6 +517,7 @@ describe("inferDataContract — top-level orchestration", () => {
     ].join("");
     const opaque = ["Ab9_cdEf", "GhijKLMN", "opQRstUV", "wxYZ0123", "456789ab"].join("");
     let observedPrompt = "";
+    let observedSystemPrompt = "";
 
     const out = await inferDataContract(
       [
@@ -524,6 +525,10 @@ describe("inferDataContract — top-level orchestration", () => {
           type: secretType,
           status: "complete",
           amount: 1299,
+          street_address: "123 Private Street",
+          note_short: "tiny-private-value",
+          description: "Ordinary customer prose must stay local",
+          "private.event.type": "dynamic-key-value",
           password: "hunter2",
           headers: {
             Authorization: "Bearer short-auth-value",
@@ -537,6 +542,7 @@ describe("inferDataContract — top-level orchestration", () => {
         apiKey: "fake",
         callLlm: async (request) => {
           observedPrompt = request.userPrompt;
+          observedSystemPrompt = request.systemPrompt;
           return {
             cluster_names: { cluster_1: "Redacted webhook event" },
             sensitive_field_paths: ["password"],
@@ -556,12 +562,24 @@ describe("inferDataContract — top-level orchestration", () => {
       "query-secret",
       jwt,
       opaque,
+      "complete",
+      "1299",
+      "123 Private Street",
+      "tiny-private-value",
+      "Ordinary customer prose must stay local",
+      "private.event.type",
+      "dynamic-key-value",
     ]) {
       expect(observedPrompt).not.toContain(secret);
     }
     expect(observedPrompt).toContain("cluster_id: cluster_1");
-    expect(observedPrompt).toContain("complete");
+    expect(observedPrompt).not.toContain("observed_name_hint");
     expect(observedPrompt).toContain("amount");
+    expect(observedPrompt).toContain("street_address");
+    expect(observedPrompt).toContain("[dynamic_key_1]");
+    expect(observedPrompt).toContain('"[string]"');
+    expect(observedPrompt).toContain('"[number]"');
+    expect(observedSystemPrompt).toContain("Primitive values and event-type values are withheld");
     expect(out.event_types[0]?.name).toBe("Redacted webhook event");
     expect(out.sensitive_fields).toContainEqual({ path: "password", reason: "both" });
   });
@@ -603,8 +621,14 @@ describe("inferDataContract — top-level orchestration", () => {
     expect(requestInit?.redirect).toBe("manual");
     const body = JSON.parse(String(requestInit?.body)) as {
       provider?: { data_collection?: string };
+      messages?: Array<{ role?: string; content?: string }>;
     };
     expect(body.provider).toEqual({ data_collection: "deny" });
+    const prompt = body.messages?.find((message) => message.role === "user")?.content ?? "";
+    expect(prompt).not.toContain("invoice.paid");
+    expect(prompt).not.toContain("1200");
+    expect(prompt).toContain("amount");
+    expect(prompt).toContain('"[number]"');
   });
 
   it("falls back to deterministic if the LLM call throws", async () => {

@@ -68,6 +68,52 @@ describe("understandSourceImpl", () => {
     expect(result.error).toMatch(/no events available/i);
   });
 
+  it("does not expose sampler exceptions", async () => {
+    const marker = "s3://marker-secret@private-payload-store/internal-key";
+    const result = await understandSourceImpl(
+      ownerSession(),
+      fd({ source_id: "src_1" }),
+      {
+        sampler: async () => {
+          throw new Error(marker);
+        },
+      },
+    );
+
+    expect(result.error).toBe(
+      "Couldn't sample events. Check the source storage connection and try again.",
+    );
+    expect(result.error).not.toContain(marker);
+  });
+
+  it("does not expose inference exceptions", async () => {
+    const marker = "provider response included marker-secret";
+    const result = await understandSourceImpl(
+      ownerSession(),
+      fd({ source_id: "src_1" }),
+      {
+        sampler: async () => [
+          {
+            event_id: "e1",
+            received_at: "t",
+            shard: 0,
+            headers: {},
+            payload: { id: "1" },
+            shape_hash: "h1",
+          },
+        ],
+        inferer: async () => {
+          throw new Error(marker);
+        },
+      },
+    );
+
+    expect(result.error).toBe(
+      "Could not infer a Data Contract from the sampled events. Try again.",
+    );
+    expect(result.error).not.toContain(marker);
+  });
+
   it("creates an data contract + first version from inferred output", async () => {
     const createdMaps: Array<{ workspaceId: string; sourceId: string; name: string }> = [];
     const appendedFor: string[] = [];
@@ -157,7 +203,10 @@ describe("understandSourceImpl", () => {
           model_metadata: { model: null, prompt_version: "v", sample_count: 1, llm_enriched: false, ms: null },
         }),
         creator: async () => {
-          throw new Error('duplicate key value violates unique constraint "data_contracts_workspace_lower_name_idx"');
+          throw Object.assign(new Error("duplicate key"), {
+            code: "23505",
+            constraint: "data_contracts_workspace_lower_name_idx",
+          });
         },
         versionAppender: async () => {
           throw new Error("should not be called");
@@ -165,6 +214,49 @@ describe("understandSourceImpl", () => {
       },
     );
     expect(result.error).toMatch(/already exists/i);
+  });
+
+  it("does not expose persistence exceptions", async () => {
+    const marker = "postgresql://user:marker-secret@private-db.internal/schema";
+    const result = await understandSourceImpl(
+      ownerSession(),
+      fd({ source_id: "src_1" }),
+      {
+        sampler: async () => [
+          {
+            event_id: "e1",
+            received_at: "t",
+            shard: 0,
+            headers: {},
+            payload: { id: "1" },
+            shape_hash: "h1",
+          },
+        ] satisfies SampledEvent[],
+        inferer: async () => ({
+          event_types: [],
+          fields: {},
+          ids: [],
+          timestamps: [],
+          status_fields: [],
+          sensitive_fields: [],
+          summary: "",
+          model_metadata: {
+            model: null,
+            prompt_version: "test",
+            sample_count: 1,
+            llm_enriched: false,
+            ms: null,
+          },
+        }),
+        creator: async () => {
+          throw new Error(marker);
+        },
+      },
+    );
+
+    expect(result.error).toBe("Could not create the Data Contract. Try again.");
+    expect(result.error).not.toContain(marker);
+    expect(result.error).not.toContain("private-db.internal");
   });
 });
 
@@ -436,14 +528,16 @@ describe("approvePatchImpl", () => {
     expect(result.error).not.toContain("k1");
   });
 
-  it("wraps generic approval errors with context, doesn't leak stack", async () => {
+  it("does not expose generic approval error details", async () => {
+    const marker = "postgresql://user:marker-secret@private-db.internal/schema";
     const result = await approvePatchImpl(ownerSession(), baseInput(), {
       approvePatch: async () => {
-        throw new Error("pg pool exhausted");
+        throw new Error(marker);
       },
     });
-    expect(result.error).toMatch(/Approval failed/);
-    expect(result.error).toMatch(/pg pool exhausted/);
+    expect(result.error).toBe("Approval failed. No changes were applied. Try again.");
+    expect(result.error).not.toContain(marker);
+    expect(result.error).not.toContain("private-db.internal");
   });
 });
 

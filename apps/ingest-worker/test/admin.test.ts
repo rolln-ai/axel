@@ -2,7 +2,14 @@ import { afterEach, describe, it, expect, beforeEach, vi } from "vitest";
 import { createHash } from "node:crypto";
 import worker, { type Env } from "../src/index.js";
 import type { QueueMessage, Source } from "@axel/shared";
-import { handleTriggerEvent, type TriggerEventDeps } from "../src/admin.js";
+import {
+  handleSourceAuthorityFence,
+  handleSourceAuthoritySync,
+  handleSourceCacheInvalidate,
+  handleSourceCachePut,
+  handleTriggerEvent,
+  type TriggerEventDeps,
+} from "../src/admin.js";
 import { resetRateLimitsForTests } from "../src/rate-limit.js";
 import { inMemorySourceCache, type SourceCache } from "../src/source-cache.js";
 
@@ -65,6 +72,112 @@ const ctx = {
   waitUntil(p: Promise<unknown>): void { void p; },
   passThroughOnException(): void {},
 } as unknown as ExecutionContext;
+
+describe("admin source authority endpoints", () => {
+  const source: Source = {
+    source_id: "src_1",
+    workspace_id: "ws_1",
+    name: "Webhook",
+    secret_token: tokenHash("token"),
+    status: "active",
+  };
+
+  function adminRequest(path: string, body: unknown): Request {
+    return new Request(`https://axel.test${path}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-axel-admin-token": "tok-admin",
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("fences authority before clearing rollback KV", async () => {
+    const order: string[] = [];
+    const response = await handleSourceAuthorityFence(
+      adminRequest("/admin/source-authority/fence", {
+        source_id: "src_1",
+        fence_token: "fence_token_00000001",
+      }),
+      {
+        adminToken: "tok-admin",
+        authority: {
+          fence: vi.fn(async () => { order.push("fence"); }),
+          sync: vi.fn(),
+          bootstrap: vi.fn(),
+          invalidate: vi.fn(),
+        },
+        cache: {
+          get: vi.fn(),
+          put: vi.fn(),
+          invalidate: vi.fn(async () => { order.push("kv-delete"); }),
+        },
+      },
+    );
+    expect(response.status).toBe(204);
+    expect(order).toEqual(["fence", "kv-delete"]);
+  });
+
+  it("keeps sync fail-closed when the authority rejects it", async () => {
+    const response = await handleSourceAuthoritySync(
+      adminRequest("/admin/source-authority/sync", {
+        source_id: "src_1",
+        fence_token: "fence_token_00000001",
+        source,
+      }),
+      {
+        adminToken: "tok-admin",
+        cache: null,
+        authority: {
+          fence: vi.fn(),
+          sync: vi.fn(async () => { throw new Error("mismatch"); }),
+          bootstrap: vi.fn(),
+          invalidate: vi.fn(),
+        },
+      },
+    );
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "source_authority_sync_failed" });
+  });
+
+  it("accepts an authoritative deletion and works without a DO binding", async () => {
+    const response = await handleSourceAuthoritySync(
+      adminRequest("/admin/source-authority/sync", {
+        source_id: "src_1",
+        fence_token: "fence_token_00000001",
+        source: null,
+      }),
+      { adminToken: "tok-admin", cache: null, authority: null },
+    );
+    expect(response.status).toBe(204);
+  });
+
+  it("fails hosted fence and sync when the required binding is missing", async () => {
+    const env = makeEnv({ adminToken: "tok-admin", cache: inMemorySourceCache() });
+    env.SOURCE_AUTHORITY_REQUIRED = "true";
+    const fence = await worker.fetch(
+      adminRequest("/admin/source-authority/fence", {
+        source_id: "src_1",
+        fence_token: "fence_token_00000001",
+      }),
+      env,
+      ctx,
+    );
+    expect(fence.status).toBe(503);
+
+    const sync = await worker.fetch(
+      adminRequest("/admin/source-authority/sync", {
+        source_id: "src_1",
+        fence_token: "fence_token_00000001",
+        source,
+      }),
+      env,
+      ctx,
+    );
+    expect(sync.status).toBe(503);
+  });
+});
 
 describe("admin source-cache invalidation endpoint", () => {
   beforeEach(() => {
@@ -133,6 +246,29 @@ describe("admin source-cache invalidation endpoint", () => {
     expect(cache.size()).toBe(0);
   });
 
+  it("refreshes authority before deleting rollback KV for legacy dashboards", async () => {
+    const order: string[] = [];
+    const response = await handleSourceCacheInvalidate(
+      invalidateRequest("tok-admin", { source_id: "src_legacy" }),
+      {
+        adminToken: "tok-admin",
+        authority: {
+          fence: vi.fn(),
+          sync: vi.fn(),
+          bootstrap: vi.fn(),
+          invalidate: vi.fn(async () => { order.push("authority-refresh"); }),
+        },
+        cache: {
+          get: vi.fn(),
+          put: vi.fn(),
+          invalidate: vi.fn(async () => { order.push("kv-delete"); }),
+        },
+      },
+    );
+    expect(response.status).toBe(204);
+    expect(order).toEqual(["authority-refresh", "kv-delete"]);
+  });
+
   it("returns 204 even when no cache is configured (dev mode parity)", async () => {
     const env = makeEnv({ adminToken: "tok-admin" });
     // No cache override and no SOURCE_CACHE binding.
@@ -150,9 +286,9 @@ describe("admin source-cache invalidation endpoint", () => {
       },
     });
     const res = await worker.fetch(
-      new Request("https://axel.test/in/src_e2e?token=tok-src", {
+      new Request("https://axel.test/in/src_e2e", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "x-axel-token": "tok-src" },
         body: "{}",
       }),
       env,
@@ -183,7 +319,7 @@ describe("admin source-cache invalidation endpoint", () => {
       ctx,
     );
     expect(res.status).toBe(503);
-    expect(await res.json()).toEqual({ error: "cache_invalidation_failed" });
+    expect(await res.json()).toEqual({ error: "source_authority_fence_failed" });
   });
 });
 
@@ -255,7 +391,7 @@ describe("admin source-cache PUT endpoint", () => {
     expect(res.status).toBe(400);
   });
 
-  it("writes the source to the cache so subsequent lookups resolve it", async () => {
+  it("does not write source credentials to rollback KV", async () => {
     const cache = inMemorySourceCache();
     const env = makeEnv({ adminToken: "tok-admin", cache });
 
@@ -267,44 +403,56 @@ describe("admin source-cache PUT endpoint", () => {
       ctx,
     );
     expect(res.status).toBe(204);
-    expect(cache.size()).toBe(1);
+    expect(cache.size()).toBe(0);
 
-    // Now an ingest request with the matching plaintext token should succeed
-    // — the worker hashes the presented token before constant-time comparison.
+    // Hosted and fallback ingest never use this positive KV entry. With no
+    // source at the direct dev origin, authorization remains a miss.
     const ingestRes = await worker.fetch(
-      new Request(`https://axel.test/in/src_pushed?token=${PUSHED_PLAINTEXT}`, {
+      new Request("https://axel.test/in/src_pushed", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          "x-axel-token": PUSHED_PLAINTEXT,
+        },
         body: "{}",
       }),
       env,
       ctx,
     );
-    expect(ingestRes.status).toBe(202);
+    expect(ingestRes.status).toBe(404);
   });
 
-  it("defaults admin-pushed source entries to a five-minute TTL", async () => {
-    let writtenTtl: number | undefined;
+  it("bootstraps authority state without writing the source to KV", async () => {
+    const put = vi.fn();
+    const bootstrap = vi.fn();
     const cache: SourceCache = {
       async get() { return undefined; },
-      async put(_sourceId, _value, ttlSeconds) { writtenTtl = ttlSeconds; },
+      put,
       async invalidate() {},
     };
-    const env = makeEnv({ adminToken: "tok-admin", cache });
-    const res = await worker.fetch(
+    const res = await handleSourceCachePut(
       putRequest("tok-admin", { source_id: "src_pushed", source: VALID_SOURCE }),
-      env,
-      ctx,
+      {
+        adminToken: "tok-admin",
+        cache,
+        authority: {
+          fence: vi.fn(),
+          sync: vi.fn(),
+          bootstrap,
+          invalidate: vi.fn(),
+        },
+      },
     );
     expect(res.status).toBe(204);
-    expect(writtenTtl).toBe(300);
+    expect(bootstrap).toHaveBeenCalledWith("src_pushed", VALID_SOURCE);
+    expect(put).not.toHaveBeenCalled();
   });
 
-  it("caps an explicit source-cache TTL at five minutes", async () => {
-    let writtenTtl: number | undefined;
+  it("ignores a legacy TTL without persisting source config", async () => {
+    const put = vi.fn();
     const cache: SourceCache = {
       async get() { return undefined; },
-      async put(_sourceId, _value, ttlSeconds) { writtenTtl = ttlSeconds; },
+      put,
       async invalidate() {},
     };
     const env = makeEnv({ adminToken: "tok-admin", cache });
@@ -318,7 +466,7 @@ describe("admin source-cache PUT endpoint", () => {
       ctx,
     );
     expect(res.status).toBe(204);
-    expect(writtenTtl).toBe(300);
+    expect(put).not.toHaveBeenCalled();
   });
 
   it("returns 204 with no cache configured (dev parity)", async () => {
@@ -568,8 +716,13 @@ describe("admin trigger-event endpoint — parity with the public ingest path", 
       status: "active",
       ...source,
     } as unknown as Source;
+    const confirmSourceAuthorization = vi.fn(async () => undefined);
     const deps: TriggerEventDeps = {
-      lookupSource: async () => resolved,
+      beginSourceAuthorization: async () => ({
+        source: resolved,
+        authorizationVersion: "authority_version_00000001",
+      }),
+      confirmSourceAuthorization,
       adminToken: "tok-admin",
       rawPayloads: r2.bucket,
       queueForShard: () => queue as unknown as Queue<unknown>,
@@ -579,7 +732,15 @@ describe("admin trigger-event endpoint — parity with the public ingest path", 
       indexSubjects: async (a) => { indexCalls.push(a as IndexCall); },
       logEvent: async (m) => { logCalls.push(m); },
     };
-    return { deps, puts: r2.puts, sent: queue.sent, indexCalls, logCalls, waited };
+    return {
+      deps,
+      puts: r2.puts,
+      sent: queue.sent,
+      indexCalls,
+      logCalls,
+      waited,
+      confirmSourceAuthorization,
+    };
   }
 
   function triggerRequest(token: string, body: unknown): Request {
@@ -648,9 +809,11 @@ describe("admin trigger-event endpoint — parity with the public ingest path", 
     expect(queued[0]).toMatchObject({
       source_id: "src_selfhost",
       workspace_id: "ws_selfhost",
-      event_type: "selfhost.test",
       is_test: true,
     });
+    expect(queued[0]!.event_type).toBeUndefined();
+    expect(queued[0]!.headers).toEqual({});
+    expect(queued[0]!.query).toEqual({});
   });
 
   it("returns a retryable 503 without writing when the fallback is unavailable", async () => {
@@ -688,6 +851,21 @@ describe("admin trigger-event endpoint — parity with the public ingest path", 
     expect(h.sent[0]!.size_bytes).toBe(h.puts[0]!.body.byteLength); // size reflects stored, not raw
   });
 
+  it("confirms the source authority version before the first durable write", async () => {
+    const h = harness({});
+    h.deps.confirmSourceAuthorization = async () => {
+      throw new Error("source authorization changed");
+    };
+
+    await expect(handleTriggerEvent(
+      triggerRequest("tok-admin", { source_id: "src_1", body: { ok: 1 } }),
+      h.deps,
+    )).rejects.toThrow("source authorization changed");
+    expect(h.puts).toHaveLength(0);
+    expect(h.sent).toHaveLength(0);
+    expect(h.logCalls).toHaveLength(0);
+  });
+
   it("indexes erasure subjects from the ORIGINAL pre-redaction body, via waitUntil", async () => {
     const h = harness({ redact_paths: ["card"] });
     await handleTriggerEvent(triggerRequest("tok-admin", { source_id: "src_1", body: { card: "4111111111111111", ok: 1 } }), h.deps);
@@ -708,23 +886,30 @@ describe("admin trigger-event endpoint — parity with the public ingest path", 
     expect(new TextDecoder().decode(h.puts[0]!.body)).toContain("4111111111111111");
   });
 
-  it("logs the QUEUED message to ClickHouse via waitUntil (event_type stamped), like the public path", async () => {
-    // Every sampler / inspection surface reads FROM events in ClickHouse.
-    // Without this insert, triggered/seeded events are invisible to Data
-    // Contract type discovery no matter how the queue message is stamped —
-    // which broke seed-sample-events' "Seed, Refresh, types appear" promise.
+  it("logs a value-free QUEUED message to ClickHouse via waitUntil", async () => {
+    // Every sampler and inspection surface reads FROM events in ClickHouse,
+    // but admin-supplied request values must not cross that index boundary.
     const h = harness({});
     const res = await handleTriggerEvent(
-      triggerRequest("tok-admin", { source_id: "src_1", body: { type: "invoice.paid", ok: 1 } }),
+      triggerRequest("tok-admin", {
+        source_id: "src_1",
+        body: { type: "invoice.paid", ok: 1 },
+        headers: { "x-customer-ref": "secret-under-innocuous-header-name" },
+        actor_kind: "secret-under-innocuous-actor-name",
+      }),
       h.deps,
     );
     expect(res.status).toBe(202);
     await Promise.all(h.waited);
     expect(h.logCalls).toHaveLength(1);
-    // Exactly the message the queue got — same row the public /in/<id> path
+    // Exactly the message the queue got: same row the public /in/<id> path
     // would log, so ClickHouse and the queue can never disagree.
     expect(h.logCalls[0]).toEqual(h.sent[0]);
-    expect(h.logCalls[0]!.event_type).toBe("invoice.paid");
+    expect(h.logCalls[0]!.event_type).toBeUndefined();
+    expect(h.logCalls[0]!.headers).toEqual({});
+    expect(h.logCalls[0]!.query).toEqual({});
+    expect(JSON.stringify(h.logCalls[0])).not.toContain("secret-under-innocuous-header-name");
+    expect(h.puts[0]!.meta.actor_kind).toBe("admin");
     expect(h.logCalls[0]!.is_test).toBe(true);
     // Fired post-202 via waitUntil (indexSubjects + logEvent), never blocking.
     expect(h.waited).toHaveLength(2);

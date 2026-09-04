@@ -1,28 +1,11 @@
 import type { Source } from "@axel/shared";
 
 /**
- * Edge cache for source lookups.
- *
- * The hot path of the ingest worker resolves a source on every request to
- * validate the token, check status, and read per-source caps. Without an
- * edge cache, that's a Postgres round-trip per accepted webhook — even at
- * 5M events/month that's wasteful, and at higher volumes it pins the
- * control-plane DB.
- *
- * Strategy:
- * - **Positive cache** (5 min TTL by default): if we found a source, store
- *   it. Next request hits KV (1ms p99) instead of Postgres (10–50ms p99).
- * - **Negative cache** (30s TTL): if we did NOT find a source, store a
- *   sentinel so an attacker spamming unknown source IDs can't burn DB
- *   capacity. Short TTL so legitimate source creation is still visible
- *   within ~30s without an explicit invalidation.
- *
- * Invalidation:
- * - Token rotation, source disable, and privacy-policy changes use required
- *   control-plane invalidation before and after their database write. The
- *   five-minute TTL bounds post-commit edge failure, distributed KV
- *   propagation, and an old lookup already in flight when the final delete
- *   lands.
+ * Legacy KV source cache retained for rollback cleanup and compatibility with
+ * the old admin routes. The ingest authorization path does not call
+ * `resolveSource` or trust `src:*` entries. Hosted authorization uses the
+ * per-source Durable Object; self-host authorization calls the authenticated
+ * delivery-service origin on every request.
  */
 
 export interface SourceCacheLookup {
@@ -52,9 +35,8 @@ export interface ResolveSourceOptions {
 }
 
 /**
- * Resolve a source through the optional cache. If `cache` is null (e.g. no
- * KV binding configured), the lookup runs every call and the function is
- * indistinguishable from calling `lookup` directly.
+ * Legacy resolver kept for isolated tests and rollback tooling. Do not use it
+ * for webhook authorization.
  */
 export async function resolveSource(
   cache: SourceCache | null,
@@ -86,13 +68,12 @@ export async function resolveSource(
 }
 
 /**
- * Wrap a Cloudflare KV namespace into a `SourceCache`. Values are stored as
- * compact JSON; KV's minimum TTL is 60s so we clamp negative TTLs accordingly.
+ * Wrap a Cloudflare KV namespace into a `SourceCache`. Only misses are stored
+ * as compact JSON; positive writes delete any historic secret-bearing value.
+ * KV's minimum TTL is 60s, so negative TTLs are clamped accordingly.
  *
- * Reads and writes tolerate KV being temporarily unavailable: a failed read is
- * treated as a cache miss and a failed write only costs another upstream
- * lookup. Invalidation is different: callers use it to prove a revoked token
- * or tightened policy is no longer cached, so delete failures must propagate.
+ * Reads and writes tolerate KV being unavailable. Deletes propagate errors so
+ * a fence request also proves rollback state no longer contains the old row.
  */
 export interface KVNamespaceLike {
   get(key: string, type?: "text" | "json"): Promise<unknown>;
@@ -100,23 +81,17 @@ export interface KVNamespaceLike {
   delete(key: string): Promise<void>;
 }
 
-// Bump when a previously cached Source shape could change authentication
-// semantics. Version 3 also invalidates already-deployed v2 positives that may
-// still carry the former one-year admin TTL, forcing them to repopulate under
-// the five-minute revocation bound.
-const SOURCE_CACHE_SCHEMA_VERSION = 3;
-
 export function kvSourceCache(kv: KVNamespaceLike): SourceCache {
   return {
     async get(sourceId) {
       try {
         const raw = await kv.get(`src:${sourceId}`, "text");
         if (typeof raw !== "string") return undefined;
-        const parsed = JSON.parse(raw) as CachedLookup & { cache_schema_version?: unknown };
+        const parsed = JSON.parse(raw) as CachedLookup;
         if (parsed.kind === "miss") return parsed;
-        if (parsed.kind !== "hit") return undefined;
-        if (parsed.cache_schema_version !== SOURCE_CACHE_SCHEMA_VERSION) return undefined;
-        return { kind: "hit", source: parsed.source };
+        // Historic positive entries may contain secret-bearing source config.
+        // They are deliberately unreadable in the current adapter.
+        return undefined;
       } catch {
         // KV miss / KV down / corrupted entry: behave like an empty cache
         // so the caller falls through to upstream lookup.
@@ -125,10 +100,12 @@ export function kvSourceCache(kv: KVNamespaceLike): SourceCache {
     },
     async put(sourceId, value, ttlSeconds) {
       try {
-        const stored = value.kind === "hit"
-          ? { ...value, cache_schema_version: SOURCE_CACHE_SCHEMA_VERSION }
-          : value;
-        await kv.put(`src:${sourceId}`, JSON.stringify(stored), {
+        if (value.kind === "hit") {
+          // Remove a historic value instead of persisting source credentials.
+          await kv.delete(`src:${sourceId}`);
+          return;
+        }
+        await kv.put(`src:${sourceId}`, JSON.stringify(value), {
           expirationTtl: Math.max(60, Math.floor(ttlSeconds)),
         });
       } catch {

@@ -16,6 +16,7 @@
  */
 import {
   evaluateRouteFanout,
+  isCanonicalRawPayloadKey,
   type DestinationQueueMessage,
   type QueueMessage,
   type QueueSpillWriter,
@@ -122,12 +123,22 @@ export async function processQueueMessage(
   deps: RouterDeps,
   message: QueueMessage,
   scope?: FanoutScope,
+  /** Original event id for a replay-tagged message. Defaults to the wire id. */
+  expectedRawEventId: string = message.event_id,
 ): Promise<RouterProcessResult> {
+  if (!isCanonicalRawPayloadKey(message.r2_key, {
+    workspaceId: message.workspace_id,
+    eventId: expectedRawEventId,
+    sourceId: message.source_id,
+  })) {
+    throw new Error("raw_payload_key_mismatch");
+  }
   const raw = await deps.rawPayloads.get(message.r2_key);
   if (!raw) {
     await deps.logger?.record("router.payload_missing", {
       event_id: message.event_id,
-      r2_key: message.r2_key,
+      workspace_id: message.workspace_id,
+      source_id: message.source_id,
     });
     // A REPLAY whose R2 payload is gone must NOT vanish silently — record a
     // dead_letter so it stays visible in the inbox (audit: data loss). The
@@ -148,7 +159,7 @@ export async function processQueueMessage(
         route_id: replayRouteId,
         r2_key: message.r2_key,
         reason: "payload_missing",
-        message: `Replay payload not found in storage (r2_key=${message.r2_key}).`,
+        message: "Replay payload not found in storage.",
         errored_at: now,
       });
       deadLettered = 1;

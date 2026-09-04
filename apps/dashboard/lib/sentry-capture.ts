@@ -1,7 +1,21 @@
 import "server-only";
 import * as Sentry from "@sentry/nextjs";
+import { sanitizeTelemetryValue } from "./telemetry-sanitization";
 
 const FLUSH_TIMEOUT_MS = 2_000;
+const REDACTED = "[REDACTED]";
+const BUSINESS_IDENTIFIER_KEYS = new Set([
+  "attemptid",
+  "credentialid",
+  "customerid",
+  "destinationid",
+  "eventid",
+  "replayid",
+  "routeid",
+  "sourceid",
+  "userid",
+  "workspaceid",
+]);
 
 export interface DashboardExceptionContext {
   level?: "error" | "fatal" | "warning" | "info";
@@ -13,6 +27,29 @@ export interface DashboardExceptionContext {
     email?: string;
     ip_address?: string;
   };
+}
+
+function sanitizeSentryScopeRecord<T extends Record<string, unknown>>(value: T): T {
+  const sanitized = sanitizeTelemetryValue(value);
+
+  function redactIdentifiers(current: unknown, depth = 0): void {
+    if (!current || typeof current !== "object" || depth > 12) return;
+    if (Array.isArray(current)) {
+      for (const item of current) redactIdentifiers(item, depth + 1);
+      return;
+    }
+    for (const [key, child] of Object.entries(current as Record<string, unknown>)) {
+      const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (BUSINESS_IDENTIFIER_KEYS.has(normalized)) {
+        (current as Record<string, unknown>)[key] = REDACTED;
+      } else {
+        redactIdentifiers(child, depth + 1);
+      }
+    }
+  }
+
+  redactIdentifiers(sanitized);
+  return sanitized;
 }
 
 /**
@@ -32,9 +69,10 @@ export async function captureDashboardExceptionAndFlush(
   let eventId = "";
   Sentry.withScope((scope) => {
     if (context.level) scope.setLevel(context.level);
-    if (context.tags) scope.setTags(context.tags);
-    if (context.extra) scope.setExtras(context.extra);
-    if (context.user) scope.setUser(context.user);
+    if (context.tags) scope.setTags(sanitizeSentryScopeRecord(context.tags));
+    if (context.extra) scope.setExtras(sanitizeSentryScopeRecord(context.extra));
+    // User context is identity-only and is not needed for operational triage.
+    // Omit it at capture time in addition to the SDK beforeSend boundary.
     eventId = Sentry.captureException(error);
   });
 
@@ -62,7 +100,7 @@ export async function captureDashboardException(
 
   try {
     await captureDashboardExceptionAndFlush(error, context);
-  } catch (captureError) {
-    console.error("[sentry] dashboard capture failed", captureError);
+  } catch {
+    console.error("[sentry] dashboard capture failed");
   }
 }

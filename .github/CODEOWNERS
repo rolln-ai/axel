@@ -1,20 +1,20 @@
 # Default owner. Replace or extend this as the team grows.
-* @hstrauss
+* @10-01
 
 # Runtime services
-/apps/ingest-worker/ @hstrauss
-/apps/router/ @hstrauss
-/apps/router-edge/ @hstrauss
-/apps/delivery-worker/ @hstrauss
-/apps/delivery-edge/ @hstrauss
-/apps/delivery-service/ @hstrauss
-/apps/pull-worker/ @hstrauss
+/apps/ingest-worker/ @10-01
+/apps/router/ @10-01
+/apps/router-edge/ @10-01
+/apps/delivery-worker/ @10-01
+/apps/delivery-edge/ @10-01
+/apps/delivery-service/ @10-01
+/apps/pull-worker/ @10-01
 
 # Control plane and public surfaces
-/apps/dashboard/ @hstrauss
-/apps/marketing/ @hstrauss
+/apps/dashboard/ @10-01
+/apps/marketing/ @10-01
 
 # Shared contracts, credentials, and infra deserve explicit review.
-/packages/shared/ @hstrauss
-/infra/ @hstrauss
-/.github/ @hstrauss
+/packages/shared/ @10-01
+/infra/ @10-01
+/.github/ @10-01

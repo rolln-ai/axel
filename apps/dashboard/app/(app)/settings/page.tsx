@@ -15,7 +15,6 @@ import { PersonalAccessTokensPanel } from "./PersonalAccessTokensPanel";
 import { RetentionSettingsPanel } from "./RetentionSettingsPanel";
 import { NotificationPreferencesPanel } from "./NotificationPreferencesPanel";
 import { WorkspaceSettingsForm } from "./WorkspaceSettingsForm";
-import { CookiePreferencesButton } from "../../_components/CookiePreferencesButton";
 import { db } from "../../../lib/db";
 import { getNotificationPreferences } from "../../../lib/notifications";
 import { listApiKeys } from "../../../lib/api-keys";
@@ -256,20 +255,6 @@ function GeneralSection({
           <div className="space-y-1.5">
             <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Name</p>
             <strong className="block text-base font-semibold text-foreground">{userName}</strong>
-          </div>
-        </div>
-      </section>
-
-      <section className="mt-6 rounded-lg border border-border bg-card">
-        <div className="border-b border-border px-5 py-3">
-          <h2 className="text-sm font-semibold text-foreground">Privacy</h2>
-        </div>
-        <div className="p-5">
-          <p className="mb-3 text-sm text-muted-foreground">
-            Change or withdraw the analytics cookie consent for this browser.
-          </p>
-          <div className="max-w-56 rounded-md border border-border">
-            <CookiePreferencesButton />
           </div>
         </div>
       </section>

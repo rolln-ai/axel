@@ -8,29 +8,6 @@ const nextConfig = {
   outputFileTracingIncludes: {
     "/opengraph-image": ["./app/_fonts/**"],
   },
-  // Reverse proxy for PostHog. The browser talks to same-origin `/ingest/*`,
-  // which we forward to PostHog US, so analytics keeps working behind ad
-  // blockers that block posthog.com directly. Order matters — the catch-all
-  // must stay last. See https://posthog.com/docs/advanced/proxy/nextjs.
-  async rewrites() {
-    return [
-      {
-        source: "/ingest/static/:path*",
-        destination: "https://us-assets.i.posthog.com/static/:path*",
-      },
-      {
-        source: "/ingest/array/:path*",
-        destination: "https://us-assets.i.posthog.com/array/:path*",
-      },
-      {
-        source: "/ingest/:path*",
-        destination: "https://us.i.posthog.com/:path*",
-      },
-    ];
-  },
-  // Let the proxy forward `/ingest/decide` etc. without a trailing-slash
-  // redirect first.
-  skipTrailingSlashRedirect: true,
 };
 
 export default nextConfig;

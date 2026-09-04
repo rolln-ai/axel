@@ -5,7 +5,10 @@
 {$AXEL_SITE_ADDRESS:http://localhost:8080} {
 	encode zstd gzip
 
-	@delivery path /health /internal/* /deliver /v1/cli/*
+	# Only the edge-facing internal routes belong on the public listener. Keep
+	# this explicit so adding a server-side /internal route cannot publish it by
+	# accident.
+	@delivery path /health /deliver /v1/cli/* /internal/source /internal/erasure-subjects /internal/heartbeat /internal/routes /internal/routes/errored
 	handle @delivery {
 		reverse_proxy delivery:10000
 	}

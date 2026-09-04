@@ -22,11 +22,12 @@ async function invoke(path, baseUrl, secret) {
       signal: AbortSignal.timeout(4 * 60_000),
     });
     if (!response.ok) {
-      const detail = await response.text().catch(() => "");
-      console.error(`[cron] ${path} returned ${response.status}: ${detail.slice(0, 200)}`);
+      // Cron responses can include provider or tenant-derived diagnostics. Keep
+      // hosted/container logs useful without copying response bodies into them.
+      console.error(`[cron] ${path} returned HTTP ${response.status}`);
     }
-  } catch (error) {
-    console.error(`[cron] ${path} failed:`, error instanceof Error ? error.message : error);
+  } catch {
+    console.error(`[cron] ${path} request failed`);
   }
 }
 
@@ -52,12 +53,12 @@ async function main() {
   const options = { baseUrl, secret, seen: new Set() };
   await tick(new Date(), options);
   setInterval(() => void tick(new Date(), options), FIVE_MINUTES / 5);
-  console.log(`[cron] scheduler started for ${baseUrl}`);
+  console.log("[cron] scheduler started");
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
-  void main().catch((error) => {
-    console.error("[cron] fatal:", error instanceof Error ? error.message : error);
+  void main().catch(() => {
+    console.error("[cron] fatal startup failure");
     process.exit(1);
   });
 }

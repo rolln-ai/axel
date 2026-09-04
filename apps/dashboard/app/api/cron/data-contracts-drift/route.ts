@@ -1,9 +1,11 @@
 import {
-  isTransientPlatformHttpError,
   sentryClientFromEnv,
   withCronCheckIn,
 } from "@axel/observability";
-import { runDriftCronJob } from "../../../../lib/data-contracts/drift";
+import {
+  publicDriftCronSummary,
+  runDriftCronJob,
+} from "../../../../lib/data-contracts/drift";
 import { captureDashboardException } from "../../../../lib/sentry-capture";
 
 export const runtime = "nodejs";
@@ -56,31 +58,30 @@ async function handle(request: Request): Promise<Response> {
         if (s.errors.length > 0) {
           // Surface per-map failures into Sentry without failing the whole
           // job. The next cron tick will retry the maps that errored.
-          for (const err of s.errors.slice(0, 20)) {
-            if (isTransientPlatformHttpError(err.message)) continue;
+          for (const error of s.errors.slice(0, 20)) {
+            if (error.code === "transient_platform_failure") continue;
             await captureDashboardException(
-              new Error(`data-contracts-drift: ${err.message}`),
+              new Error("data_contracts_drift_item_failed"),
               {
                 level: "warning",
                 tags: {
                   component: "data_contracts_drift_cron",
-                  data_contract_id: err.data_contract_id,
-                  workspace_id: err.workspace_id,
+                  error_code: error.code,
                 },
               },
             );
           }
         }
-        return s;
+        return publicDriftCronSummary(s);
       },
     );
     return Response.json({ ok: true, summary });
-  } catch (err) {
-    await captureDashboardException(err, {
+  } catch {
+    await captureDashboardException(new Error("data_contracts_drift_failed"), {
       tags: { component: "data_contracts_drift_cron", phase: "job" },
     });
     return Response.json(
-      { ok: false, error: err instanceof Error ? err.message : String(err) },
+      { ok: false, error: "data_contracts_drift_failed" },
       { status: 500 },
     );
   }

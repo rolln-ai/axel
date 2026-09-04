@@ -45,5 +45,9 @@ export function humanRepairError(message: string): string {
     return "This route is already at its pipeline-step limit. Remove an unused step first.";
   }
   if (/identifier_rejected/.test(message)) return "The destination table configuration is invalid.";
-  return message.slice(0, 300) || "Could not apply this fix.";
+  return "Could not apply this fix. Review the destination configuration and try again.";
+}
+
+export function humanRepairErrorFromCaught(err: unknown, fallback: string): string {
+  return err instanceof Error ? humanRepairError(err.message) : fallback;
 }

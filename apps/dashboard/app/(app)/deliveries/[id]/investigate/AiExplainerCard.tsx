@@ -107,15 +107,18 @@ export function AiExplainerCard({
             </p>
           ) : (
             <p className="text-xs text-muted-foreground">
-              Generated from the event payload (PII redacted) + the failure reason. Cached against
-              the dead-letter row.
+              Generated from the event's field names and type markers plus allowlisted failure
+              context. Webhook values, destination names, and diagnostic text stay in Axel. The
+              result is cached against the dead-letter row.
             </p>
           )}
         </div>
       ) : (
         <p className="text-sm text-muted-foreground">
-          Asking Claude to summarise the root cause and suggest a next step. The prompt redacts
-          common PII patterns before send. The result is cached so repeat visits are free.
+          Asking the configured OpenRouter model to suggest a next step. Axel sends field names,
+          object and array shape, and primitive type markers. It does not send webhook values,
+          destination names, response text, connector text, event-type filter values, or custom
+          transform separators. The result is cached so repeat visits are free.
         </p>
       )}
     </section>

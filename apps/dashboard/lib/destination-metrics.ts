@@ -8,6 +8,7 @@ import {
   TERMINAL_FAILURE_PREDICATE,
   latestOutcomesCTE,
 } from "./clickhouse-fragments";
+import { publicDeliveryErrorCode } from "./public-delivery-response";
 import { normalizeWorkspaceTimezone } from "./timezones";
 
 /**
@@ -395,7 +396,7 @@ function bucketResponse(
   }
   const err = parsed["error"];
   if (typeof err === "string" && err.length > 0) {
-    const label = err.length > 32 ? `${err.slice(0, 32)}…` : err;
+    const label = (publicDeliveryErrorCode(err) ?? "delivery_failed").replace(/_/g, " ");
     return { label, tone: status === "dead" ? "error" : "warn" };
   }
   if (status === "success") return { label: "ok", tone: "success" };
@@ -545,7 +546,7 @@ export async function listRecentDestinationAttempts(
       latency_ms: ROW_CAST.toNumber(row.latency_ms),
       http_status:
         typeof httpStatusRaw === "number" && Number.isFinite(httpStatusRaw) ? httpStatusRaw : null,
-      error: typeof errRaw === "string" && errRaw.length > 0 ? errRaw : null,
+      error: publicDeliveryErrorCode(errRaw),
       skip_reason: skipReasonFrom(parsed),
       is_test: ROW_CAST.toNumber(row.is_test) === 1,
       created_at: row.created_at,

@@ -13,17 +13,16 @@ export { SourceLookupUnavailableError } from "./source-lookup-error.js";
 /**
  * Local-development Postgres fallback for source resolution.
  *
- * The ingest hot path resolves sources from a KV cache populated by the
- * dashboard on mutate. Before this, a KV miss — a cold/just-created source, a
- * TTL expiry, an eviction, or a KV outage — made lookupSourceUncached return
- * null, which 404'd a LIVE source and silently dropped its webhooks with no
- * dead-letter (release-audit critical `ingest::lookup-source-uncached-null`).
+ * Older releases treated a KV miss as an unknown source, which could 404 a
+ * live source and drop its webhook without a dead-letter row. Current local
+ * development calls this lookup directly. Hosted ingest uses delivery service
+ * through the source authority.
  *
  * Production no longer uses this path: direct Cloudflare→Postgres connections
  * proved unreliable, so cache misses resolve through delivery-service's
  * authenticated `/internal/source` endpoint. This implementation remains for
- * engineers deliberately running DEV_MODE against a local control plane, and
- * this module also owns the separate best-effort erasure-index write.
+ * engineers deliberately running DEV_MODE against a local control plane. The
+ * erasure-index writer here is also local-development only.
  */
 
 export interface SourceLookupEnv {
@@ -67,17 +66,16 @@ function createSql(connectionString: string): ReturnType<typeof postgres> {
 async function closeSql(sql: ReturnType<typeof postgres>): Promise<void> {
   try {
     await sql.end({ timeout: 1 });
-  } catch (err) {
-    console.warn("[ingest] postgres client close failed:", err instanceof Error ? err.message : err);
+  } catch {
+    console.warn("[ingest] postgres client close failed");
   }
 }
 
 /**
  * Write the GDPR erasure index for one event: one row per (subject_id, event_id)
- * into erasure_subjects, over the cached control-plane PG client. Best-effort,
- * called via ctx.waitUntil — never blocks the ingest 202. No-op without a
- * control-plane binding or when the event resolved no subjects. ON CONFLICT DO
- * NOTHING (migration 0054 unique index) makes a Cloudflare re-delivery idempotent.
+ * into erasure_subjects in local development. Production sends the same
+ * pseudonymous index to delivery-service and never gives this Worker a
+ * database credential. ON CONFLICT DO NOTHING keeps retries idempotent.
  */
 export async function indexErasureSubjects(
   env: SourceLookupEnv,
@@ -128,9 +126,8 @@ export async function lookupSourceInPostgres(env: SourceLookupEnv, sourceId: str
        LIMIT 1
     `) as unknown as SourceRow[];
   } catch (err) {
-    // DB down/erroring. Do NOT return null — resolveSource would cache a wrong
-    // negative and 404 a live source for the negative-TTL window. Signal
-    // transient so the handler returns 503 and the producer retries.
+    // Do not turn a database failure into an unknown source. Signal a transient
+    // failure so the handler returns 503 and the producer retries.
     throw new SourceLookupUnavailableError(
       `source lookup failed for ${sourceId}: ${err instanceof Error ? err.message : String(err)}`,
     );
@@ -143,9 +140,9 @@ export async function lookupSourceInPostgres(env: SourceLookupEnv, sourceId: str
 }
 
 /**
- * Map a `sources` row to the edge `Source` shape. Matches the dashboard's
- * rowToEdgePayload so a KV-miss fallback produces the SAME Source a push would
- * (secret_token holds the hash; signing_secret is the decrypted ciphertext).
+ * Map a `sources` row to the edge `Source` shape. This matches the dashboard's
+ * rowToEdgePayload. `secret_token` holds the hash and `signing_secret` is the
+ * decrypted ciphertext value.
  */
 export async function mapSourceRow(row: SourceRow, masterKeyRaw: string | undefined): Promise<Source> {
   // Decrypt both rotation slots before constructing the Source. The presence of
@@ -156,11 +153,8 @@ export async function mapSourceRow(row: SourceRow, masterKeyRaw: string | undefi
     if (!blob || !masterKeyRaw) return undefined;
     try {
       return await decryptSourceSigningSecretEdge(masterKeyRaw, toBytes(blob), row.workspace_id, row.id);
-    } catch (err) {
-      console.error(
-        `[ingest] decrypt signing secret failed for source ${row.id}:`,
-        err instanceof Error ? err.message : err,
-      );
+    } catch {
+      console.error("[ingest] decrypt signing secret failed");
       return undefined;
     }
   };

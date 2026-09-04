@@ -59,6 +59,9 @@ export interface FirstRunTlsToggle {
   hint: string;
 }
 
+/** Certificate identity verification is secure by default in every setup flow. */
+export const FIRST_RUN_TLS_NO_VERIFY_DEFAULT = false;
+
 export interface FirstRunDestination {
   type: FirstRunDestinationType;
   label: string;
@@ -69,11 +72,9 @@ export interface FirstRunDestination {
   /** Where each event is written, when the type needs one. */
   target?: FirstRunTarget;
   /**
-   * Managed Postgres/Mongo hosts routinely serve self-signed certificates.
-   * Axel verifies TLS by default, so without this the connection fails with
-   * "self-signed certificate in certificate chain" — which is what happened to
-   * a real Railway database during onboarding. It stays encrypted either way;
-   * only the certificate check is relaxed.
+   * Explicit escape hatch for a private CA or self-signed certificate. It is
+   * always off by default: encryption without certificate identity validation
+   * is vulnerable to an active man-in-the-middle attack.
    */
   tlsToggle?: FirstRunTlsToggle;
 }
@@ -101,7 +102,7 @@ export const FIRST_RUN_DESTINATIONS: FirstRunDestination[] = [
     tlsToggle: {
       key: "pg_ssl_no_verify",
       label: "My database uses a self-signed certificate",
-      hint: "Tick this for Railway, Heroku, and most managed Postgres. The connection stays encrypted — Axel just won't reject the provider's own certificate.",
+      hint: "Only enable this when your provider explicitly requires it and you cannot supply a trusted CA. Traffic stays encrypted, but Axel will not verify the server's identity.",
     },
   },
   {
@@ -172,7 +173,7 @@ export const FIRST_RUN_DESTINATIONS: FirstRunDestination[] = [
     tlsToggle: {
       key: "mongo_tls_no_verify",
       label: "My database uses a self-signed certificate",
-      hint: "The connection stays encrypted — Axel just won't reject the provider's own certificate.",
+      hint: "Only enable this when your provider explicitly requires it and you cannot supply a trusted CA. Traffic stays encrypted, but Axel will not verify the server's identity.",
     },
   },
   {

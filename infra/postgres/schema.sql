@@ -18,8 +18,8 @@ ALTER TABLE workspaces
 
 -- AXE-35: per-workspace retention defaults. See migration 0018; caps
 -- tightened in 0048 (raw_payload default 90 -> 30 to match the fixed
--- 30-day R2 lifecycle; dead_letter capped 365, replay 90). CHECK
--- constraints live in those migrations, not this lean snapshot.
+-- 30-day R2 lifecycle; dead_letter capped 365, replay 90). The canonical
+-- CHECKs are repeated here so a snapshot bootstrap matches migration 0048.
 ALTER TABLE workspaces
   ADD COLUMN IF NOT EXISTS raw_payload_retention_days integer NOT NULL DEFAULT 30;
 ALTER TABLE workspaces
@@ -28,6 +28,47 @@ ALTER TABLE workspaces
   ADD COLUMN IF NOT EXISTS replay_request_retention_days integer NOT NULL DEFAULT 30;
 ALTER TABLE workspaces
   ADD COLUMN IF NOT EXISTS audit_log_retention_days integer NOT NULL DEFAULT 365;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conrelid = 'workspaces'::regclass
+       AND conname = 'workspaces_raw_payload_retention_days_check'
+  ) THEN
+    ALTER TABLE workspaces
+      ADD CONSTRAINT workspaces_raw_payload_retention_days_check
+      CHECK (raw_payload_retention_days >= 0 AND raw_payload_retention_days <= 30);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conrelid = 'workspaces'::regclass
+       AND conname = 'workspaces_dead_letter_retention_days_check'
+  ) THEN
+    ALTER TABLE workspaces
+      ADD CONSTRAINT workspaces_dead_letter_retention_days_check
+      CHECK (dead_letter_retention_days >= 1 AND dead_letter_retention_days <= 365);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conrelid = 'workspaces'::regclass
+       AND conname = 'workspaces_replay_request_retention_days_check'
+  ) THEN
+    ALTER TABLE workspaces
+      ADD CONSTRAINT workspaces_replay_request_retention_days_check
+      CHECK (replay_request_retention_days >= 1 AND replay_request_retention_days <= 90);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conrelid = 'workspaces'::regclass
+       AND conname = 'workspaces_audit_log_retention_days_check'
+  ) THEN
+    ALTER TABLE workspaces
+      ADD CONSTRAINT workspaces_audit_log_retention_days_check
+      CHECK (audit_log_retention_days >= 30 AND audit_log_retention_days <= 3650);
+  END IF;
+END
+$$;
 
 -- 0057: super-admin comp flag. When true the ingest billing gate (deriveGate)
 -- short-circuits to 'accept' — no card required, no quota block, no suspension.
@@ -151,6 +192,9 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE INDEX IF NOT EXISTS audit_log_workspace_time_idx
   ON audit_log (workspace_id, created_at DESC);
 
+CREATE INDEX IF NOT EXISTS audit_log_at_idx
+  ON audit_log (created_at);
+
 -- Clickwrap consent record. One row per acceptance event (signup / invite
 -- signup), capturing which documents + versions were agreed to and the
 -- evidentiary context (IP, user-agent, timestamp). See migration 0051.
@@ -232,6 +276,22 @@ ALTER TABLE sources
   ADD COLUMN IF NOT EXISTS transient_mode boolean NOT NULL DEFAULT FALSE;
 ALTER TABLE sources
   ADD COLUMN IF NOT EXISTS raw_payload_retention_days integer;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conrelid = 'sources'::regclass
+       AND conname = 'sources_raw_payload_retention_days_check'
+  ) THEN
+    ALTER TABLE sources
+      ADD CONSTRAINT sources_raw_payload_retention_days_check
+      CHECK (
+        raw_payload_retention_days IS NULL
+        OR (raw_payload_retention_days >= 0 AND raw_payload_retention_days <= 30)
+      );
+  END IF;
+END
+$$;
 -- FIFO/ordered delivery (Phase 1). See migration 0044.
 ALTER TABLE sources
   ADD COLUMN IF NOT EXISTS ordering_enabled boolean NOT NULL DEFAULT false;
@@ -259,6 +319,7 @@ CREATE TABLE IF NOT EXISTS routes (
   id text PRIMARY KEY,
   workspace_id text NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   source_id text NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  name text,
   status text NOT NULL CHECK (status IN ('active', 'disabled', 'errored')),
   engine text NOT NULL DEFAULT 'declarative'
     CHECK (engine IN ('legacy_js', 'declarative')),
@@ -274,6 +335,10 @@ CREATE TABLE IF NOT EXISTS routes (
 CREATE INDEX IF NOT EXISTS routes_source_active_idx
   ON routes (workspace_id, source_id)
   WHERE status = 'active';
+
+-- Existing databases receive the nullable display name through migration 0061.
+ALTER TABLE routes
+  ADD COLUMN IF NOT EXISTS name text;
 
 -- engine column for existing routes tables. Fresh databases get it via
 -- the CREATE TABLE above; this ALTER catches databases that pre-date
@@ -482,6 +547,9 @@ CREATE TABLE IF NOT EXISTS dead_letters (
 CREATE INDEX IF NOT EXISTS dead_letters_workspace_time_idx
   ON dead_letters (workspace_id, errored_at DESC);
 
+CREATE INDEX IF NOT EXISTS dead_letters_errored_at_idx
+  ON dead_letters (errored_at);
+
 CREATE INDEX IF NOT EXISTS dead_letters_workspace_source_reason_event_route_idx
   ON dead_letters (workspace_id, source_id, reason, event_id, route_id, errored_at);
 
@@ -630,8 +698,8 @@ CREATE TABLE IF NOT EXISTS erasure_subjects (
   indexed_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS erasure_subjects_lookup_idx
-  ON erasure_subjects (workspace_id, subject_id);
+CREATE UNIQUE INDEX IF NOT EXISTS erasure_subjects_ws_subject_event_uniq
+  ON erasure_subjects (workspace_id, subject_id, event_id);
 CREATE INDEX IF NOT EXISTS erasure_subjects_event_idx
   ON erasure_subjects (workspace_id, event_id);
 
@@ -1036,6 +1104,8 @@ CREATE INDEX IF NOT EXISTS user_sessions_impersonator_idx
   ON user_sessions (impersonator_user_id) WHERE impersonator_user_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS workspaces_status_idx
   ON workspaces (status) WHERE status <> 'active';
+CREATE INDEX IF NOT EXISTS workspaces_deleting_idx
+  ON workspaces (deleted_at) WHERE status = 'deleting';
 
 -- In-app notifications (AXE-48). Drift detection (AXE-47) + failure
 -- explanation (AXE-49) emit rows here; UI consumes via the bell icon
@@ -1654,11 +1724,32 @@ CREATE TABLE IF NOT EXISTS billing_events (
   id text PRIMARY KEY,
   type text NOT NULL,
   workspace_id text REFERENCES workspaces(id) ON DELETE SET NULL,
-  payload jsonb NOT NULL,
+  payload jsonb NOT NULL DEFAULT '{}'::jsonb,
   received_at timestamptz NOT NULL DEFAULT now(),
   processed_at timestamptz,
   error text
 );
+
+CREATE OR REPLACE FUNCTION public.axel_minimize_billing_event_payload()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+BEGIN
+  NEW.payload := '{}'::pg_catalog.jsonb;
+  RETURN NEW;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.axel_minimize_billing_event_payload()
+  FROM PUBLIC;
+
+DROP TRIGGER IF EXISTS billing_events_payload_minimization_guard
+  ON public.billing_events;
+CREATE TRIGGER billing_events_payload_minimization_guard
+BEFORE INSERT OR UPDATE OF payload ON public.billing_events
+FOR EACH ROW
+EXECUTE FUNCTION public.axel_minimize_billing_event_payload();
 
 CREATE INDEX IF NOT EXISTS billing_events_workspace_time_idx
   ON billing_events (workspace_id, received_at DESC);
@@ -1688,3 +1779,11 @@ CREATE INDEX IF NOT EXISTS billing_invoices_workspace_time_idx
 CREATE INDEX IF NOT EXISTS billing_invoices_status_idx
   ON billing_invoices (status, created_at DESC)
   WHERE status IN ('open', 'past_due', 'uncollectible');
+
+-- Snapshot bootstrap must leave no implicit PUBLIC path to webhook data or
+-- owner routines. Runtime and verifier grants are reconciled separately.
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON ALL ROUTINES IN SCHEMA public FROM PUBLIC;
+ALTER DEFAULT PRIVILEGES
+  REVOKE EXECUTE ON ROUTINES FROM PUBLIC;

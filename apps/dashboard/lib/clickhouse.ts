@@ -113,8 +113,8 @@ export function clickhouse(options?: {
           });
 
           if (!res.ok) {
-            const body = await res.text();
-            const error = new Error(`ClickHouse query failed (${res.status}): ${body.slice(0, 400)}`);
+            await res.body?.cancel().catch(() => undefined);
+            const error = new Error(`ClickHouse query failed (${res.status})`);
             if (attempt < CLICKHOUSE_QUERY_ATTEMPTS && isTransientPlatformHttpError(error)) {
               await sleep(CLICKHOUSE_QUERY_RETRY_BASE_DELAY_MS * attempt);
               continue;
@@ -129,7 +129,7 @@ export function clickhouse(options?: {
           try {
             json = JSON.parse(text) as { data?: T[] };
           } catch {
-            throw new Error(`ClickHouse returned invalid JSON: ${text.slice(0, 400)}`);
+            throw new Error("ClickHouse returned invalid JSON");
           }
           return { rows: json.data ?? [] };
         } catch (err) {

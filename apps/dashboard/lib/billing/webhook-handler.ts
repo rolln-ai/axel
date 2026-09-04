@@ -2,19 +2,7 @@ import "server-only";
 import type Stripe from "stripe";
 import type { Queryable } from "../db";
 import { db } from "../db";
-import { captureServerEvent } from "../posthog-server";
 import { computePlanState, pushPlanStates } from "./plan-state";
-
-/**
- * Stripe event types we forward to PostHog, mapped to product event names.
- * Only the lifecycle moments worth a funnel — we skip high-frequency
- * `customer.subscription.updated` and `invoice.paid` to avoid analytics noise.
- */
-const POSTHOG_BILLING_EVENTS: Record<string, string> = {
-  "customer.subscription.created": "subscription started",
-  "customer.subscription.deleted": "subscription canceled",
-  "invoice.payment_failed": "invoice payment failed",
-};
 
 /**
  * Stripe webhook idempotent processor.
@@ -65,10 +53,10 @@ export async function processStripeWebhook(
 
   const insert = await pg.query<{ id: string }>(
     `INSERT INTO billing_events (id, type, workspace_id, payload)
-     VALUES ($1, $2, $3, $4::jsonb)
+     VALUES ($1, $2, $3, '{}'::jsonb)
      ON CONFLICT (id) DO NOTHING
      RETURNING id`,
-    [event.id, event.type, workspaceId, JSON.stringify(event)],
+    [event.id, event.type, workspaceId],
   );
 
   if (insert.rows.length === 0) {
@@ -126,33 +114,19 @@ export async function processStripeWebhook(
       try {
         const planState = await computePlanState(workspaceId, { pg });
         if (planState) await pushPlanStates([planState]);
-      } catch (planErr) {
-        console.error(`[stripe-webhook] plan-state push failed for ${workspaceId}:`, planErr);
-      }
-
-      // Backend-side billing analytics. There's no logged-in user on a webhook,
-      // so we attribute the event to the workspace via its group and use the
-      // workspace id as the distinct id. Best-effort; never blocks the 200.
-      const phEvent = POSTHOG_BILLING_EVENTS[event.type];
-      if (phEvent) {
-        await captureServerEvent({
-          distinctId: workspaceId,
-          event: phEvent,
-          properties: { stripe_event_type: event.type },
-          groups: { workspace: workspaceId },
-        });
+      } catch {
+        console.error("[stripe-webhook] plan-state push failed");
       }
     }
     return { processed: true, alreadySeen: false, type: event.type };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
     // Record the error but DO NOT set processed_at — leaving it NULL lets the
     // next Stripe retry (we surface this as a 500) re-enter the apply path
     // above instead of short-circuiting as an "already seen" duplicate and
     // permanently dropping the state change.
     await pg.query(
       `UPDATE billing_events SET error = $2 WHERE id = $1`,
-      [event.id, message.slice(0, 500)],
+      [event.id, "stripe_webhook_apply_failed"],
     );
     throw err;
   }

@@ -426,11 +426,11 @@ export async function testPostgresConnection(
     client = await deps.connect(config);
     await client.query("SELECT 1");
     return { ok: true, latency_ms: Date.now() - started };
-  } catch (err: unknown) {
+  } catch {
     return {
       ok: false,
       reason: "connection_failed",
-      message: err instanceof Error ? err.message : String(err),
+      message: "connection_failed",
     };
   } finally {
     if (client) {

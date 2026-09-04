@@ -132,12 +132,12 @@ export default async function DeliveriesPage({
               title={attemptsError ? "Couldn't load delivery stream" : activeFilterCount > 0 ? "No matching deliveries" : "No deliveries yet"}
               body={
                 attemptsError
-                  ? `ClickHouse query failed: ${attemptsError}`
+                  ? attemptsError
                   : activeFilterCount > 0
                     ? "Adjust or clear filters to see more delivery activity."
                   : usageEnabled()
                     ? "Delivery attempts will appear here once events match routes and fan out to destinations."
-                    : "Set CLICKHOUSE_URL on the dashboard to show delivery attempts across success and failure statuses."
+                    : "Delivery analytics are unavailable for this deployment."
               }
               action={
                 activeFilterCount > 0 ? (
@@ -178,13 +178,13 @@ function settleWithin<T>(
         clearTimeout(timeout);
         resolve({ ok: true, value });
       })
-      .catch((err) => {
+      .catch(() => {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
         resolve({
           ok: false,
-          error: err instanceof Error ? err.message : "Query failed.",
+          error: "Delivery data is temporarily unavailable.",
         });
       });
   });

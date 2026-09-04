@@ -47,9 +47,10 @@ export function DataContractsSection({
   return (
     <div className="grid gap-3">
       <p className="text-sm text-muted-foreground">
-        An Data Contract is the durable contract describing what this source emits and how to route
+        A Data Contract is the durable contract describing what this source emits and how to route
         it. Click <strong className="text-foreground">Understand source</strong> to sample recent
-        events and propose a draft.
+        events and propose a draft. When OpenRouter enrichment is configured, Axel sends field
+        names, object and array shape, and primitive type markers. Webhook values stay in Axel.
       </p>
 
       {canMutate ? (

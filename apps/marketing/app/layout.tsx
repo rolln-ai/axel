@@ -1,8 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-import { CookieConsent } from "./_components/CookieConsent";
-import { PostHogProvider } from "./providers";
 import { SITE_NAME, SITE_URL, TWITTER_HANDLE } from "../lib/seo";
 import { organizationLd, websiteLd } from "../lib/structured-data";
 import { JsonLd } from "./_components/JsonLd";
@@ -58,28 +56,9 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en" className={`${sans.variable} ${mono.variable}`}>
-      <head>
-        <script
-          defer
-          src="https://cloud.umami.is/script.js"
-          data-website-id="3ffadf69-74e3-4847-8c26-dad6ed88bea8"
-        />
-        <script async src="https://www.googletagmanager.com/gtag/js?id=AW-18345689842" />
-        <script
-          dangerouslySetInnerHTML={{
-            __html: `
-              window.dataLayer = window.dataLayer || [];
-              function gtag(){dataLayer.push(arguments);}
-              gtag('js', new Date());
-              gtag('config', 'AW-18345689842');
-            `,
-          }}
-        />
-      </head>
       <body>
         <JsonLd data={[organizationLd(), websiteLd()]} />
-        <PostHogProvider>{children}</PostHogProvider>
-        <CookieConsent />
+        {children}
       </body>
     </html>
   );

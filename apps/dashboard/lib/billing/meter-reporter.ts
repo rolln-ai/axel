@@ -144,14 +144,14 @@ export async function reportMeterEvents(
       });
       events.push({ workspaceId, tasks, identifier });
       reported += 1;
-    } catch (err) {
+    } catch {
       // Soft-fail per workspace. The cron's caller logs the summary;
       // we report the SDK message so /admin/billing/webhooks can show
       // it later. A retry next hour with the same identifier is safe.
       events.push({
         workspaceId,
         tasks,
-        identifier: `${identifier}:error:${err instanceof Error ? err.message.slice(0, 64) : "unknown"}`,
+        identifier: `${identifier}:error`,
       });
     }
   }

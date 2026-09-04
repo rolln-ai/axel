@@ -17,7 +17,7 @@ import type { ActionState } from "./action-data";
  * render it distinctly + don't bill against it).
  *
  * Workspace ownership is enforced both here (SELECT 1 FROM
- * sources) and inside the ingest worker (source cache lookup +
+ * sources) and inside the ingest worker (source authority lookup +
  * status check).
  */
 export async function sendTestEvent(_state: ActionState, formData: FormData): Promise<ActionState> {
@@ -49,12 +49,12 @@ export async function sendTestEvent(_state: ActionState, formData: FormData): Pr
     let ingestBase: string;
     try {
       ingestBase = resolveIngestBaseUrl(process.env);
-    } catch (err) {
-      return { error: err instanceof Error ? err.message : "Invalid ingest configuration." };
+    } catch {
+      return { error: "Test-event service is not configured." };
     }
     const adminToken = process.env.INGEST_ADMIN_TOKEN;
     if (!adminToken) {
-      return { error: "INGEST_ADMIN_TOKEN not configured on the dashboard — can't send test events." };
+      return { error: "Test-event service is not configured." };
     }
 
     try {
@@ -74,13 +74,13 @@ export async function sendTestEvent(_state: ActionState, formData: FormData): Pr
         }),
       });
       if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        return { error: `Ingest rejected the test event (HTTP ${res.status}): ${text.slice(0, 200)}` };
+        await res.body?.cancel().catch(() => undefined);
+        return { error: `Ingest rejected the test event (HTTP ${res.status}).` };
       }
       const body = (await res.json().catch(() => ({}))) as { event_id?: string };
       const eventId = body.event_id;
       if (!eventId) {
-        return { error: "Ingest accepted the test event but didn't return an event_id." };
+        return { error: "Ingest accepted the test event but did not return an event reference." };
       }
       await audit({
         action: "source.test_event_sent",
@@ -89,14 +89,14 @@ export async function sendTestEvent(_state: ActionState, formData: FormData): Pr
         metadata: { event_id: eventId },
       });
       return {
-        notice: `Test event sent. event_id: ${eventId}. Routes + delivers like a real event (flagged is_test so it doesn't count against usage).`,
+        notice: "Test event sent. It follows the normal route and delivery path without counting against usage.",
         // `eventId` lets the dialog poll getTestEventOutcome() for the REAL
         // routing/delivery result. `sourceId` is kept for backwards-compat
         // with any caller that still reads the old (mislabelled) field.
         data: { eventId, sourceId: eventId },
       };
-    } catch (err) {
-      return { error: `Couldn't reach ingest worker: ${err instanceof Error ? err.message : String(err)}` };
+    } catch {
+      return { error: "Couldn't reach the ingest worker." };
     }
   });
 }
@@ -214,8 +214,8 @@ export async function getTestEventOutcome(
         { workspace_id: workspaceId, event_id: eventId },
       );
       attemptRows = attemptRes.rows;
-    } catch (err) {
-      return { error: err instanceof Error ? err.message : "ClickHouse query failed." };
+    } catch {
+      return { error: "Test-event results are temporarily unavailable." };
     }
 
     // A route counts as "matched" if route_evaluations says so, OR if it
@@ -284,7 +284,7 @@ export async function getTestEventOutcome(
         status: row.status,
         http_status: typeof parsed.http_status === "number" ? parsed.http_status : null,
         latency_ms: typeof row.latency_ms === "number" ? row.latency_ms : Number(row.latency_ms) || 0,
-        error: typeof parsed.error === "string" ? parsed.error : null,
+        error: typeof parsed.error === "string" ? "Delivery failed." : null,
       };
     });
 
@@ -345,8 +345,8 @@ export async function getRecentIngestEvents(
           contentType: r.content_type,
         })),
       };
-    } catch (err) {
-      return { error: err instanceof Error ? err.message : "Failed to read recent events." };
+    } catch {
+      return { error: "Recent ingest activity is temporarily unavailable." };
     }
   });
 }

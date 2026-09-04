@@ -55,6 +55,36 @@ export interface WorkspaceTeardownSweepSummary {
   results: TeardownResult[];
 }
 
+export interface PublicWorkspaceTeardownSweepSummary {
+  code: "workspace_teardown_completed" | "workspace_teardown_partial";
+  swept: number;
+  result_count: number;
+  stage_counts: Record<TeardownStage, number>;
+}
+
+/** Project the cron response to aggregate counts without tenant identifiers. */
+export function publicWorkspaceTeardownSweepSummary(
+  summary: WorkspaceTeardownSweepSummary,
+): PublicWorkspaceTeardownSweepSummary {
+  const stageCounts: Record<TeardownStage, number> = {
+    flushed: 0,
+    settling: 0,
+    canceled: 0,
+    wiping: 0,
+    deleted: 0,
+    error: 0,
+  };
+  for (const result of summary.results) stageCounts[result.stage] += 1;
+  return {
+    code: stageCounts.error > 0
+      ? "workspace_teardown_partial"
+      : "workspace_teardown_completed",
+    swept: summary.swept,
+    result_count: summary.results.length,
+    stage_counts: stageCounts,
+  };
+}
+
 /**
  * Raised after a best-effort sweep finishes when one or more workspaces could
  * not advance. The completed results are retained for logs/tests, while the
@@ -66,14 +96,7 @@ export class WorkspaceTeardownSweepError extends Error {
 
   constructor(summary: WorkspaceTeardownSweepSummary) {
     const failures = summary.results.filter((result) => result.stage === "error");
-    const details = failures
-      .map((failure) => `${failure.workspaceId}: ${failure.detail ?? "unknown error"}`)
-      .join("; ");
-    super(
-      `Workspace teardown failed for ${failures.length} of ${summary.swept} workspace(s)${
-        details ? ` (${details})` : ""
-      }`,
-    );
+    super(`Workspace teardown failed for ${failures.length} of ${summary.swept} workspace(s)`);
     this.name = "WorkspaceTeardownSweepError";
     this.summary = summary;
   }
@@ -115,14 +138,14 @@ export async function sweepWorkspaceTeardowns(
     if (Date.now() + SWEEP_MIN_REMAINING_MS >= deadlineMs) break;
     try {
       results.push(await teardownWorkspace(ws, { ...deps, deadlineMs }));
-    } catch (err) {
+    } catch {
       // Best-effort per workspace: a failure leaves it 'deleting' for the next
       // sweep to retry (every step is idempotent). Surface for operator logs.
-      console.error(`[workspace-teardown] ${ws.id} failed:`, err);
+      console.error("[workspace-teardown] workspace step failed");
       results.push({
         workspaceId: ws.id,
         stage: "error",
-        detail: err instanceof Error ? err.message : String(err),
+        detail: "workspace_teardown_step_failed",
       });
     }
   }
@@ -160,8 +183,8 @@ export async function teardownSingleWorkspace(
   }
   try {
     return await teardownWorkspace(ws, deps);
-  } catch (err) {
-    return { workspaceId, stage: "error", detail: err instanceof Error ? err.message : String(err) };
+  } catch {
+    return { workspaceId, stage: "error", detail: "workspace_teardown_step_failed" };
   }
 }
 
@@ -195,7 +218,7 @@ async function teardownWorkspace(
           // the stage so transient/configuration errors cannot drop billing.
           if (!isMissingStripeCustomerError(err, ws.stripe_customer_id)) throw err;
           detail = "Stripe customer already deleted; skipped final usage flush";
-          console.warn(`[workspace-teardown] ${ws.id}: ${detail}`);
+          console.warn(`[workspace-teardown] ${detail}`);
         }
       }
       await pg.query("UPDATE workspaces SET usage_flushed_at = now() WHERE id = $1", [ws.id]);

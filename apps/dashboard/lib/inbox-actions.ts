@@ -42,7 +42,7 @@ import { cacheTags } from "./repositories";
 import { fetchPayloadForR2Key } from "./sample-payload";
 import type { ActionState } from "./action-state";
 import { formValue } from "./form";
-import { humanRepairError } from "./inbox-repair-error";
+import { humanRepairError, humanRepairErrorFromCaught } from "./inbox-repair-error";
 
 /**
  * Server actions for the AXE-57 inbox-zero workflow.
@@ -208,14 +208,11 @@ export async function previewFingerprintRepair(input: {
           exemplar.route_id,
           exemplar.destination_id,
           proposal,
-        ).catch((err) => {
+        ).catch(() => {
           // Destination-side widening is an optional, safer alternative to
           // the existing route transform. A metadata permission failure must
           // not remove the transform escape hatch from the operator.
-          console.warn(
-            "[previewFingerprintRepair] BigQuery schema option unavailable:",
-            err instanceof Error ? err.message : err,
-          );
+          console.warn("[previewFingerprintRepair] BigQuery schema option unavailable");
           return null;
         });
         return {
@@ -226,10 +223,10 @@ export async function previewFingerprintRepair(input: {
           ...(schemaRepair ? { schemaRepair } : {}),
         };
       } catch (err) {
-        console.error("[previewFingerprintRepair] failed:", err);
+        console.error("[previewFingerprintRepair] failed");
         return {
           ok: false,
-          error: err instanceof Error ? humanRepairError(err.message) : "Could not prepare this fix.",
+          error: humanRepairErrorFromCaught(err, "Could not prepare this fix."),
         };
       }
     },
@@ -354,10 +351,10 @@ export async function applyFingerprintRepair(
         if (resolved.truncated) notice += "; run the fix again after this batch to catch the remainder";
         return { ok: true, queued: result.queued, notice: `${notice}.` };
       } catch (err) {
-        console.error("[applyFingerprintRepair] failed:", err);
+        console.error("[applyFingerprintRepair] failed");
         return {
           ok: false,
-          error: err instanceof Error ? humanRepairError(err.message) : "Could not apply this fix.",
+          error: humanRepairErrorFromCaught(err, "Could not apply this fix."),
         };
       }
     },
@@ -403,11 +400,12 @@ export async function applyFingerprintSchemaRepair(
           proposal,
         );
       } catch (err) {
-        console.error("[applyFingerprintSchemaRepair] preparation failed:", err);
+        console.error("[applyFingerprintSchemaRepair] preparation failed");
         return {
           ok: false,
-          error: humanRepairError(
-            err instanceof Error ? err.message : "Could not inspect the current BigQuery schema.",
+          error: humanRepairErrorFromCaught(
+            err,
+            "Could not inspect the current BigQuery schema.",
           ),
         };
       }
@@ -442,10 +440,10 @@ export async function applyFingerprintSchemaRepair(
           toType: schemaRepair.toType,
         });
       } catch (err) {
-        console.error("[applyFingerprintSchemaRepair] BigQuery change failed:", err);
+        console.error("[applyFingerprintSchemaRepair] BigQuery change failed");
         return {
           ok: false,
-          error: humanRepairError(err instanceof Error ? err.message : "Could not change the BigQuery column."),
+          error: humanRepairErrorFromCaught(err, "Could not change the BigQuery column."),
         };
       }
 
@@ -514,10 +512,10 @@ export async function applyFingerprintSchemaRepair(
         if (resolved.truncated) notice += "; run the fix again after this batch to catch the remainder";
         return { ok: true, queued: replay.queued, notice: `${notice}.` };
       } catch (err) {
-        console.error("[applyFingerprintSchemaRepair] replay enqueue failed:", err);
+        console.error("[applyFingerprintSchemaRepair] replay enqueue failed");
         return {
           ok: false,
-          error: `${schemaChange.fieldPath} now uses FLOAT64, but Axel could not queue the replays. ${humanRepairError(err instanceof Error ? err.message : "Use Retry from the Inbox.")}`,
+          error: `${schemaChange.fieldPath} now uses FLOAT64, but Axel could not queue the replays. ${humanRepairErrorFromCaught(err, "Use Retry from the Inbox.")}`,
         };
       }
     },
@@ -584,6 +582,8 @@ export async function retryFingerprint(
 
 interface RepairExemplar {
   id: string;
+  event_id: string;
+  source_id: string;
   reason: string;
   message: string;
   route_id: string | null;
@@ -611,7 +611,7 @@ async function loadRepairExemplar(
 ): Promise<RepairExemplar | null> {
   if (!/^\d+$/.test(exemplarId) || !fingerprint) return null;
   const result = await db().query<RepairExemplar>(
-    `SELECT id::text, reason, message, route_id,
+    `SELECT id::text, event_id, source_id, reason, message, route_id,
             NULLIF(destination_id, '') AS destination_id, r2_key
        FROM dead_letters
       WHERE id = $1::bigint
@@ -745,7 +745,11 @@ async function diagnoseLegacyRepair(
   const dataset = typeof binding.dataset === "string" ? binding.dataset.trim() : "";
   const table = typeof binding.table === "string" ? binding.table.trim() : "";
   if (!dataset || !table) return null;
-  const payload = await fetchPayloadForR2Key(exemplar.r2_key);
+  const payload = await fetchPayloadForR2Key(exemplar.r2_key, {
+    workspaceId,
+    eventId: exemplar.event_id,
+    sourceId: exemplar.source_id,
+  });
   if (payload === null) return null;
   const attached = new Set(destinationsRes.rows.map((row) => row.destination_id));
   let outgoing: unknown;

@@ -10,17 +10,15 @@ on:
       service:
         description: Render service to deploy
         required: true
-        default: all
+        default: axel-delivery-native
         type: choice
         options:
-          - axel-clickhouse
           - axel-delivery-native
           - axel-delivery-workers
           - axel-pull-worker
-          - all
-      confirm_clickhouse:
-        description: For axel-clickhouse only, type deploy-stateful-clickhouse after verifying the latest backup
-        required: false
+      confirm_production:
+        description: Type deploy-reviewed-production after reviewing the exact main commit and target
+        required: true
         type: string
 
 concurrency:
@@ -37,11 +35,10 @@ jobs:
     steps:
       - name: Require the protected main branch
         run: test "$GITHUB_REF" = "refs/heads/main"
-      - name: Require explicit confirmation for the stateful ClickHouse deploy
-        if: ${{ inputs.service == 'axel-clickhouse' }}
+      - name: Require explicit production confirmation
         env:
-          CLICKHOUSE_CONFIRMATION: ${{ inputs.confirm_clickhouse }}
-        run: test "$CLICKHOUSE_CONFIRMATION" = "deploy-stateful-clickhouse"
+          PRODUCTION_CONFIRMATION: ${{ inputs.confirm_production }}
+        run: test "$PRODUCTION_CONFIRMATION" = "deploy-reviewed-production"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
@@ -62,22 +59,42 @@ jobs:
     needs: verify
     environment: Production
     timeout-minutes: 150
+    env:
+      RENDER_OWNER_ID: ${{ vars.RENDER_OWNER_ID }}
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: .node-version
+
+      - name: Mark the production mutation attempt
+        id: mutation_attempt
+        run: echo "attempted=true" >> "$GITHUB_OUTPUT"
 
       - name: Disable and verify Render git auto-deploys
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
-        run: bash scripts/harden-render-auto-deploy.sh
+          RENDER_SERVICE_NAME: ${{ inputs.service }}
+        run: bash scripts/harden-render-auto-deploy.sh "$RENDER_SERVICE_NAME"
 
       - name: Install Postgres client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
       - name: Apply pending Postgres migrations
         run: ./scripts/run-migrations.sh
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL: ${{ secrets.DATABASE_MIGRATION_URL }}
+          DATABASE_MIGRATION_ROLE: ${{ vars.DATABASE_MIGRATION_ROLE }}
+          DATABASE_MIGRATION_LOGIN_ROLE: ${{ vars.DATABASE_MIGRATION_LOGIN_ROLE }}
+          DATABASE_MIGRATION_EXISTING_LOGIN_ROLES: ${{ vars.DATABASE_MIGRATION_EXISTING_LOGIN_ROLES }}
+          DATABASE_MIGRATION_OWNER_PARENT_ROLES: ${{ vars.DATABASE_MIGRATION_OWNER_PARENT_ROLES }}
+          DATABASE_MIGRATION_OWNER_CAN_CREATE_ROLES: ${{ vars.DATABASE_MIGRATION_OWNER_CAN_CREATE_ROLES }}
+          DATABASE_TRANSITIONAL_OWNER_LOGIN_ROLE: ${{ vars.DATABASE_TRANSITIONAL_OWNER_LOGIN_ROLE }}
+          DATABASE_CANARY_WRITER_ROLE: ${{ vars.DATABASE_CANARY_WRITER_ROLE }}
+          DATABASE_RUNTIME_CAPABILITY_ROLES: ${{ vars.DATABASE_RUNTIME_CAPABILITY_ROLES }}
+          DATABASE_VERIFY_CAPABILITY_ROLE: ${{ vars.DATABASE_VERIFY_CAPABILITY_ROLE }}
+          DATABASE_MIGRATION_ROLE_REQUIRED: "1"
 
       - name: Prepare commit release in Sentry
         env:
@@ -89,35 +106,24 @@ jobs:
           bash scripts/sentry-release-deploy.sh prepare \
             "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
 
-      # ClickHouse owns a persistent disk and a deploy restarts the database
-      # container. Keep it outside `all`; operators must select it explicitly
-      # and acknowledge the backup check above.
-      - name: Deploy axel-clickhouse
-        if: ${{ inputs.service == 'axel-clickhouse' }}
+      - name: Save and verify the selected Render Node version
+        if: >-
+          ${{ inputs.service == 'axel-delivery-native' ||
+              inputs.service == 'axel-delivery-workers' ||
+              inputs.service == 'axel-pull-worker' }}
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
-        run: bash scripts/deploy-render-service.sh axel-clickhouse "$GITHUB_SHA"
-
-      - name: Record axel-clickhouse deploy in Sentry
-        if: ${{ inputs.service == 'axel-clickhouse' }}
-        env:
-          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-          SENTRY_ORG: rolln
-          SENTRY_PROJECT: javascript
-          SENTRY_RELEASE: ${{ github.sha }}
-        run: |
-          bash scripts/sentry-release-deploy.sh record \
-            render/axel-clickhouse \
-            "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          RENDER_SERVICE_NAME: ${{ inputs.service }}
+        run: node scripts/sync-render-node-version.mjs
 
       - name: Deploy axel-delivery-native
-        if: ${{ inputs.service == 'axel-delivery-native' || inputs.service == 'all' }}
+        if: ${{ inputs.service == 'axel-delivery-native' }}
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
         run: bash scripts/deploy-render-service.sh axel-delivery-native "$GITHUB_SHA"
 
       - name: Record axel-delivery-native deploy in Sentry
-        if: ${{ inputs.service == 'axel-delivery-native' || inputs.service == 'all' }}
+        if: ${{ inputs.service == 'axel-delivery-native' }}
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: rolln
@@ -129,13 +135,13 @@ jobs:
             "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
       - name: Deploy axel-delivery-workers
-        if: ${{ inputs.service == 'axel-delivery-workers' || inputs.service == 'all' }}
+        if: ${{ inputs.service == 'axel-delivery-workers' }}
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
         run: bash scripts/deploy-render-service.sh axel-delivery-workers "$GITHUB_SHA"
 
       - name: Record axel-delivery-workers deploy in Sentry
-        if: ${{ inputs.service == 'axel-delivery-workers' || inputs.service == 'all' }}
+        if: ${{ inputs.service == 'axel-delivery-workers' }}
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: rolln
@@ -147,13 +153,13 @@ jobs:
             "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
       - name: Deploy axel-pull-worker
-        if: ${{ inputs.service == 'axel-pull-worker' || inputs.service == 'all' }}
+        if: ${{ inputs.service == 'axel-pull-worker' }}
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
         run: bash scripts/deploy-render-service.sh axel-pull-worker "$GITHUB_SHA"
 
       - name: Record axel-pull-worker deploy in Sentry
-        if: ${{ inputs.service == 'axel-pull-worker' || inputs.service == 'all' }}
+        if: ${{ inputs.service == 'axel-pull-worker' }}
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: rolln
@@ -165,6 +171,7 @@ jobs:
             "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
       - name: Run post-deploy smoke
+        if: ${{ always() && steps.mutation_attempt.outputs.attempted == 'true' }}
         run: bash scripts/smoke.sh
         env:
           AXEL_MARKETING_URL: ${{ vars.AXEL_MARKETING_URL || 'https://axelapp.ai' }}

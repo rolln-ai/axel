@@ -3,7 +3,7 @@ import {
   operationalAlertSentryIdentity,
   type SentryClient,
 } from "@axel/observability";
-import type { AlertSink } from "@axel/router";
+import { externalAlertEvent, type AlertSink } from "@axel/router";
 
 /**
  * Turn numeric operational threshold events into stable Sentry Issues. Alert
@@ -13,20 +13,21 @@ import type { AlertSink } from "@axel/router";
 export function createSentryAlertSink(client: SentryClient | null): AlertSink {
   return {
     async notify(event) {
-      const identity = operationalAlertSentryIdentity(event);
+      const safeEvent = externalAlertEvent(event);
+      const identity = operationalAlertSentryIdentity(safeEvent);
       await captureException(client, new Error(identity.message), {
-        level: event.severity === "critical" ? "error" : "warning",
+        level: safeEvent.severity === "critical" ? "error" : "warning",
         fingerprint: identity.fingerprint,
         tags: {
           component: "operational_alert",
-          alert_rule: event.rule,
-          alert_source: event.source,
-          alert_severity: event.severity,
+          alert_rule: safeEvent.rule,
+          alert_source: safeEvent.source,
+          alert_severity: safeEvent.severity,
         },
         extra: {
-          summary: event.summary,
-          details: event.details,
-          occurred_at: event.occurred_at,
+          summary: safeEvent.summary,
+          details: safeEvent.details,
+          occurred_at: safeEvent.occurred_at,
         },
       });
     },

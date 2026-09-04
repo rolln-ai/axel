@@ -81,12 +81,12 @@ async function probe(url: string | null): Promise<Omit<ComponentStatus, "name">>
       latencyMs: Date.now() - started,
       detail: `HTTP ${response.status}`,
     };
-  } catch (err) {
+  } catch {
     return {
       url: target,
       ok: false,
       latencyMs: Date.now() - started,
-      detail: err instanceof Error ? err.message : String(err),
+      detail: "Health request failed.",
     };
   }
 }
@@ -116,7 +116,7 @@ export default async function StatusPage() {
             url: COMPONENTS[i]?.url ?? "(unknown)",
             ok: false,
             latencyMs: 0,
-            detail: r.reason instanceof Error ? r.reason.message : String(r.reason),
+            detail: "Health check failed.",
           };
         })
       : [];

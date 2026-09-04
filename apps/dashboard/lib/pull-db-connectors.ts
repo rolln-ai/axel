@@ -79,8 +79,8 @@ const pgConnect = async (config: PostgresConfig): Promise<PgClient> => {
     idleTimeoutMillis: 10_000,
     connectionTimeoutMillis: 10_000,
   });
-  pool.on("error", (err) => {
-    console.error("[pg-pull] async pool error:", err instanceof Error ? err.message : err);
+  pool.on("error", () => {
+    console.error("[pg-pull] async pool error");
   });
   return {
     async query<T = Record<string, unknown>>(sql: string, params?: unknown[]) {

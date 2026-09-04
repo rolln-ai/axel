@@ -114,9 +114,9 @@ export async function proposeDestinationMappingImpl(
   let samples: SampledEvent[];
   try {
     samples = await sampler(workspaceId, map.source_id, { maxEvents: 30 });
-  } catch (err) {
+  } catch {
     return {
-      error: `Couldn't sample events for preview: ${err instanceof Error ? err.message : String(err)}`,
+      error: "Couldn't sample events for the mapping preview. Try again.",
     };
   }
   if (samples.length === 0) {
@@ -142,7 +142,8 @@ export async function proposeDestinationMappingImpl(
       );
       if (!intro) {
         return {
-          error: `Table "${target}" wasn't found in the destination — create it first, or pick an existing table.`,
+          error:
+            "That table wasn't found in the Postgres destination. Create it first or pick an existing table.",
         };
       }
       proposal = proposePostgresMapping(destination.id, intro, inferred, samples);
@@ -157,7 +158,8 @@ export async function proposeDestinationMappingImpl(
       );
       if (!intro) {
         return {
-          error: `Couldn't read collection "${target}" — check the destination is reachable and the collection exists.`,
+          error:
+            "Couldn't read that MongoDB collection. Check that the destination is reachable and the collection exists.",
         };
       }
       proposal = proposeMongoMapping(destination.id, intro, inferred, samples);
@@ -184,7 +186,7 @@ export async function proposeDestinationMappingImpl(
       );
     } else {
       return {
-        error: `Mapping proposals don't support destination type "${destination.type}" yet.`,
+        error: "Mapping proposals don't support this destination type yet.",
       };
     }
     return {
@@ -193,9 +195,10 @@ export async function proposeDestinationMappingImpl(
       destination_id: destination.id,
       destination_type: destination.type,
     };
-  } catch (err) {
+  } catch {
     return {
-      error: `Mapping failed: ${err instanceof Error ? err.message : String(err)}`,
+      error:
+        "Couldn't prepare a mapping for this destination. Check its connection and target settings, then try again.",
     };
   }
 }

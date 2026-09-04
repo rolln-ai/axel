@@ -1,7 +1,10 @@
 import { sentryClientFromEnv, withCronCheckIn } from "@axel/observability";
 import { isCronAuthorized } from "../../../../lib/cron-auth";
 import { captureDashboardException } from "../../../../lib/sentry-capture";
-import { sweepWorkspaceTeardowns } from "../../../../lib/workspace-teardown";
+import {
+  publicWorkspaceTeardownSweepSummary,
+  sweepWorkspaceTeardowns,
+} from "../../../../lib/workspace-teardown";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -34,15 +37,17 @@ async function handle(request: Request): Promise<Response> {
           timezone: "UTC",
         },
       },
-      async () => sweepWorkspaceTeardowns(),
+      async () => publicWorkspaceTeardownSweepSummary(
+        await sweepWorkspaceTeardowns(),
+      ),
     );
-    return Response.json({ ok: true, ...result });
-  } catch (err) {
-    await captureDashboardException(err, {
+    return Response.json({ ok: true, summary: result });
+  } catch {
+    await captureDashboardException(new Error("workspace_teardown_failed"), {
       tags: { component: "workspace_teardown_cron" },
     });
     return Response.json(
-      { ok: false, error: err instanceof Error ? err.message : String(err) },
+      { ok: false, error: "workspace_teardown_failed" },
       { status: 500 },
     );
   }

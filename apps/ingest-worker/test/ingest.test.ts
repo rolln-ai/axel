@@ -4,12 +4,20 @@ import worker, { type Env } from "../src/index.js";
 import type { QueueMessage } from "@axel/shared";
 import { resetRateLimitsForTests } from "../src/rate-limit.js";
 import { inMemorySourceCache } from "../src/source-cache.js";
+import type { SourceAuthorityNamespaceLike } from "../src/source-authority.js";
 
 // Worker stores secret_token as the SHA-256 hex hash of the plaintext token
 // the customer presents. Tests construct fixtures with the hash so the worker's
 // constant-time comparison succeeds.
 function tokenHash(plaintext: string): string {
   return createHash("sha256").update(plaintext).digest("hex");
+}
+
+function withSourceToken(
+  token: string,
+  headers: Record<string, string> = {},
+): Record<string, string> {
+  return { "x-axel-token": token, ...headers };
 }
 
 class FakeR2 {
@@ -75,16 +83,21 @@ describe("ingest worker", () => {
     });
   });
 
-  it("returns 202 and stores payload + queues message on valid request", async () => {
-    const req = new Request("https://axel.app/in/src_test?token=secret-abc&signature=do-not-store&client_secret=oauth-secret&refresh_token=oauth-refresh&webhook_secret=custom-secret&code=oauth-code&event=invoice.paid", {
+  it("returns 202 while keeping all inbound metadata values out of Queue", async () => {
+    const req = new Request("https://axel.app/in/src_test?signature=do-not-store&client_secret=oauth-secret&refresh_token=oauth-refresh&webhook_secret=custom-secret&code=oauth-code&campaign=query-value-under-innocuous-name", {
       method: "POST",
       headers: {
         "content-type": "application/json",
+        "x-axel-token": "secret-abc",
         "x-auth-token": "do-not-store",
         "cf-access-jwt-assertion": "do-not-store-either",
         "x-partner-webhook-secret": "custom-secret-header",
+        "x-customer-ref": "header-value-under-innocuous-name",
+        // A public sender must never be able to mark accepted traffic as
+        // non-billable. Only /admin/trigger-event may create test events.
+        "x-axel-test": "1",
       },
-      body: JSON.stringify({ hello: "world" }),
+      body: JSON.stringify({ hello: "world", type: "custom-body-type-must-not-index" }),
     });
     const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(202);
@@ -103,11 +116,12 @@ describe("ingest worker", () => {
     expect(allSent).toHaveLength(1);
     expect(allSent[0]!.event_id).toBe(body.event_id);
     expect(allSent[0]!.workspace_id).toBe("ws_1");
-    expect(allSent[0]!.headers["content-type"]).toBe("application/json");
-    expect(allSent[0]!.headers["x-auth-token"]).toBeUndefined();
-    expect(allSent[0]!.headers["cf-access-jwt-assertion"]).toBeUndefined();
-    expect(allSent[0]!.headers["x-partner-webhook-secret"]).toBeUndefined();
-    expect(allSent[0]!.query).toEqual({ event: "invoice.paid" });
+    expect(allSent[0]!.headers).toEqual({});
+    expect(allSent[0]!.query).toEqual({});
+    expect(allSent[0]!.is_test).toBe(false);
+    expect(allSent[0]!.event_type).toBeUndefined();
+    expect(JSON.stringify(allSent[0])).not.toContain("header-value-under-innocuous-name");
+    expect(JSON.stringify(allSent[0])).not.toContain("query-value-under-innocuous-name");
   });
 
   it("does not acknowledge when the durable queue write fails", async () => {
@@ -120,14 +134,88 @@ describe("ingest worker", () => {
       } satisfies Partial<Queue<QueueMessage>>;
     }
 
-    const req = new Request("https://axel.app/in/src_test?token=secret-abc", {
+    const req = new Request("https://axel.app/in/src_test", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: withSourceToken("secret-abc", { "content-type": "application/json" }),
       body: JSON.stringify({ hello: "world" }),
     });
 
-    await expect(worker.fetch(req, env, ctx)).rejects.toThrow("queue unavailable");
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "internal_error" });
     expect((env.EVENTS_RAW as unknown as FakeR2).store.size).toBe(1);
+  });
+
+  it("HMAC-pseudonymizes a low-entropy FIFO value before queueing", async () => {
+    env = makeEnv({
+      src_test: {
+        workspace_id: "ws_1",
+        secret_token: tokenHash("secret-abc"),
+        status: "active",
+        ordering_enabled: true,
+        ordering_key_path: "account.sequence",
+      },
+    });
+    env.ORDERING_KEY_HMAC_SECRET = "ordering-test-secret-32-characters-minimum";
+    const res = await worker.fetch(new Request(
+      "https://axel.app/in/src_test",
+      {
+        method: "POST",
+        headers: withSourceToken("secret-abc", { "content-type": "application/json" }),
+        body: JSON.stringify({ account: { sequence: 1 } }),
+      },
+    ), env, ctx);
+
+    expect(res.status).toBe(202);
+    const queued = Array.from({ length: 16 }, (_, index) => {
+      const key = `QUEUE_EVENTS_${index.toString().padStart(2, "0")}` as keyof Env;
+      return (env[key] as unknown as FakeQueue<QueueMessage>).sent;
+    }).flat();
+    expect(queued).toHaveLength(1);
+    expect(queued[0]!.ordering_key).toMatch(/^ord_v1_[a-f0-9]{64}$/);
+    expect(queued[0]!.ordering_key).not.toContain(":1");
+  });
+
+  it("fails closed before storage when an ordered source has no HMAC key", async () => {
+    env = makeEnv({
+      src_test: {
+        workspace_id: "ws_1",
+        secret_token: tokenHash("secret-abc"),
+        status: "active",
+        ordering_enabled: true,
+        ordering_key_path: "account.sequence",
+      },
+    });
+    const res = await worker.fetch(new Request(
+      "https://axel.app/in/src_test",
+      {
+        method: "POST",
+        headers: withSourceToken("secret-abc", { "content-type": "application/json" }),
+        body: JSON.stringify({ account: { sequence: 1 } }),
+      },
+    ), env, ctx);
+
+    expect(res.status).toBe(503);
+    expect((env.EVENTS_RAW as unknown as FakeR2).store.size).toBe(0);
+  });
+
+  it("requires the ordering HMAC key for every hosted-profile ingest", async () => {
+    env.SOURCE_AUTHORITY_REQUIRED = "true";
+    const res = await worker.fetch(new Request(
+      "https://axel.app/in/src_test",
+      {
+        method: "POST",
+        headers: withSourceToken("secret-abc", { "content-type": "application/json" }),
+        body: JSON.stringify({ hello: "world" }),
+      },
+    ), env, ctx);
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({
+      error: "source_lookup_unavailable",
+      retry_after_seconds: 2,
+    });
+    expect((env.EVENTS_RAW as unknown as FakeR2).store.size).toBe(0);
   });
 
   it("retries Queue code 15000 with the same event and returns 202 on recovery", async () => {
@@ -139,9 +227,9 @@ describe("ingest worker", () => {
       (env as unknown as Record<string, unknown>)[key as string] = { send };
     }
 
-    const req = new Request("https://axel.app/in/src_test?token=secret-abc", {
+    const req = new Request("https://axel.app/in/src_test", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: withSourceToken("secret-abc", { "content-type": "application/json" }),
       body: JSON.stringify({ hello: "world" }),
     });
     const res = await worker.fetch(req, env, ctx);
@@ -161,9 +249,9 @@ describe("ingest worker", () => {
       (env as unknown as Record<string, unknown>)[key as string] = { send };
     }
 
-    const req = new Request("https://axel.app/in/src_test?token=secret-abc", {
+    const req = new Request("https://axel.app/in/src_test", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: withSourceToken("secret-abc", { "content-type": "application/json" }),
       body: JSON.stringify({ hello: "world" }),
     });
     const res = await worker.fetch(req, env, ctx);
@@ -175,17 +263,92 @@ describe("ingest worker", () => {
   });
 
   it("rejects invalid token with 401", async () => {
-    const req = new Request("https://axel.app/in/src_test?token=wrong", {
+    const req = new Request("https://axel.app/in/src_test", {
       method: "POST",
+      headers: withSourceToken("wrong"),
       body: "{}",
     });
     const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(401);
   });
 
-  it("rejects unknown source with 404", async () => {
-    const req = new Request("https://axel.app/in/src_unknown?token=secret-abc", {
+  it("rejects a query-string token even when the same valid token is in the header", async () => {
+    const queryCredential = "query-credential-must-never-reach-metadata";
+    const req = new Request(
+      `https://axel.app/in/src_test?token=${encodeURIComponent(queryCredential)}`,
+      {
+        method: "POST",
+        headers: withSourceToken("secret-abc"),
+        body: "{}",
+      },
+    );
+
+    const res = await worker.fetch(req, env, ctx);
+
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "query_token_not_allowed" });
+    expect((env.EVENTS_RAW as unknown as FakeR2).store.size).toBe(0);
+    const queued = Array.from({ length: 16 }, (_, index) => {
+      const key = `QUEUE_EVENTS_${index.toString().padStart(2, "0")}` as keyof Env;
+      return (env[key] as unknown as FakeQueue<QueueMessage>).sent;
+    }).flat();
+    expect(queued).toHaveLength(0);
+  });
+
+  it("requires the x-axel-token header for a custom source", async () => {
+    const res = await worker.fetch(new Request("https://axel.app/in/src_test", {
       method: "POST",
+      body: "{}",
+    }), env, ctx);
+
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "missing_token" });
+    expect((env.EVENTS_RAW as unknown as FakeR2).store.size).toBe(0);
+  });
+
+  it("does not persist an event when the authority changes during verification", async () => {
+    delete env.DEV_MODE;
+    const authority = {
+      idFromName: vi.fn(() => ({}) as DurableObjectId),
+      get: vi.fn(() => ({
+        fetch: vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+          const body = JSON.parse(String(init?.body)) as { op: string };
+          if (body.op === "resolve") {
+            return new Response(JSON.stringify({
+              source: {
+                source_id: "src_test",
+                workspace_id: "ws_1",
+                name: "Webhook",
+                secret_token: tokenHash("secret-abc"),
+                status: "active",
+              },
+              authorization_version: "authority_version_00000001",
+            }));
+          }
+          return new Response(null, { status: 423 });
+        }),
+      })),
+    } satisfies SourceAuthorityNamespaceLike;
+    env.SOURCE_AUTHORITY = authority;
+
+    const response = await worker.fetch(new Request(
+      "https://axel.app/in/src_test",
+      { method: "POST", headers: withSourceToken("secret-abc"), body: "{}" },
+    ), env, ctx);
+
+    expect(response.status).toBe(503);
+    expect((env.EVENTS_RAW as unknown as FakeR2).store.size).toBe(0);
+    const queued = Array.from({ length: 16 }, (_, index) => {
+      const key = `QUEUE_EVENTS_${index.toString().padStart(2, "0")}` as keyof Env;
+      return (env[key] as unknown as FakeQueue<QueueMessage>).sent;
+    }).flat();
+    expect(queued).toHaveLength(0);
+  });
+
+  it("rejects unknown source with 404", async () => {
+    const req = new Request("https://axel.app/in/src_unknown", {
+      method: "POST",
+      headers: withSourceToken("secret-abc"),
       body: "{}",
     });
     const res = await worker.fetch(req, env, ctx);
@@ -193,8 +356,9 @@ describe("ingest worker", () => {
   });
 
   it("rejects disabled source with 403", async () => {
-    const req = new Request("https://axel.app/in/src_disabled?token=secret-xyz", {
+    const req = new Request("https://axel.app/in/src_disabled", {
       method: "POST",
+      headers: withSourceToken("secret-xyz"),
       body: "{}",
     });
     const res = await worker.fetch(req, env, ctx);
@@ -202,16 +366,16 @@ describe("ingest worker", () => {
   });
 
   it("rejects non-POST with 405", async () => {
-    const req = new Request("https://axel.app/in/src_test?token=secret-abc", { method: "GET" });
+    const req = new Request("https://axel.app/in/src_test", { method: "GET" });
     const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(405);
   });
 
   it("rejects payload over 1MB with 413", async () => {
     const big = new Uint8Array(MAX_BODY_TEST + 1);
-    const req = new Request("https://axel.app/in/src_test?token=secret-abc", {
+    const req = new Request("https://axel.app/in/src_test", {
       method: "POST",
-      headers: { "content-length": String(big.byteLength) },
+      headers: withSourceToken("secret-abc", { "content-length": String(big.byteLength) }),
       body: big,
     });
     const res = await worker.fetch(req, env, ctx);
@@ -227,9 +391,9 @@ describe("ingest worker", () => {
         max_body_depth: 2,
       },
     });
-    const req = new Request("https://axel.app/in/src_test?token=secret-abc", {
+    const req = new Request("https://axel.app/in/src_test", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: withSourceToken("secret-abc", { "content-type": "application/json" }),
       body: JSON.stringify({ a: { b: { c: true } } }),
     });
     const res = await worker.fetch(req, env, ctx);
@@ -237,43 +401,43 @@ describe("ingest worker", () => {
     expect(await res.json()).toEqual({ error: "payload_too_deep" });
   });
 
-  it("uses the source cache when configured to avoid repeated upstream lookups", async () => {
+  it("never trusts a positive KV source entry for authorization", async () => {
     const cache = inMemorySourceCache();
-    // Hand-rolled spy on the cache to count cache puts vs. cache hits.
-    const putSpy = vi.spyOn(cache, "put");
+    const getSpy = vi.spyOn(cache, "get");
+    await cache.put("src_test", {
+      kind: "hit",
+      source: {
+        source_id: "src_test",
+        workspace_id: "ws_1",
+        name: "stale",
+        secret_token: tokenHash("revoked-token"),
+        status: "active",
+      },
+    }, 300);
+    (env as Env & { __SOURCE_CACHE_OVERRIDE?: unknown }).__SOURCE_CACHE_OVERRIDE = cache;
+
+    const revoked = new Request("https://axel.app/in/src_test", {
+      method: "POST",
+      body: "{}",
+      headers: withSourceToken("revoked-token", { "content-type": "application/json" }),
+    });
+    expect((await worker.fetch(revoked, env, ctx)).status).toBe(401);
+    expect(getSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not use KV negative entries to hide newly committed sources", async () => {
+    const cache = inMemorySourceCache();
+    await cache.put("src_test", { kind: "miss" }, 300);
     const getSpy = vi.spyOn(cache, "get");
     (env as Env & { __SOURCE_CACHE_OVERRIDE?: unknown }).__SOURCE_CACHE_OVERRIDE = cache;
 
-    const make = () => new Request("https://axel.app/in/src_test?token=secret-abc", {
+    const request = new Request("https://axel.app/in/src_test", {
       method: "POST",
-      body: "{}",
-      headers: { "content-type": "application/json" },
-    });
-
-    expect((await worker.fetch(make(), env, ctx)).status).toBe(202);
-    expect((await worker.fetch(make(), env, ctx)).status).toBe(202);
-    expect((await worker.fetch(make(), env, ctx)).status).toBe(202);
-
-    expect(getSpy).toHaveBeenCalledTimes(3);
-    // Only the first call writes to the cache; the rest are cache hits.
-    expect(putSpy).toHaveBeenCalledTimes(1);
-  });
-
-  it("negatively caches unknown sources to absorb scanning attacks", async () => {
-    const cache = inMemorySourceCache();
-    const putSpy = vi.spyOn(cache, "put");
-    (env as Env & { __SOURCE_CACHE_OVERRIDE?: unknown }).__SOURCE_CACHE_OVERRIDE = cache;
-
-    const make = () => new Request("https://axel.app/in/src_unknown?token=anything", {
-      method: "POST",
+      headers: withSourceToken("secret-abc"),
       body: "{}",
     });
-    expect((await worker.fetch(make(), env, ctx)).status).toBe(404);
-    expect((await worker.fetch(make(), env, ctx)).status).toBe(404);
-    expect((await worker.fetch(make(), env, ctx)).status).toBe(404);
-
-    // Only one negative-cache write: subsequent lookups hit the cache.
-    expect(putSpy).toHaveBeenCalledTimes(1);
+    expect((await worker.fetch(request, env, ctx)).status).toBe(202);
+    expect(getSpy).not.toHaveBeenCalled();
   });
 
   it("rate limits sources before storing or queueing more events", async () => {
@@ -286,12 +450,14 @@ describe("ingest worker", () => {
       },
     });
 
-    const req1 = new Request("https://axel.app/in/src_test?token=secret-abc", {
+    const req1 = new Request("https://axel.app/in/src_test", {
       method: "POST",
+      headers: withSourceToken("secret-abc"),
       body: "{}",
     });
-    const req2 = new Request("https://axel.app/in/src_test?token=secret-abc", {
+    const req2 = new Request("https://axel.app/in/src_test", {
       method: "POST",
+      headers: withSourceToken("secret-abc"),
       body: "{}",
     });
 
@@ -310,7 +476,7 @@ describe("ingest worker", () => {
         provider: "stripe",
       },
     });
-    const req = new Request("https://axel.app/in/src_test?token=secret-abc", {
+    const req = new Request("https://axel.app/in/src_test", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ type: "invoice.paid" }),
@@ -341,9 +507,9 @@ describe("ingest worker", () => {
         provider: "custom",
       },
     });
-    const req = new Request("https://axel.app/in/src_test?token=secret-abc", {
+    const req = new Request("https://axel.app/in/src_test", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: withSourceToken("secret-abc", { "content-type": "application/json" }),
       body: JSON.stringify({ hello: "world" }),
     });
 
@@ -368,7 +534,7 @@ describe("ingest worker", () => {
         signing_secret: "whsec_stripe_test",
       },
     });
-    const req = new Request("https://axel.app/in/src_test?token=secret-abc", {
+    const req = new Request("https://axel.app/in/src_test", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ hello: "world" }),
@@ -383,7 +549,7 @@ describe("ingest worker", () => {
     expect(r2.store.size).toBe(0);
   });
 
-  it("accepts a signed Stripe request and continues to R2 + queue", async () => {
+  it("accepts a signed Stripe request without an Axel token", async () => {
     const SECRET = "whsec_stripe_test";
     env = makeEnv({
       src_test: {
@@ -401,7 +567,7 @@ describe("ingest worker", () => {
     const { createHmac } = await import("node:crypto");
     const v1 = createHmac("sha256", SECRET).update(`${ts}.${body}`).digest("hex");
 
-    const req = new Request("https://axel.app/in/src_test?token=secret-abc", {
+    const req = new Request("https://axel.app/in/src_test", {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -419,6 +585,8 @@ describe("ingest worker", () => {
       return (env[key] as unknown as FakeQueue<QueueMessage>).sent;
     }).flat();
     expect(queued[0]!.headers["stripe-signature"]).toBeUndefined();
+    expect(queued[0]!.headers).toEqual({});
+    expect(queued[0]!.event_type).toBe("invoice.paid");
   });
 
   it("verifies Chargebee Basic auth without persisting the credential", async () => {
@@ -433,7 +601,7 @@ describe("ingest worker", () => {
       },
     });
     const authorization = `Basic ${Buffer.from(signingSecret).toString("base64")}`;
-    const req = new Request("https://axel.app/in/src_test?token=secret-abc", {
+    const req = new Request("https://axel.app/in/src_test", {
       method: "POST",
       headers: {
         authorization,
@@ -453,6 +621,8 @@ describe("ingest worker", () => {
     expect(queued).toHaveLength(1);
     expect(queued[0]!.headers.authorization).toBeUndefined();
     expect(queued[0]!.headers["x-api-key"]).toBeUndefined();
+    expect(queued[0]!.headers).toEqual({});
+    expect(queued[0]!.event_type).toBe("subscription_created");
   });
 
   it("deduplicates GitHub retries durably by X-GitHub-Delivery", async () => {
@@ -469,7 +639,7 @@ describe("ingest worker", () => {
     const body = JSON.stringify({ action: "opened", issue: { number: 42 } });
     const { createHmac } = await import("node:crypto");
     const signature = createHmac("sha256", signingSecret).update(body).digest("hex");
-    const makeRequest = () => new Request("https://axel.app/in/src_test?token=secret-abc", {
+    const makeRequest = () => new Request("https://axel.app/in/src_test", {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -514,7 +684,7 @@ describe("ingest worker", () => {
     const body = JSON.stringify({ action: "reopened", issue: { number: 42 } });
     const { createHmac } = await import("node:crypto");
     const signature = createHmac("sha256", signingSecret).update(body).digest("hex");
-    const makeRequest = () => new Request("https://axel.app/in/src_test?token=secret-abc", {
+    const makeRequest = () => new Request("https://axel.app/in/src_test", {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -571,7 +741,7 @@ describe("ingest worker", () => {
     const body = JSON.stringify({ action: "closed", issue: { number: 42 } });
     const { createHmac } = await import("node:crypto");
     const signature = createHmac("sha256", signingSecret).update(body).digest("hex");
-    const makeRequest = () => new Request("https://axel.app/in/src_test?token=secret-abc", {
+    const makeRequest = () => new Request("https://axel.app/in/src_test", {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -589,7 +759,9 @@ describe("ingest worker", () => {
       };
     }
 
-    await expect(worker.fetch(makeRequest(), env, ctx)).rejects.toThrow("queue unavailable");
+    const firstAttempt = await worker.fetch(makeRequest(), env, ctx);
+    expect(firstAttempt.status).toBe(500);
+    expect(await firstAttempt.json()).toEqual({ error: "internal_error" });
     const firstAttemptKeys = [...(env.EVENTS_RAW as unknown as FakeR2).store.keys()];
     expect(firstAttemptKeys).toHaveLength(1);
     expect(firstAttemptKeys[0]).toMatch(/^events\/ws_1\/provider\//);

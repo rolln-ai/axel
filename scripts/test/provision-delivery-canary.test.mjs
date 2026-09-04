@@ -8,8 +8,11 @@ import {
   buildEncryptedCredential,
   buildVerificationPayload,
   buildWriterConnectionString,
+  fenceCanarySource,
+  loadCommittedCanarySource,
   readProvisionEnvironment,
   reconcileCanaryAdminState,
+  syncCanarySource,
   verifyWriterClient,
 } from "../provision-delivery-canary.mjs";
 
@@ -18,6 +21,8 @@ const fixture = Object.freeze({
   masterKey: ["ab", "cd"].join("").repeat(16),
   sourceToken: `axt_${"sourcefixture".repeat(4)}`,
   writerPassword: ["writer", "fixture", "password", "long", "enough"].join("-"),
+  ingestAdminUrl: "https://ingest.axelapp.ai/admin/source-cache/put",
+  ingestAdminToken: ["admin", "fixture", "token", "sufficiently", "long"].join("-"),
 });
 
 function config(overrides = {}) {
@@ -26,6 +31,8 @@ function config(overrides = {}) {
     masterKey: fixture.masterKey,
     sourceToken: fixture.sourceToken,
     writerPassword: fixture.writerPassword,
+    ingestAdminUrl: "https://ingest.axelapp.ai",
+    ingestAdminToken: fixture.ingestAdminToken,
     controlPlaneSslVerify: "true",
     ...overrides,
   };
@@ -244,9 +251,12 @@ test("environment validation requires distinct, strong env-only credentials", ()
     CREDENTIALS_MASTER_KEY: fixture.masterKey,
     AXEL_CANARY_SOURCE_TOKEN: fixture.sourceToken,
     AXEL_CANARY_WRITER_PASSWORD: fixture.writerPassword,
+    INGEST_ADMIN_URL: fixture.ingestAdminUrl,
+    INGEST_ADMIN_TOKEN: fixture.ingestAdminToken,
     CONTROL_PLANE_DB_SSL_VERIFY: "true",
   });
   assert.equal(parsed.databaseUrl, fixture.databaseUrl);
+  assert.equal(parsed.ingestAdminUrl, "https://ingest.axelapp.ai");
   assert.equal(parsed.controlPlaneSslVerify, "true");
 
   assert.throws(
@@ -259,6 +269,8 @@ test("environment validation requires distinct, strong env-only credentials", ()
       CREDENTIALS_MASTER_KEY: fixture.masterKey,
       AXEL_CANARY_SOURCE_TOKEN: "short",
       AXEL_CANARY_WRITER_PASSWORD: fixture.writerPassword,
+      INGEST_ADMIN_URL: fixture.ingestAdminUrl,
+      INGEST_ADMIN_TOKEN: fixture.ingestAdminToken,
     }),
     /invalid_env:AXEL_CANARY_SOURCE_TOKEN/,
   );
@@ -268,9 +280,91 @@ test("environment validation requires distinct, strong env-only credentials", ()
       CREDENTIALS_MASTER_KEY: fixture.masterKey,
       AXEL_CANARY_SOURCE_TOKEN: fixture.sourceToken,
       AXEL_CANARY_WRITER_PASSWORD: fixture.sourceToken,
+      INGEST_ADMIN_URL: fixture.ingestAdminUrl,
+      INGEST_ADMIN_TOKEN: fixture.ingestAdminToken,
     }),
     /canary_secrets_must_be_distinct/,
   );
+  assert.throws(
+    () => readProvisionEnvironment({
+      DATABASE_URL: fixture.databaseUrl,
+      CREDENTIALS_MASTER_KEY: fixture.masterKey,
+      AXEL_CANARY_SOURCE_TOKEN: fixture.sourceToken,
+      AXEL_CANARY_WRITER_PASSWORD: fixture.writerPassword,
+      INGEST_ADMIN_URL: "http://ingest.axelapp.ai",
+      INGEST_ADMIN_TOKEN: fixture.ingestAdminToken,
+    }),
+    /invalid_env:INGEST_ADMIN_URL/,
+  );
+});
+
+test("canary authority calls fence before accepting a committed sync", async () => {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init, body: JSON.parse(init.body) });
+    return new Response(null, { status: 204 });
+  };
+  const provisionConfig = config();
+  const fenceToken = await fenceCanarySource(provisionConfig, fetchImpl);
+  const source = {
+    source_id: CANARY_RESOURCES.sourceId,
+    workspace_id: CANARY_RESOURCES.workspaceId,
+    name: CANARY_RESOURCES.sourceName,
+    secret_token: "hash-fixture",
+    status: "active",
+    provider: "custom",
+  };
+  await syncCanarySource(provisionConfig, fenceToken, source, fetchImpl);
+
+  assert.match(fenceToken, /^[a-f0-9]{32}$/);
+  assert.deepEqual(calls.map((call) => call.url), [
+    "https://ingest.axelapp.ai/admin/source-authority/fence",
+    "https://ingest.axelapp.ai/admin/source-authority/sync",
+  ]);
+  assert.equal(calls[0].init.headers["x-axel-admin-token"], fixture.ingestAdminToken);
+  assert.equal(calls[0].body.fence_token, fenceToken);
+  assert.equal(calls[1].body.fence_token, fenceToken);
+  assert.deepEqual(calls[1].body.source, source);
+});
+
+test("committed canary source is fetched and mapped to the edge shape", async () => {
+  const client = {
+    async query() {
+      return {
+        rows: [{
+          id: CANARY_RESOURCES.sourceId,
+          workspace_id: CANARY_RESOURCES.workspaceId,
+          name: CANARY_RESOURCES.sourceName,
+          secret_token_hash: "committed-hash",
+          status: "active",
+          max_body_bytes: 2048,
+          max_body_depth: 8,
+          max_events_per_minute: 12,
+          field_selection: null,
+          provider: "custom",
+          signing_secret_ciphertext: null,
+          signing_secret_previous_ciphertext: null,
+          redact_paths: null,
+          ordering_enabled: false,
+          ordering_key_header: null,
+          ordering_key_path: null,
+          subject_key_paths: null,
+          inbound_ip_allowlist: [],
+        }],
+      };
+    },
+  };
+  assert.deepEqual(await loadCommittedCanarySource(client), {
+    source_id: CANARY_RESOURCES.sourceId,
+    workspace_id: CANARY_RESOURCES.workspaceId,
+    name: CANARY_RESOURCES.sourceName,
+    secret_token: "committed-hash",
+    status: "active",
+    max_body_bytes: 2048,
+    max_body_depth: 8,
+    max_events_per_minute: 12,
+    provider: "custom",
+  });
 });
 
 test("writer DSN drops control-plane identity and role-switch parameters", () => {
@@ -477,7 +571,8 @@ test("runbook keeps migration, canary settings, worker deploy, and monitoring fa
   assert.match(runbook, /\[skip render\]/);
   assert.match(runbook, /for github_environment in Monitoring Production/);
   assert.match(runbook, /no\s+required reviewers and no wait timer/);
-  assert.match(runbook, /npx --yes vercel@58\.4\.0 env add/);
+  assert.match(runbook, /pnpm exec vercel env add/);
+  assert.doesNotMatch(runbook, /\bnpx\b/);
   assert.match(runbook, /export -n AXEL_CANARY_SOURCE_TOKEN/);
   assert.match(runbook, /export -n DELIVERY_CANARY_RECEIPT_TOKEN/);
   assert.match(runbook, /export VERCEL_TOKEN/);

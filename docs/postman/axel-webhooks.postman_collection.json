@@ -3,7 +3,7 @@
     "_postman_id": "axel-webhooks-collection",
     "name": "Axel Webhook Tester",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "description": "A grab-bag of requests that exercise the Axel ingest worker (https://ingest.axelapp.ai) — realistic webhook payloads from Stripe, GitHub, Twilio, Slack, plus batch shapes, error-case smoke tests, and the admin endpoints.\n\n## Setup\n\n1. **Import** this file *and* the matching environment file (`axel-webhooks.postman_environment.json`).\n2. **Select the environment** in Postman's top-right dropdown.\n3. Open the environment and **fill in `sourceToken`** with the plaintext token from your dashboard:\n   - sign up at https://app.axelapp.ai/signup\n   - go to **Sources** → **Create source** → save the token shown ONCE\n   - paste that token into the env variable\n   - update `sourceId` to your new `src_…` id\n4. Hit **Send** on **`Hello → 202`** to confirm the round-trip.\n\n## What each folder does\n\n- **Hello** — minimal request to verify connectivity + token validity.\n- **Real-world payloads** — exact-shape examples that match what Stripe, GitHub, Twilio, Slack would actually POST. Useful for sanity-checking your routes + transforms.\n- **Batch & throughput** — single-request array payloads (one event with many records inside) plus a runner-friendly request you can fire 100× from the **Collection Runner** to load-test.\n- **Edge cases** — error scenarios. Each request asserts the expected non-2xx status (401, 403, 404, 405, 413). If any of these stop returning the right code, something's broken.\n- **Admin** — `/admin/source-cache/{invalidate,put}`. Needs `adminToken` set in the env. Operator-only.\n- **Replay & inspect** — pointers to dashboard pages where delivered/failed events show up. (No requests; just notes.)\n\n## Tests\n\nEvery successful POST asserts:\n  - response status === 202\n  - `event_id` is present\n  - `received_at` is an ISO timestamp\n  - sets `{{lastEventId}}` in the environment for downstream requests\n\n## See deliveries\n\nWebhooks you POST here flow through ingest → router → delivery. Watch them land:\n  - https://app.axelapp.ai/usage — month-to-date count + per-source breakdown\n  - https://app.axelapp.ai/deliveries — failures, replays\n  - if your route has an HTTP destination → tail the receiver of your choice (httpbin, requestbin, ngrok)"
+    "description": "Synthetic requests for Axel source ingest. This public collection intentionally excludes operator endpoints and infrastructure credentials.\n\n## Setup\n\n1. Import this file and `axel-webhooks.postman_environment.json`.\n2. Create a disposable source that receives synthetic test data only.\n3. Put its source ID and one-time token in the private environment.\n4. Send `Hello → 202` to confirm the setup.\n\nDo not reuse a production source, paste real webhook bodies into these requests, or share or export a populated environment. Rotate the disposable source token when testing is finished."
   },
   "item": [
     {
@@ -24,9 +24,7 @@
                   "});",
                   "pm.test('Returns received_at (ISO)', () => {",
                   "  pm.expect(body.received_at).to.match(/^\\d{4}-\\d{2}-\\d{2}T/);",
-                  "});",
-                  "pm.environment.set('lastEventId', body.event_id);",
-                  "console.log('event_id =', body.event_id);"
+                  "});"
                 ]
               }
             }
@@ -62,10 +60,7 @@
               "listen": "test",
               "script": {
                 "type": "text/javascript",
-                "exec": [
-                  "pm.test('202', () => pm.response.to.have.status(202));",
-                  "pm.environment.set('lastEventId', pm.response.json().event_id);"
-                ]
+                "exec": ["pm.test('202', () => pm.response.to.have.status(202));"]
               }
             }
           ],
@@ -368,10 +363,7 @@
               "listen": "test",
               "script": {
                 "type": "text/javascript",
-                "exec": [
-                  "pm.test('202', () => pm.response.to.have.status(202));",
-                  "pm.environment.set('lastEventId', pm.response.json().event_id);"
-                ]
+                "exec": ["pm.test('202', () => pm.response.to.have.status(202));"]
               }
             }
           ],
@@ -601,72 +593,8 @@
       ]
     },
     {
-      "name": "Admin",
-      "description": "Operator-only endpoints. Need `adminToken` set in the env (same value as the worker's ADMIN_TOKEN secret).",
-      "item": [
-        {
-          "name": "Invalidate source cache",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": ["pm.test('Status is 204', () => pm.response.to.have.status(204));"]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              { "key": "content-type", "value": "application/json" },
-              { "key": "x-axel-admin-token", "value": "{{adminToken}}" }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"source_id\": \"{{sourceId}}\"\n}"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/admin/source-cache/invalidate",
-              "host": ["{{baseUrl}}"],
-              "path": ["admin", "source-cache", "invalidate"]
-            },
-            "description": "Drops the cached source row at the edge so the next ingest re-fetches from upstream. Useful right after rotating a token from the dashboard."
-          }
-        },
-        {
-          "name": "Push source to cache (manual)",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": ["pm.test('Status is 204', () => pm.response.to.have.status(204));"]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [
-              { "key": "content-type", "value": "application/json" },
-              { "key": "x-axel-admin-token", "value": "{{adminToken}}" }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"source_id\": \"src_manual_test\",\n  \"source\": {\n    \"source_id\": \"src_manual_test\",\n    \"workspace_id\": \"ws_demo\",\n    \"name\": \"manual-test\",\n    \"secret_token\": \"REPLACE_WITH_SHA256_HEX_OF_PLAINTEXT_TOKEN\",\n    \"status\": \"active\",\n    \"max_events_per_minute\": 60\n  }\n}"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/admin/source-cache/put",
-              "host": ["{{baseUrl}}"],
-              "path": ["admin", "source-cache", "put"]
-            },
-            "description": "Force-write a source into the edge cache. The dashboard does this automatically when you create or rotate a source — this request is for manual ops scenarios. `secret_token` must be the SHA-256 hex hash of the plaintext token (`echo -n PLAINTEXT | sha256sum`)."
-          }
-        }
-      ]
-    },
-    {
       "name": "Replay & inspect",
-      "description": "Once events flow, see them at:\n\n- **/usage**       https://app.axelapp.ai/usage\n  Month-to-date count, top sources, daily volume.\n- **/deliveries**  https://app.axelapp.ai/deliveries\n  Failed deliveries with reason. One-click replay button on each row.\n- **/sources**     https://app.axelapp.ai/sources\n  Per-source status + rate-cap config.\n\nThis folder doesn't contain Postman requests — it's a marker so you remember where to look.\n\n## Sample HTTP destination\n\nFor immediate visual feedback without setting up Postgres / Mongo / S3, point a route at one of:\n  - https://webhook.site (gives you a public URL with a live request log)\n  - https://requestbin.com\n  - your own ngrok tunnel\n\nCreate the destination on https://app.axelapp.ai/destinations → HTTP → paste the URL → save. Then attach it to a route on the Routes page. Every webhook you POST through Postman will appear in webhook.site within ~1 second.",
+      "description": "Use https://app.axelapp.ai/usage for synthetic event counts, https://app.axelapp.ai/deliveries for failed deliveries and replay, and https://app.axelapp.ai/sources for source status.\n\nDo not send Axel traffic to a public request-bin service. Such services can retain request bodies and headers. Use an HTTP endpoint you operate and synthetic payloads only.",
       "item": []
     }
   ],
@@ -676,10 +604,10 @@
       "script": {
         "type": "text/javascript",
         "exec": [
-          "// Collection-level pre-request: warn loudly if the env isn't filled in.",
+          "// Collection-level pre-request: warn if the environment is incomplete.",
           "const token = pm.environment.get('sourceToken');",
           "if (!token || token === 'PASTE_YOUR_TOKEN_HERE') {",
-          "  console.warn('⚠️  sourceToken is not set. Open the environment editor and paste the plaintext token from your dashboard.');",
+          "  console.warn('sourceToken is not set. Paste the disposable source token into the private environment.');",
           "}"
         ]
       }

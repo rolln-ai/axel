@@ -1,6 +1,11 @@
 import "server-only";
 
-import { cloudflareR2ObjectUrl, resolveRawPayloadBucket } from "@axel/shared";
+import {
+  cloudflareR2ObjectUrl,
+  isCanonicalRawPayloadKey,
+  resolveRawPayloadBucket,
+  type RawPayloadKeyExpectation,
+} from "@axel/shared";
 import { GENERIC_SAMPLE, TEST_PAYLOADS } from "./test-payloads";
 
 /**
@@ -25,8 +30,8 @@ export { GENERIC_SAMPLE, TEST_PAYLOADS };
  * payload poisoned the Data Contracts inference pipeline — every failed
  * fetch ended up clustered as the sample's `type` field, producing a
  * fake Stripe `payment_intent.succeeded` cluster on sources that had
- * never seen Stripe traffic (newsletter-webhook, 800,000 events, all clustered
- * under one wrong type until this was fixed). UI preview callers that
+ * never seen Stripe traffic. A synthetic newsletter source with 800,000
+ * events was used to lock this regression. UI preview callers that
  * want a placeholder must explicitly opt in with `?? GENERIC_SAMPLE`.
  */
 
@@ -36,10 +41,14 @@ interface FetchOptions {
   bucket?: string;
 }
 
+const MAX_DASHBOARD_RAW_PAYLOAD_BYTES = 5 * 1024 * 1024;
+
 export async function fetchPayloadForR2Key(
   r2Key: string,
+  expected: RawPayloadKeyExpectation,
   options: FetchOptions = {},
 ): Promise<unknown | null> {
+  if (!isCanonicalRawPayloadKey(r2Key, expected)) return null;
   const env = options.env ?? process.env;
   const token = env.CLOUDFLARE_R2_API_TOKEN;
   const accountId = env.CLOUDFLARE_ACCOUNT_ID;
@@ -54,7 +63,9 @@ export async function fetchPayloadForR2Key(
       headers: { authorization: `Bearer ${token}` },
     });
     if (!res.ok) return null;
-    const text = await res.text();
+    const text = new TextDecoder().decode(
+      await readResponseBytesLimited(res, MAX_DASHBOARD_RAW_PAYLOAD_BYTES),
+    );
     try {
       return JSON.parse(text);
     } catch {
@@ -76,8 +87,10 @@ export async function fetchPayloadForR2Key(
  */
 export async function fetchRawPayloadBase64ForR2Key(
   r2Key: string,
+  expected: RawPayloadKeyExpectation,
   options: FetchOptions = {},
 ): Promise<string | null> {
+  if (!isCanonicalRawPayloadKey(r2Key, expected)) return null;
   const env = options.env ?? process.env;
   const token = env.CLOUDFLARE_R2_API_TOKEN;
   const accountId = env.CLOUDFLARE_ACCOUNT_ID;
@@ -92,10 +105,52 @@ export async function fetchRawPayloadBase64ForR2Key(
       headers: { authorization: `Bearer ${token}` },
     });
     if (!res.ok) return null;
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.byteLength > 5 * 1024 * 1024) return null;
+    const buf = Buffer.from(
+      await readResponseBytesLimited(res, MAX_DASHBOARD_RAW_PAYLOAD_BYTES),
+    );
     return buf.toString("base64");
   } catch {
     return null;
   }
+}
+
+async function readResponseBytesLimited(
+  response: Response,
+  maxBytes: number,
+): Promise<Uint8Array> {
+  const declared = response.headers.get("content-length");
+  if (declared !== null) {
+    const declaredBytes = Number(declared);
+    if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error("raw_payload_too_large");
+    }
+  }
+  if (!response.body) return new Uint8Array();
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error("raw_payload_too_large");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return output;
 }

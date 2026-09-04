@@ -10,12 +10,14 @@ describe("Sentry operational alert sink", () => {
     await createSentryAlertSink(client).notify({
       severity: "critical",
       rule: "queue_lag",
-      summary: "Oldest unacked message is 600s old (backlog 12)",
+      summary: "customer-summary-marker",
       source: "delivery",
       details: {
         oldest_unacked_age_seconds: 600,
         backlog: 12,
         threshold: 300,
+        destination_id: "destination-marker",
+        provider_response: "provider-marker",
       },
       occurred_at: "2026-08-27T18:30:00.000Z",
     });
@@ -33,7 +35,7 @@ describe("Sentry operational alert sink", () => {
         alert_severity: "critical",
       },
       extra: {
-        summary: "Oldest unacked message is 600s old (backlog 12)",
+        summary: "Operational alert emitted.",
         details: {
           oldest_unacked_age_seconds: 600,
           backlog: 12,
@@ -42,6 +44,9 @@ describe("Sentry operational alert sink", () => {
         occurred_at: "2026-08-27T18:30:00.000Z",
       },
     });
+    expect(JSON.stringify(captureException.mock.calls)).not.toContain("customer-summary-marker");
+    expect(JSON.stringify(captureException.mock.calls)).not.toContain("destination-marker");
+    expect(JSON.stringify(captureException.mock.calls)).not.toContain("provider-marker");
   });
 
   it("uses a different Issue fingerprint for warning and critical events", async () => {

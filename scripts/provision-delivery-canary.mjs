@@ -9,6 +9,8 @@
  *   CREDENTIALS_MASTER_KEY
  *   AXEL_CANARY_SOURCE_TOKEN
  *   AXEL_CANARY_WRITER_PASSWORD
+ *   INGEST_ADMIN_URL
+ *   INGEST_ADMIN_TOKEN
  *
  * Build @axel/shared before running so this script uses the same crypto, AAD,
  * SSRF, and TLS policy as the production runtimes.
@@ -91,6 +93,8 @@ export function readProvisionEnvironment(env) {
   const masterKey = requireEnv(env, "CREDENTIALS_MASTER_KEY");
   const sourceToken = requireEnv(env, "AXEL_CANARY_SOURCE_TOKEN");
   const writerPassword = requireEnv(env, "AXEL_CANARY_WRITER_PASSWORD");
+  const ingestAdminUrl = normalizeIngestAdminUrl(requireEnv(env, "INGEST_ADMIN_URL"));
+  const ingestAdminToken = requireEnv(env, "INGEST_ADMIN_TOKEN");
 
   assertSecretShape(sourceToken, "AXEL_CANARY_SOURCE_TOKEN", {
     minBytes: 36,
@@ -101,7 +105,11 @@ export function readProvisionEnvironment(env) {
     minBytes: 32,
     maxBytes: 256,
   });
-  if (sourceToken === writerPassword || sourceToken === masterKey || writerPassword === masterKey) {
+  assertSecretShape(ingestAdminToken, "INGEST_ADMIN_TOKEN", {
+    minBytes: 32,
+    maxBytes: 256,
+  });
+  if (new Set([sourceToken, writerPassword, masterKey, ingestAdminToken]).size !== 4) {
     fail("canary_secrets_must_be_distinct");
   }
 
@@ -110,8 +118,85 @@ export function readProvisionEnvironment(env) {
     masterKey,
     sourceToken,
     writerPassword,
+    ingestAdminUrl,
+    ingestAdminToken,
     controlPlaneSslVerify: env.CONTROL_PLANE_DB_SSL_VERIFY,
   };
+}
+
+function normalizeIngestAdminUrl(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    fail("invalid_env:INGEST_ADMIN_URL");
+  }
+  if (
+    parsed.protocol !== "https:"
+    || parsed.username
+    || parsed.password
+    || parsed.search
+    || parsed.hash
+  ) {
+    fail("invalid_env:INGEST_ADMIN_URL");
+  }
+  const basePath = parsed.pathname
+    .replace(/\/admin\/(?:source-cache\/(?:invalidate|put)|source-authority\/(?:fence|sync))\/?$/, "")
+    .replace(/\/$/, "");
+  return `${parsed.origin}${basePath}`;
+}
+
+async function postSourceAuthority(config, path, body, fetchImpl) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5_000);
+  let response;
+  try {
+    response = await fetchImpl(`${config.ingestAdminUrl}${path}`, {
+      method: "POST",
+      redirect: "manual",
+      signal: controller.signal,
+      headers: {
+        "content-type": "application/json",
+        "x-axel-admin-token": config.ingestAdminToken,
+      },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    fail(path.endsWith("/fence")
+      ? "source_authority_fence_failed"
+      : "source_authority_sync_failed");
+  } finally {
+    clearTimeout(timer);
+  }
+  if (response.status !== 204) {
+    await response.body?.cancel().catch(() => {});
+    fail(path.endsWith("/fence")
+      ? "source_authority_fence_failed"
+      : "source_authority_sync_failed");
+  }
+  await response.body?.cancel().catch(() => {});
+}
+
+/** Fence the fixed source before its token hash or status can change. */
+export async function fenceCanarySource(config, fetchImpl = fetch) {
+  const fenceToken = randomBytes(16).toString("hex");
+  await postSourceAuthority(
+    config,
+    "/admin/source-authority/fence",
+    { source_id: CANARY_RESOURCES.sourceId, fence_token: fenceToken },
+    fetchImpl,
+  );
+  return fenceToken;
+}
+
+/** Publish a freshly fetched committed row and release its matching fence. */
+export async function syncCanarySource(config, fenceToken, source, fetchImpl = fetch) {
+  await postSourceAuthority(
+    config,
+    "/admin/source-authority/sync",
+    { source_id: CANARY_RESOURCES.sourceId, fence_token: fenceToken, source },
+    fetchImpl,
+  );
 }
 
 /**
@@ -1114,6 +1199,64 @@ export async function verifyWriterClient(client, payload = buildVerificationPayl
   }
 }
 
+/** Load the committed edge shape after reconciliation. */
+export async function loadCommittedCanarySource(client) {
+  const result = await client.query(
+    `SELECT id::text AS id, workspace_id::text AS workspace_id, name,
+            secret_token_hash, status, max_body_bytes, max_body_depth,
+            max_events_per_minute, field_selection, provider,
+            signing_secret_ciphertext, signing_secret_previous_ciphertext,
+            redact_paths, ordering_enabled, ordering_key_header,
+            ordering_key_path, subject_key_paths, inbound_ip_allowlist
+       FROM sources
+      WHERE id = $1
+      LIMIT 1`,
+    [CANARY_RESOURCES.sourceId],
+  );
+  const row = result.rows[0];
+  if (
+    !row
+    || row.id !== CANARY_RESOURCES.sourceId
+    || row.workspace_id !== CANARY_RESOURCES.workspaceId
+    || row.name !== CANARY_RESOURCES.sourceName
+    || typeof row.secret_token_hash !== "string"
+    || row.status !== "active"
+    || row.provider !== "custom"
+    || row.signing_secret_ciphertext !== null
+    || row.signing_secret_previous_ciphertext !== null
+  ) {
+    fail("committed_canary_source_invalid");
+  }
+  return {
+    source_id: row.id,
+    workspace_id: row.workspace_id,
+    name: row.name,
+    secret_token: row.secret_token_hash,
+    status: row.status,
+    ...(row.max_body_bytes !== null ? { max_body_bytes: row.max_body_bytes } : {}),
+    ...(row.max_body_depth !== null ? { max_body_depth: row.max_body_depth } : {}),
+    ...(row.max_events_per_minute !== null
+      ? { max_events_per_minute: row.max_events_per_minute }
+      : {}),
+    ...(row.field_selection !== null ? { field_selection: row.field_selection } : {}),
+    provider: row.provider,
+    ...((row.redact_paths?.length ?? 0) > 0 ? { redact_paths: row.redact_paths } : {}),
+    ...(row.ordering_enabled
+      ? {
+          ordering_enabled: true,
+          ...(row.ordering_key_header ? { ordering_key_header: row.ordering_key_header } : {}),
+          ...(row.ordering_key_path ? { ordering_key_path: row.ordering_key_path } : {}),
+        }
+      : {}),
+    ...((row.subject_key_paths?.length ?? 0) > 0
+      ? { subject_key_paths: row.subject_key_paths }
+      : {}),
+    ...((row.inbound_ip_allowlist?.length ?? 0) > 0
+      ? { inbound_ip_allowlist: row.inbound_ip_allowlist }
+      : {}),
+  };
+}
+
 export async function runProvision(config, runtime) {
   const credential = await buildEncryptedCredential(config, runtime.shared);
   const adminClient = new runtime.Client({
@@ -1126,7 +1269,15 @@ export async function runProvision(config, runtime) {
   });
   try {
     await adminClient.connect();
+    const fenceToken = await fenceCanarySource(config, runtime.fetchImpl ?? fetch);
     await reconcileCanaryAdminState(adminClient, config, credential);
+    const committedSource = await loadCommittedCanarySource(adminClient);
+    await syncCanarySource(
+      config,
+      fenceToken,
+      committedSource,
+      runtime.fetchImpl ?? fetch,
+    );
   } catch (error) {
     if (error instanceof CanaryProvisionError) throw error;
     fail("control_plane_connection_failed");

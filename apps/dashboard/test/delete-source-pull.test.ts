@@ -9,15 +9,15 @@ const {
   sessionMock,
   withTransactionMock,
   dbQueryMock,
-  bestEffortInvalidateMock,
-  invalidateEdgeMock,
+  fenceEdgeMock,
+  syncEdgeMock,
   updateTagMock,
 } = vi.hoisted(() => ({
   sessionMock: vi.fn(),
   withTransactionMock: vi.fn(),
   dbQueryMock: vi.fn(),
-  bestEffortInvalidateMock: vi.fn(),
-  invalidateEdgeMock: vi.fn(),
+  fenceEdgeMock: vi.fn(),
+  syncEdgeMock: vi.fn(),
   updateTagMock: vi.fn(),
 }));
 
@@ -34,8 +34,8 @@ vi.mock("../lib/db", () => ({
   withTransaction: withTransactionMock,
 }));
 vi.mock("../lib/edge-invalidation", () => ({
-  invalidateEdgeSourceCache: bestEffortInvalidateMock,
-  requireEdgeSourceCacheInvalidation: invalidateEdgeMock,
+  requireEdgeSourceFence: fenceEdgeMock,
+  requireEdgeSourceAuthoritySync: syncEdgeMock,
   pushSourceToEdge: vi.fn(),
   loadSourceForEdge: vi.fn(),
   rowToEdgePayload: vi.fn(),
@@ -59,10 +59,13 @@ function fd(values: Record<string, string>): FormData {
   return f;
 }
 
-describe("source revocation cache sequencing", () => {
+describe("source revocation authority sequencing", () => {
   beforeEach(() => {
-    bestEffortInvalidateMock.mockResolvedValue(undefined);
-    invalidateEdgeMock.mockResolvedValue(undefined);
+    fenceEdgeMock.mockImplementation(async (sourceId: string) => ({
+      sourceId,
+      fenceToken: "fence_token_00000001",
+    }));
+    syncEdgeMock.mockResolvedValue(undefined);
     dbQueryMock.mockImplementation(async (sql: string) => ({
       rowCount: 1,
       rows: /FROM workspaces/i.test(sql) ? [{ status: "active" }] : [],
@@ -75,8 +78,6 @@ describe("source revocation cache sequencing", () => {
 
   it("deletes both sources and pull_sources in one transaction", async () => {
     sessionMock.mockResolvedValue(ownerSession());
-    invalidateEdgeMock.mockResolvedValue(undefined);
-
     const clientQueries: Array<{ sql: string; params: unknown[] }> = [];
     const fakeClient = {
       query: vi.fn(async (sql: string, params: unknown[]) => {
@@ -98,9 +99,12 @@ describe("source revocation cache sequencing", () => {
     // Both scoped to (id, workspace_id).
     expect(deletes[0]!.params).toEqual(["src_pull_1", "ws_1"]);
     expect(deletes[1]!.params).toEqual(["src_pull_1", "ws_1"]);
-    expect(invalidateEdgeMock).toHaveBeenCalledTimes(2);
-    expect(invalidateEdgeMock).toHaveBeenNthCalledWith(1, "src_pull_1");
-    expect(invalidateEdgeMock).toHaveBeenNthCalledWith(2, "src_pull_1");
+    expect(fenceEdgeMock).toHaveBeenCalledOnce();
+    expect(fenceEdgeMock).toHaveBeenCalledWith("src_pull_1");
+    expect(syncEdgeMock).toHaveBeenCalledWith(
+      { sourceId: "src_pull_1", fenceToken: "fence_token_00000001" },
+      "ws_1",
+    );
   });
 
   it("returns not-found and skips pull_sources delete when the source row is absent", async () => {
@@ -113,8 +117,8 @@ describe("source revocation cache sequencing", () => {
 
     expect(result.error).toMatch(/not found/i);
     expect(withTransactionMock).not.toHaveBeenCalled();
-    expect(invalidateEdgeMock).not.toHaveBeenCalled();
-    expect(bestEffortInvalidateMock).not.toHaveBeenCalled();
+    expect(fenceEdgeMock).not.toHaveBeenCalled();
+    expect(syncEdgeMock).not.toHaveBeenCalled();
   });
 
   it("retries edge deletion for a source whose database delete was already audited", async () => {
@@ -127,13 +131,14 @@ describe("source revocation cache sequencing", () => {
 
     expect(result.notice).toMatch(/already deleted/i);
     expect(withTransactionMock).not.toHaveBeenCalled();
-    expect(invalidateEdgeMock).toHaveBeenCalledOnce();
-    expect(invalidateEdgeMock).toHaveBeenCalledWith("src_deleted");
+    expect(fenceEdgeMock).toHaveBeenCalledOnce();
+    expect(fenceEdgeMock).toHaveBeenCalledWith("src_deleted");
+    expect(syncEdgeMock).toHaveBeenCalledOnce();
   });
 
   it("does not delete Postgres rows when required edge invalidation fails", async () => {
     sessionMock.mockResolvedValue(ownerSession());
-    invalidateEdgeMock.mockRejectedValueOnce(new Error("edge unavailable"));
+    fenceEdgeMock.mockRejectedValueOnce(new Error("edge unavailable"));
 
     await expect(deleteSource({}, fd({ source_id: "src_pull_1" })))
       .rejects.toThrow("edge unavailable");
@@ -143,29 +148,29 @@ describe("source revocation cache sequencing", () => {
     expect(String(dbQueryMock.mock.calls[0]?.[0])).toMatch(/SELECT 1 FROM sources/i);
   });
 
-  it("invalidates before and after disabling a source", async () => {
+  it("fences before disabling and syncs committed state afterward", async () => {
     sessionMock.mockResolvedValue(ownerSession());
 
     const result = await setSourceStatus({}, fd({ source_id: "src_1", status: "disabled" }));
 
     expect(result.notice).toMatch(/disabled/i);
-    expect(invalidateEdgeMock).toHaveBeenCalledTimes(2);
+    expect(fenceEdgeMock).toHaveBeenCalledOnce();
+    expect(syncEdgeMock).toHaveBeenCalledOnce();
     const updateIndex = dbQueryMock.mock.calls.findIndex((call) => /UPDATE sources/i.test(String(call[0])));
     expect(updateIndex).toBeGreaterThanOrEqual(0);
     const updateOrder = dbQueryMock.mock.invocationCallOrder[updateIndex]!;
-    expect(invalidateEdgeMock.mock.invocationCallOrder[0]).toBeLessThan(updateOrder);
-    expect(invalidateEdgeMock.mock.invocationCallOrder[1]).toBeGreaterThan(updateOrder);
+    expect(fenceEdgeMock.mock.invocationCallOrder[0]).toBeLessThan(updateOrder);
+    expect(syncEdgeMock.mock.invocationCallOrder[0]).toBeGreaterThan(updateOrder);
   });
 
-  it("uses best-effort invalidation when enabling a source", async () => {
+  it("fences and syncs when enabling a source", async () => {
     sessionMock.mockResolvedValue(ownerSession());
 
     const result = await setSourceStatus({}, fd({ source_id: "src_1", status: "active" }));
 
     expect(result.notice).toMatch(/enabled/i);
-    expect(invalidateEdgeMock).not.toHaveBeenCalled();
-    expect(bestEffortInvalidateMock).toHaveBeenCalledOnce();
-    expect(bestEffortInvalidateMock).toHaveBeenCalledWith("src_1");
+    expect(fenceEdgeMock).toHaveBeenCalledWith("src_1");
+    expect(syncEdgeMock).toHaveBeenCalledOnce();
     const sql = dbQueryMock.mock.calls.map(([statement]) => String(statement));
     const lockIndex = sql.findIndex((statement) => /FROM workspaces[\s\S]*FOR UPDATE/i.test(statement));
     const updateIndex = sql.findIndex((statement) => /UPDATE sources/i.test(statement));
@@ -185,21 +190,22 @@ describe("source revocation cache sequencing", () => {
 
     expect(result.error).toMatch(/no longer active/i);
     expect(dbQueryMock.mock.calls.some(([sql]) => /UPDATE sources/i.test(String(sql)))).toBe(false);
-    expect(bestEffortInvalidateMock).not.toHaveBeenCalled();
-    expect(invalidateEdgeMock).not.toHaveBeenCalled();
+    expect(fenceEdgeMock).toHaveBeenCalledOnce();
+    expect(syncEdgeMock).toHaveBeenCalledOnce();
   });
 
-  it("invalidates before and after rotating a token", async () => {
+  it("fences before rotating a token and syncs afterward", async () => {
     sessionMock.mockResolvedValue(ownerSession());
 
     const result = await rotateSourceToken({}, fd({ source_id: "src_1" }));
 
     expect(result.data?.plaintextToken).toEqual(expect.any(String));
-    expect(invalidateEdgeMock).toHaveBeenCalledTimes(2);
+    expect(fenceEdgeMock).toHaveBeenCalledOnce();
+    expect(syncEdgeMock).toHaveBeenCalledOnce();
     const updateIndex = dbQueryMock.mock.calls.findIndex((call) => /secret_token_hash/i.test(String(call[0])));
     expect(updateIndex).toBeGreaterThanOrEqual(0);
     const updateOrder = dbQueryMock.mock.invocationCallOrder[updateIndex]!;
-    expect(invalidateEdgeMock.mock.invocationCallOrder[0]).toBeLessThan(updateOrder);
-    expect(invalidateEdgeMock.mock.invocationCallOrder[1]).toBeGreaterThan(updateOrder);
+    expect(fenceEdgeMock.mock.invocationCallOrder[0]).toBeLessThan(updateOrder);
+    expect(syncEdgeMock.mock.invocationCallOrder[0]).toBeGreaterThan(updateOrder);
   });
 });

@@ -1,6 +1,6 @@
 # Webhook data security review
 
-Date: 2026-08-26
+Date: 2026-08-27
 
 This review followed webhook data from the public ingest endpoint through raw
 R2 storage, routing, delivery, dashboard inspection, CLI payload retrieval, and
@@ -15,7 +15,7 @@ the private process in [`SECURITY.md`](../SECURITY.md).
 
 ## Data path and trust boundaries
 
-1. `ingest-worker` authenticates the source token and provider signature before
+1. `ingest-worker` authenticates a custom source token or named-provider request before
    writing the body to a workspace-prefixed R2 key.
 2. A Cloudflare Queue carries metadata and the R2 key to `router-edge`.
 3. The router reads the body, evaluates workspace routes, and writes a delivery
@@ -36,19 +36,26 @@ feature that receives event examples.
 | Critical | A personal access token survived removal of its user from a workspace. The removed user could continue using CLI raw-payload reads, and an ordinary member's PAT inherited write and replay abilities. | PAT authentication now joins the current membership on every request, derives scopes from the current role, and a composite foreign key deletes tokens when membership ends. |
 | Critical | Data Contract patch approval trusted browser-supplied replay tuples. An admin who knew another workspace's R2 object key could pair it with local source and route IDs, causing the account-privileged replay worker to read that foreign raw body and send it to the attacker's destination. | Patch approval now resolves every tuple from an unresolved dead letter joined to the authenticated workspace, source, route, and Data Contract before any write. The shared enqueue tail independently rejects foreign key prefixes, a database constraint quarantines invalid active rows and blocks new ones, and the replay consumer validates workspace ownership before hints or R2 access. |
 | Critical | The self-host dashboard told operators to run `axel auth login` without a base URL. The CLI defaults to Axel Cloud, so following that instruction sent the newly pasted self-host PAT to the hosted service for validation. | The token panel now emits a copy-safe command with the configured deployment origin. The CLI validates before reading or sending a token, permits plaintext only for exact loopback development hosts, stores only a normalized origin, and refuses authenticated redirects. |
-| High privacy | The authenticated dashboard loaded Umami and Google Tag Manager, while PostHog defaults could derive page URLs, DOM text, element attributes, referrers, and campaign values. Password-reset, verification, and invitation URLs contain one-shot credentials. | The dashboard no longer loads Umami, GTM, gtag, or other remote scripts outside the consent-controlled PostHog path. PostHog is disabled on token-bearing auth routes and now disables autocapture, session recording, pageview/page-leave/performance capture, referrer and campaign storage, remote feature payloads, and external dependency loading. A sanitizer runs before deliberate events leave, and hosted plus self-hosted responses set `Referrer-Policy: no-referrer`. |
+| High privacy | The dashboard and marketing site loaded browser analytics and advertising scripts that could derive page URLs, DOM text, element attributes, referrers, and campaign values. Password-reset, verification, and invitation URLs contain one-shot credentials. | PostHog, Umami, GTM, gtag, conversion cookies, browser analytics providers, and their proxy routes were removed from both applications. A regression scan fails if those tracker entry points return. Hosted and self-hosted responses also set `Referrer-Policy: no-referrer`. |
 | High privacy | When production email was not configured, the development fallback printed the full recipient, message, and one-shot password-reset, verification, or invitation link to process logs while reporting success. The default self-host profile did not pass email configuration through to the dashboard. | Full-message logging is now development-only. Production returns a safe delivery error without logging the recipient or body, and the self-host environment exposes optional Resend settings explicitly. |
-| High privacy | HTTP, webhook, BigQuery, and Databricks destination response bodies could be persisted in delivery analytics. A receiver could echo the submitted webhook bytes, creating a second retained copy outside the raw-payload lifecycle; generic HTTP receivers could also return an unbounded body for the connector to buffer. | HTTP, webhook, and failed Databricks delivery now cancel response streams without reading or retaining them. Successful Databricks SQL responses have a one-megabyte streaming cap. A shared storage-boundary sanitizer removes body, payload, raw, and secret fields and redacts quoted values, credentials, query values, email, and long-number diagnostics for every connector outcome before ClickHouse or edge dead-letter persistence. |
-| High privacy | Native database and API connector errors could quote a rejected row, document, credential, or receiver diagnostic. Node dead letters and replay failures stored that text, and the immediate-alert path copied the dead-letter excerpt into email. Some delivery console calls also printed the raw exception object. | One storage-safe diagnostic boundary now removes payload and secret assignments, URL credentials, query values, authorization values, private keys, quoted literals, email, and long numbers. It also drops unlabeled receiver text after HTTP-status diagnostic prefixes. Node and edge dead letters, replay rows, delivery logs, in-app notifications, and immediate email apply it before data leaves the process. Fingerprints use the sanitized message. |
+| High privacy | HTTP, webhook, BigQuery, and Databricks destination response bodies could be persisted in delivery analytics. A receiver could echo the submitted webhook bytes, creating a second retained copy outside the raw-payload lifecycle; generic HTTP receivers could also return an unbounded body for the connector to buffer. | HTTP, webhook, and failed Databricks delivery now cancel response streams without reading or retaining them. Successful Databricks SQL responses have a one-megabyte streaming cap. Attempt storage projects responses onto allowlisted destination types, numeric status and retry fields, booleans, and fixed error codes. Body, payload, raw, secret, schema, object-key, and other provider-controlled fields are dropped before ClickHouse or dead-letter persistence. |
+| High privacy | Migration 0074 scrubbed existing billing journal payloads and changed the column default, but an older dashboard process could still supply a Stripe body explicitly during a migration-first rollout. | The migration now installs a `SECURITY INVOKER` trigger before the scrub. It rewrites every inserted or updated journal payload to an empty object, leaves old writers compatible, and revokes `PUBLIC` execution on the trigger function. Fresh-schema, incremental-migration, idempotency, and least-privilege writer tests cover the database guard. |
+| High privacy | The authenticated config export returned destination URLs and configured header values. Those fields can contain credentials and internal endpoints, so a downloaded support artifact could become a second credential store. | Config export now redacts every destination URL and every header value while retaining destination type and header names for structural debugging. Contract tests reject any credential or endpoint value in the response. |
+| High | Public ingest honored the caller-controlled `x-axel-test` header when recording usage, so an authenticated source could label ordinary traffic as test traffic and bypass billing accounting. | Public ingest always records `is_test=false` regardless of request headers. Only the authenticated internal admin test-event path can create billing-exempt test traffic. |
+| High privacy | Native database and API connector errors could quote a rejected row, document, credential, or receiver diagnostic. Node dead letters and replay failures stored that text, and the immediate-alert path copied the dead-letter excerpt into email. Some delivery console calls also printed the raw exception object. | Durable diagnostics now use fixed operational codes. No substring of a provider or connector exception survives into dead letters, replay rows, pull history, logs, notifications, email, cron responses, or telemetry. Fingerprints use the fixed stored code. |
 | Critical | The initial Docker build context included nested application `.env.local` files and other operator-local files. Publishing either image could disclose build-time credentials and bake public environment values into the dashboard bundle. | Docker now excludes root and nested environment, Wrangler secret, npm credential, key, state, credential-export, local-agent, and scratch files. A BuildKit context regression test checks representative exclusions before release. |
 | Critical | The self-host provisioner silently reused a same-named R2 bucket without checking whether its r2.dev URL or a custom domain exposed objects publicly. Ingest would then write retained webhook bodies into that bucket. | New installs use a random resource suffix and installation ID. Provisioning requires matching local ownership proof for existing resources, verifies that r2.dev is disabled and no custom domain exists, and offers only a one-shot explicit adoption path after operator inspection. |
-| Critical | An older installation with an empty migration ledger could be labeled current without executing the PAT-membership migration. Fresh self-host databases also needed the schema snapshot available inside the migration container. | Legacy adoption now requires a schema-proven baseline, leaves newer migrations pending, and fails closed for unknown schemas. The Compose migration job mounts the runner, schema snapshot, and migration directory read-only; empty databases bootstrap from that snapshot. A real Postgres upgrade test proves the orphan cleanup and membership foreign key are applied. |
+| Critical | An older installation with an empty migration ledger could be labeled current without executing the PAT-membership migration. Fresh self-host databases also needed the schema snapshot available inside the migration container. | A non-empty database without a complete, contiguous migration ledger is now rejected and requires operator restoration of reviewed ledger records; object-name heuristics never label it current. Fresh empty databases receive the snapshot and complete baseline ledger in one transaction. Compose builds a read-only migration image containing the checked runner, schema snapshot, and migration directory, and uses separate bootstrap, migration, stable owner, and runtime roles. Real Postgres tests prove fresh bootstrap, incremental migration, and fail-closed missing-ledger behavior. |
+| Medium | Cloudflare Worker secrets were applied one at a time, so a failed multi-key rotation could leave a live version with only part of a coupled credential set. | The protected workflow now verifies that the newest uploaded Worker version is the sole active production version, creates one inactive version with the complete allowlisted secret set, activates that version at 100% only after staging succeeds, and reads deployment state back. A simulated staging failure proves no deployment command runs and no subset becomes active. |
 | High | Stripe, GitHub, Shopify, or Chargebee sources could silently fall back to token-only authentication if the decrypted provider signing secret was missing at the edge. | Named providers now fail closed with a retryable service error before any R2 or Queue write. Custom sources retain their documented token-only mode. |
+| High | Dashboard onboarding and source pages built copyable ingest URLs containing the one-shot source token. The edge also accepted that legacy query credential, exposing it to CDN, proxy, provider, and browser URL logs. | The edge now rejects every `token` query parameter with a fixed `401 query_token_not_allowed`. Custom-source copy actions show the clean URL and one-time token separately and send the token only through `x-axel-token`. Stripe, GitHub, Shopify, and Chargebee instructions use their provider authentication without an Axel token. OpenAPI, Postman, load-test, marketing, and source UI guidance use the same contract. |
+| High | Positive source config in Cloudflare KV could authorize a rotated token, disabled or deleted source, or suspended workspace for up to five minutes. An authorization already in flight could also race the invalidation. | Hosted ingest now resolves every request through a per-source SQLite Durable Object and confirms the same authorization revision immediately before its first durable write. Mutations fence before the database write and release only with freshly loaded committed config; a failed sync stays closed. SQLite stores one-way source/config digests, presence, expiry, and authorization state, never plaintext identifiers or source credentials. A mixed-version legacy invalidation enters a fail-closed origin-refresh state and self-repairs without overriding an explicit mutation fence. The self-host profile deliberately omits the binding and performs an authenticated direct-origin lookup on every request. |
 | High | A captured valid provider request could be submitted repeatedly. GitHub, Shopify, and Chargebee do not all provide a signed timestamp, and each retry previously received a new Axel event ID. | Signed requests now derive a source-bound deterministic event ID and stable raw-object key from the provider delivery or event identity. The raw body uses an atomic create condition, so concurrent copies cannot overwrite or create another retained payload. Retries remain safe to enqueue after a partial failure because the 30-day delivery claim sees the same event ID and suppresses duplicate external effects. Regression tests cover sequential duplicates, concurrent copies, and queue-failure recovery. |
 | Critical | Oversized delivery messages trusted an embedded R2 spill key. A malformed or cross-tenant message could point a privileged consumer at another workspace's object, and retry cleanup could delete that object. | Hydration and deletion now require the exact canonical key derived from workspace, event, destination, and attempt before any R2 access. Parsed spill bodies are shape-validated, and retries write a new canonical attempt key before removing the prior object. |
 | High | Delivery-edge performed R2 and Postgres work before validating the queue contract, and a failed terminal dead-letter insert could still acknowledge the last durable message and delete its spill. | Both delivery runtimes now accept only the versioned contract plus the explicit legacy-v0 rolling-upgrade shape. Malformed or future versions fail before storage access, and failed dead-letter persistence retries without ACKing or deleting spill data. Metadata-only quarantine records hashes and sizes, never queue bodies. |
 | High privacy | Durable Data Contract rows retained inferred values, example identifiers, fixture payloads, mapping previews, and drift detail beyond the raw-payload lifecycle. | Migration 0069 scrubs existing rows. Database triggers and application sanitizers now retain structural schema and generalized type/shape fixtures only, clear event references and drift detail, bind mappings to the same workspace, and allowlist model metadata. Reset and erasure paths cover the remaining records. |
 | High | Platform super-admin access relied on password sessions alone, and an initial pending TOTP enrollment could be viewed or completed from another authenticated session for the same administrator. | Super-admin routes now require encrypted TOTP enrollment and a fresh 15-minute step-up. Pending seeds are bound to the password-confirmed session for ten minutes, successful counters cannot replay, verification is rate-limited and audited, and seeds are AES-GCM encrypted under the credential master key. |
+| Medium | Auth and API rate limiting failed open when the Postgres-backed counter was unavailable, creating a brute-force and stolen-token bypass during control-plane degradation. | The shared auth/API limiter now fails closed with a fixed 60-second retry window and a value-free diagnostic. Authentication and API-key validation still run independently. |
 | Critical | Vercel's default Preview environment included production database, storage, signing, and observability credentials while Git-triggered builds were available. A malicious branch build could execute install or build code with production access. | Production credentials are now Production-only. Stripe test records moved to an isolated manual environment. Live deployment policies deny every Git source for Production, Preview, and the isolated environment; provider Git status deployments are disabled, fork CI receives no secrets, and production is built only by the reviewed CLI workflow. Automation-bypass credentials exposed during the audit were rotated immediately. |
 | High | Provider-side Git deploys could race database migrations or bypass the reviewed Production environment, and the native HTTP-pull queue had only three retries with no dead-letter queue. | Vercel Git deployment policies are disabled and verified live. The first protected Render rollout disables and reads back Git auto-deploy before any service deploy; the initial merge must include Render's `[skip render]` guard so it cannot race that enforcement. Manual workflows serialize migration-first releases, stage and smoke Vercel deployments before promotion, and fail closed on provider-state drift. The native queue has been configured and verified in place for eleven retries and `axel-dead-letter`. |
 | High | A configured custom-HMAC source could become token-only after a signing-secret decrypt failure, and a partial rotation could publish only one valid secret. | Edge payload creation and direct Postgres mapping now reject corrupt or empty current and previous secret slots. A cache schema bump discards older positive entries that may contain the downgraded shape. Only an intentionally unsigned custom source remains token-only. |
@@ -87,7 +94,8 @@ feature that receives event examples.
 | Medium | Dashboard HTTP and saved-credential probes validated literal hosts but did not consistently pin the checked DNS answer to the connection. Some target, catalog, schema, collection, and DDL probes also admitted members or inactive workspaces. | Raw HTTP, Postgres, MongoDB, and Databricks dashboard egress now rejects any private or mixed DNS answer and pins the checked address before opening the socket. Saved-credential inspection and DDL actions require an owner or admin in an active workspace before database access, credential decryption, or network activity. |
 | Supply-chain hardening | CI and deployment workflows executed GitHub Actions through mutable major-version tags, and the new secret scan used a mutable container tag. | Workflow actions and the Gitleaks image are pinned to immutable revisions. The scan covers the Git history without traversing installed dependencies, and a working-tree scan found no committed or unignored secret candidates. |
 | Privacy hardening | Two user-triggered OpenRouter requests did not prohibit provider data collection. | All three AI-assisted analysis paths now request provider routing with data collection denied. |
-| High privacy | Data Contract inference and failure investigation sent example webhook values through a masker that covered only email addresses and long digit runs. Passwords, authorization and cookie headers, JWTs, private keys, signed URLs, provider tokens, and arbitrary opaque credentials could reach OpenRouter. The inference cluster ID could also contain the raw event-type value. | All three OpenRouter paths now use one bounded structured redactor before prompt construction and repeat text redaction on the final fetch body. Inference uses local cluster aliases and maps model results back afterward. Requests disable redirect following so a 307 or 308 cannot repost the private prompt to a `Location` target. Long-lived Data Contract fixtures use the same credential rules. Regression tests inspect injected inference and investigation prompts plus the actual dead-letter OpenRouter request body. |
+| High privacy | Data Contract inference and failure investigation sent example webhook values through an incomplete masker. Credentials, arbitrary free text, and raw event-type values could reach OpenRouter. | AI requests now contain only field-name summaries, object and array shape, primitive type markers, allowlisted operational enums, and literal-withheld filter or transform structure. Primitive values, event-type values, destination names, connector text, provider responses, custom separators, and raw payload excerpts are excluded before prompt construction. Requests are capped at 64 KiB, reject prompt-injection-shaped field names, and never follow redirects. |
+| High privacy | The event-type backfill script reread historical raw payloads and promoted payload values into long-lived indexed metadata. | The script now exits without reading data and explains that historical payload values cannot cross the raw-retention boundary. Any replacement must derive metadata prospectively under the current type-only contract. |
 
 Regression tests cover removed-member tokens, role-derived PAT permissions,
 foreign-workspace patch-approval selectors, replay enqueue validation, database
@@ -100,46 +108,20 @@ SSRF, IPv6 edge cases, connected-socket blocking, unsigned webhook failure,
 Cloudflare HTTP Pull decoding, literal-slash R2 object paths, database TLS
 selection, required cache invalidation, workspace/source lock ordering,
 shared edge/native fenced delivery claims, Parquet shutdown drain, browser
-telemetry and referrer controls, production email and diagnostic-log
+tracker absence and referrer controls, production email and diagnostic-log
 suppression, spill-error and destination-response redaction,
 dead-letter, replay-status, backfill-status, pull-history, and immediate-email diagnostic redaction,
+config-export redaction, public test-marker isolation, auth/API rate-limit failure handling,
+database-enforced billing-journal payload minimization across rolling writers,
 OpenRouter prompt, redirect, and long-lived fixture credential controls, Sentry
 envelope sanitization, destination and pull credential-reference binding, dashboard probe
 role and socket gates, Chargebee host and redirect restrictions,
 timing-safe internal auth, Docker context and Compose exposure, migration
-adoption, and self-host URL fail-closed behavior.
+ledger fail-closed behavior, and self-host URL fail-closed behavior.
 
 ## Residual risks
 
 These items remain open and should be treated as the next hardening backlog.
-
-### High: edge revocation is bounded, not instantaneous
-
-Security-reducing source and workspace mutations now require a successful edge
-cache deletion, but Cloudflare KV propagation and a lookup already in flight
-can still serve the previous source record. Positive entries expire after five
-minutes, which is now the explicit worst-case application cache window for a
-rotated token, disabled/deleted source, changed allowlist, or suspended
-workspace.
-
-Eliminating that window requires a strongly consistent per-source revision or
-revocation check, such as a Durable Object, on every ingest request. Until
-then, treat token rotation and source disable as bounded revocation rather than
-an immediate kill switch.
-
-### High privacy: AI examples can still contain sensitive free text
-
-AI analysis is user-triggered and provider data collection is now denied, but
-data-contract inference and failure explanation still send a bounded, redacted
-example shape. The shared boundary removes values under secret-bearing keys,
-common credentials and signatures, URI credentials and query values, email
-addresses, long numbers, private keys, JWTs, and opaque token-shaped strings.
-It cannot understand every sensitive fact in ordinary prose. Addresses, health
-details, or a short novel secret under an innocent field name can remain.
-
-Default these features to schemas and field names. Require a workspace-level
-opt-in before sending values and add configurable allowlist or workspace
-redaction rules for addresses, health data, and domain-specific secrets.
 
 ### Medium: rate limiting is per Worker isolate
 
@@ -189,26 +171,6 @@ Cloudflare account. Encrypt cached source secrets with a separate runtime key,
 and replace global admin credentials with service bindings or independently
 scoped credentials where the platform permits it.
 
-### Medium: Cloudflare secret rotation is sequential
-
-Wrangler applies Worker secrets one at a time, and each update creates a live
-Worker version. The protected workflow serializes these changes with releases
-and runs the production smoke and delivery canary at the end, but a multi-key
-rotation can briefly expose an intermediate combination of old and new values.
-
-Rotate coupled credentials with an explicit overlap window and previous-key
-support, change one service boundary at a time, and watch the canary throughout.
-Prefer an atomic provider secret-set operation if Cloudflare exposes one that
-preserves Wrangler's encrypted-secret behavior.
-
-### Medium: query-string source tokens
-
-Some webhook providers cannot set a custom header, so Axel still accepts a
-source token in the URL. Axel removes it from retained metadata, but upstream
-CDN, proxy, provider, and browser logs are outside that control. Prefer the
-`x-axel-token` header. For providers that require a URL credential, use a
-dedicated rotatable token and configure log redaction.
-
 ### Medium privacy: one-shot auth links reach the first upstream request
 
 Browser telemetry, referrer, and remote-script controls now prevent the
@@ -257,20 +219,21 @@ database, set `CONTROL_PLANE_DB_SSL_VERIFY=true` and use a publicly trusted
 certificate. Compatibility mode without that flag encrypts the connection but
 does not authenticate the server certificate.
 
-### Low: container images are hardened but not fully reproducible
+### Low: runtime container bundles remain broader than necessary
 
 The Node services run as an unprivileged user, Caddy receives no Docker socket
 or application secrets, and the build context excludes local credentials. The
 application containers drop all ambient Linux capabilities and prevent
-privilege escalation; Caddy receives only `NET_BIND_SERVICE`. The base images
-are still selected by mutable release tags, however, and the Node runtime
-stages retain more workspace files and dependencies than a pruned production
-bundle requires. The official Caddy image also keeps a root UID inside the
-container so it can bind low ports.
+privilege escalation; Caddy receives only `NET_BIND_SERVICE`. Every checked-in
+third-party container reference now uses an immutable digest, including the CI
+Postgres service, and Dependabot checks Docker references weekly. The Node
+runtime stages still retain more workspace files and dependencies than a
+pruned production bundle requires. The official Caddy image also keeps a root
+UID inside the container so it can bind low ports.
 
-Pin base-image digests with automated update review, generate pruned runtime
-bundles, and evaluate an unprivileged high-port Caddy configuration. Continue
-scanning the finished images as well as source and dependency manifests.
+Keep digest updates behind review, generate pruned runtime bundles, and
+evaluate an unprivileged high-port Caddy configuration. Continue scanning the
+finished images as well as source and dependency manifests.
 
 ## Current conclusion
 
@@ -279,7 +242,8 @@ direct cross-membership data-access paths found were the removed-member PAT and
 the patch-approval replay confused deputy. Both are now closed at the
 application boundary and reinforced in the database; replay also fails closed
 again at the privileged consumer. The remaining webhook confidentiality risks
-are chiefly optional AI examples, infrastructure-credential blast radius, and
-upstream logging of the first request for token-bearing auth links; replay and
-rate limiting are integrity and cost risks. The residual items above should
-stay visible until implemented and independently reviewed.
+are chiefly infrastructure-credential blast radius and upstream logging of the
+first request for token-bearing auth links. AI requests contain schema and type
+markers rather than webhook values. Replay and distributed source rate limiting
+remain integrity and cost risks. The residual items above should stay visible
+until implemented and independently reviewed.

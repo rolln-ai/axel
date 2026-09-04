@@ -138,7 +138,7 @@ describe("explainFailure", () => {
     });
   });
 
-  it("redacts payload, response, filter, and connector secrets before calling the LLM", async () => {
+  it("sends structural payload and DSL context without customer-controlled values", async () => {
     const filterSecret = ["sk", "live", "51Filter", "SecretValue"].join("_");
     const jwt = [
       "eyJhbGci",
@@ -154,6 +154,7 @@ describe("explainFailure", () => {
     ].join("");
     const opaque = ["Ab9_cdEf", "GhijKLMN", "opQRstUV", "wxYZ0123", "456789ab"].join("");
     let observedPrompt = "";
+    let observedSystemPrompt = "";
 
     await explainFailure(
       context({
@@ -161,6 +162,11 @@ describe("explainFailure", () => {
           ev({
             type: "invoice.paid",
             status: "complete",
+            amount: 1299,
+            street_address: "123 Private Street",
+            note_short: "tiny-private-value",
+            description: "Ordinary customer prose must stay local",
+            "private.dynamic.key": "dynamic-key-value",
             password: "hunter2",
             auth: { bearer: "short-auth-value" },
             note: `${jwt} ${opaque}`,
@@ -171,17 +177,63 @@ describe("explainFailure", () => {
           path: "type",
           values: [filterSecret],
         },
+        current_transform: {
+          kind: "collapse_arrays",
+          fields: [
+            {
+              path: "tags",
+              format: "join",
+              separator: "PRIVATE_SEPARATOR_LITERAL",
+            },
+          ],
+        },
         response: {
           status: 400,
           body_excerpt:
-            '{"error":"column customer_id is missing","password":"destination-secret","token":"tiny-token"}',
+            '{"error":"Private destination detail","password":"destination-secret","token":"tiny-token"}',
+          headers: { "X-Private-Response": "private-response-header" },
         },
-        connector_message: "Authorization: Basic dXNlcjpwYXNz",
+        connector_message:
+          "Authorization: Basic dXNlcjpwYXNz; Private connector diagnostic",
+        inferred_schema: inferred({
+          event_types: [
+            {
+              cluster_id: "private-cluster-id",
+              name: "private.event.type",
+              example_event_ids: ["private-event-id"],
+              sample_count: 2,
+            },
+          ],
+          fields: {
+            type: {
+              types: ["string"],
+              required: true,
+              presence: 1,
+              distinct_count: 1,
+              category: "enum",
+            },
+            amount: {
+              types: ["number"],
+              required: false,
+              presence: 0.5,
+              distinct_count: 2,
+              category: "numeric",
+            },
+            street_address: {
+              types: ["string"],
+              required: true,
+              presence: 1,
+              distinct_count: 2,
+              category: "string",
+            },
+          },
+        }),
       }),
       {
         apiKey: "fake",
         callLlm: async (request) => {
           observedPrompt = request.userPrompt;
+          observedSystemPrompt = request.systemPrompt;
           return {
             patch: {
               likely_cause: "Missing customer_id column",
@@ -204,12 +256,34 @@ describe("explainFailure", () => {
       "destination-secret",
       "tiny-token",
       "dXNlcjpwYXNz",
+      "invoice.paid",
+      "complete",
+      "1299",
+      "123 Private Street",
+      "tiny-private-value",
+      "Ordinary customer prose must stay local",
+      "Private destination detail",
+      "Private connector diagnostic",
+      "private-response-header",
+      "private.event.type",
+      "private-cluster-id",
+      "private-event-id",
+      "PRIVATE_SEPARATOR_LITERAL",
+      "private.dynamic.key",
+      "dynamic-key-value",
     ]) {
       expect(observedPrompt).not.toContain(secret);
     }
-    expect(observedPrompt).toContain("complete");
-    expect(observedPrompt).toContain("customer_id");
-    expect(observedPrompt).toContain("[REDACTED]");
+    expect(observedPrompt).toContain("street_address");
+    expect(observedPrompt).toContain('"amount":"[number]"');
+    expect(observedPrompt).toContain("[dynamic_key_1]");
+    expect(observedPrompt).toContain('"values_withheld": true');
+    expect(observedPrompt).toContain('"kind": "collapse_arrays"');
+    expect(observedPrompt).toContain('"path": "tags"');
+    expect(observedPrompt).toContain('"separator_present": true');
+    expect(observedPrompt).toContain('"destination_status":400');
+    expect(observedPrompt).toContain('"connector_diagnostic_present":true');
+    expect(observedSystemPrompt).toContain("Primitive payload values are replaced by type markers");
   });
 
   it("refuses to follow redirects from OpenRouter", async () => {
@@ -262,7 +336,10 @@ describe("explainFailure", () => {
       },
     });
     expect(result.patch_kind).toBe("none");
-    expect(result.rationale).toMatch(/network down/);
+    expect(result.rationale).toBe(
+      "The AI provider request failed. The transform can still be edited and approved manually.",
+    );
+    expect(result.rationale).not.toContain("network down");
   });
 });
 

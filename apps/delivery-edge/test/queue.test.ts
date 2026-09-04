@@ -295,6 +295,28 @@ describe("delivery-edge queue handler", () => {
     expect(sqlState.end).not.toHaveBeenCalled();
   });
 
+  it("rejects a foreign raw-payload key before R2, database, or delivery access", async () => {
+    const get = vi.fn();
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const message = queueMessage({
+      ...destinationMessage(),
+      r2_key: "events/ws-victim/2026-05-02/evt-1",
+    });
+
+    await worker.queue(
+      batch("axel-delivery", [message]),
+      env({ EVENTS_RAW: { get, delete: vi.fn(), put: vi.fn() } }),
+      executionContext(),
+    );
+
+    expect(message.retry).toHaveBeenCalledOnce();
+    expect(message.ack).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(sqlState.queries).toEqual([]);
+    expect(sqlState.end).not.toHaveBeenCalled();
+  });
+
   it("accepts an unversioned legacy message during a rolling deploy", async () => {
     sqlState.destinations = [destination("http", { url: "https://receiver.example" })];
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
@@ -622,6 +644,37 @@ describe("delivery-edge queue handler", () => {
     }));
   });
 
+  it("rejects an unsafe native service URL before sending the credential", async () => {
+    sqlState.destinations = [destination("mongodb", { collection: "events" })];
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const message = queueMessage();
+
+    await worker.queue(batch("axel-delivery", [message]), env({
+      DELIVERY_SERVICE_URL: "https://user:password@delivery.example",
+      DELIVERY_SHARED_SECRET: "shared",
+    }), executionContext());
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(message.retry).toHaveBeenCalledOnce();
+    expect(message.ack).not.toHaveBeenCalled();
+  });
+
+  it("retries an oversized native service response instead of acknowledging it", async () => {
+    sqlState.destinations = [destination("mongodb", { collection: "events" })];
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ padding: "x".repeat(256 * 1024) }), { status: 200 }),
+    );
+    const message = queueMessage();
+
+    await worker.queue(batch("axel-delivery", [message]), env({
+      DELIVERY_SERVICE_URL: "https://delivery.example",
+      DELIVERY_SHARED_SECRET: "shared",
+    }), executionContext());
+
+    expect(message.retry).toHaveBeenCalledOnce();
+    expect(message.ack).not.toHaveBeenCalled();
+  });
+
   it("retries when native forwarding genuinely fails (503, no re-enqueue)", async () => {
     sqlState.destinations = [destination("mongodb", { collection: "events" })];
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -742,7 +795,7 @@ describe("delivery-edge queue handler", () => {
       event_id: "evt-1",
       source_id: "src-1",
       route_id: "rt-1",
-      r2_key: "events/ws-1/evt-1.json",
+      r2_key: "events/ws-1/2026-05-02/evt-1",
       reason: "sandbox_breach",
       message: "CPU timeout",
       errored_at: "2026-05-02T12:00:00.000Z",
@@ -755,16 +808,21 @@ describe("delivery-edge queue handler", () => {
     // The 10th column is the fingerprint, stamped from the EXACT stored
     // route_id/reason/message — assert it matches the shared formula so the
     // inbox recomputation + bulk-replay mute join will line up.
-    const fp = await deadLetterFingerprint({ route_id: "rt-1", reason: "sandbox_breach", message: "CPU timeout" });
+    const storedMessage = sanitizeConnectorDiagnosticForStorage("CPU timeout", 400);
+    const fp = await deadLetterFingerprint({
+      route_id: "rt-1",
+      reason: "sandbox_breach",
+      message: storedMessage,
+    });
     expect(sqlState.deadLetters[0]).toEqual([
       "ws-1",
       "evt-1",
       "src-1",
       "rt-1",
       null,
-      "events/ws-1/evt-1.json",
+      "events/ws-1/2026-05-02/evt-1",
       "sandbox_breach",
-      "CPU timeout",
+      storedMessage,
       "2026-05-02T12:00:00.000Z",
       fp,
     ]);
@@ -779,7 +837,7 @@ describe("delivery-edge queue handler", () => {
       source_id: "src-1",
       route_id: "rt-1",
       destination_id: "dest-1",
-      r2_key: "events/ws-1/evt-1.json",
+      r2_key: "events/ws-1/2026-05-02/evt-1",
       reason: "router_processing_failed",
       message: diagnostic,
       errored_at: "2026-05-02T12:00:00.000Z",
@@ -799,7 +857,7 @@ describe("delivery-edge queue handler", () => {
       "src-1",
       "rt-1",
       "dest-1",
-      "events/ws-1/evt-1.json",
+      "events/ws-1/2026-05-02/evt-1",
       "router_processing_failed",
       storedDiagnostic,
       "2026-05-02T12:00:00.000Z",
@@ -832,7 +890,7 @@ describe("delivery-edge queue handler", () => {
     // Column order: (…, reason, message, …) — message is the 8th value.
     const storedMessage = (sqlState.deadLetters[0] as unknown[])[7] as string;
     expect(storedMessage).not.toContain("alice@example.com");
-    expect(storedMessage).toContain("=([REDACTED])");
+    expect(storedMessage).toBe("constraint_violation");
     expect(storedMessage).not.toContain("u_email");
   });
 
@@ -843,7 +901,7 @@ describe("delivery-edge queue handler", () => {
       event_id: "evt-1",
       source_id: "src-1",
       route_id: "rt-1",
-      r2_key: "events/ws-1/evt-1.json",
+      r2_key: "events/ws-1/2026-05-02/evt-1",
       reason: "router_processing_failed",
       message: raw,
       errored_at: "2026-05-02T12:00:00.000Z",
@@ -854,7 +912,7 @@ describe("delivery-edge queue handler", () => {
     const storedMessage = (sqlState.deadLetters[0] as unknown[])[7] as string;
     expect(storedMessage).not.toContain("private webhook text");
     expect(storedMessage).not.toContain("hunter2");
-    expect(storedMessage).toContain("payload=[REDACTED]");
+    expect(storedMessage).toBe("operation_failed");
     expect((sqlState.deadLetters[0] as unknown[])[9]).toBe(
       await deadLetterFingerprint({
         route_id: "rt-1",
@@ -870,10 +928,12 @@ describe("delivery-edge queue handler", () => {
     // intact. Recording it must also drop the oversized-payload spill object,
     // which previously leaked into R2 forever.
     const del = vi.fn().mockResolvedValue(undefined);
+    const privateDestinationMarker = "dest-private-marker-never-serialize";
     const message = queueMessage({
       ...destinationMessage(),
+      destination_id: privateDestinationMarker,
       payload: null,
-      spill_r2_key: "queue-spill/ws-1/evt-1/dest-1/1.json",
+      spill_r2_key: `queue-spill/ws-1/evt-1/${privateDestinationMarker}/1.json`,
     });
 
     await worker.queue(
@@ -883,7 +943,10 @@ describe("delivery-edge queue handler", () => {
     );
 
     expect(sqlState.deadLetters).toHaveLength(1);
-    expect(del).toHaveBeenCalledWith("queue-spill/ws-1/evt-1/dest-1/1.json");
+    const storedMessage = (sqlState.deadLetters[0] as unknown[])[7] as string;
+    expect(storedMessage).toBe("queue_max_retries_exceeded");
+    expect(storedMessage).not.toContain(privateDestinationMarker);
+    expect(del).toHaveBeenCalledWith(`queue-spill/ws-1/evt-1/${privateDestinationMarker}/1.json`);
     expect(message.ack).toHaveBeenCalledOnce();
   });
 
@@ -1015,7 +1078,7 @@ function destinationMessage(): DestinationQueueMessage {
     source_id: "src-1",
     route_id: "rt-1",
     destination_id: "dest-1",
-    r2_key: "events/ws-1/evt-1.json",
+    r2_key: "events/ws-1/2026-05-02/evt-1",
     received_at: "2026-05-02T12:00:00.000Z",
     enqueued_at: "2026-05-02T12:00:01.000Z",
     attempt_no: 1,

@@ -145,24 +145,15 @@ function redactSource(row: Record<string, unknown>): Record<string, unknown> {
 function redactDestination(row: Record<string, unknown>): Record<string, unknown> {
   const config = (row.config as Record<string, unknown> | null) ?? null;
   const redactedConfig = config ? redactConfigSecrets(config) : config;
-  // Audit-pass2 — destinations whose `config.headers` map holds
-  // auth-built secrets (Authorization, X-API-Key when api_key_header
-  // names it, custom_headers) would round-trip plaintext. Wipe known
-  // auth-shaped header NAMES inside the config.headers map.
+  // Header values are credentials regardless of how innocuous their names
+  // look. Preserve names for structural review, but never export a value.
   if (redactedConfig && typeof redactedConfig === "object" && redactedConfig !== null) {
     const cfg = redactedConfig as Record<string, unknown>;
     if (cfg.headers && typeof cfg.headers === "object" && cfg.headers !== null) {
       const headers = cfg.headers as Record<string, unknown>;
-      const customHeaderName =
-        typeof cfg.api_key_header === "string" ? cfg.api_key_header.toLowerCase() : null;
       const redactedHeaders: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(headers)) {
-        const lower = k.toLowerCase();
-        if (lower === "authorization" || (customHeaderName && lower === customHeaderName)) {
-          redactedHeaders[k] = "[REDACTED]";
-        } else {
-          redactedHeaders[k] = v;
-        }
+      for (const key of Object.keys(headers)) {
+        redactedHeaders[key] = "[REDACTED]";
       }
       cfg.headers = redactedHeaders;
     }
@@ -182,7 +173,9 @@ function redactConfigSecrets(config: Record<string, unknown>): Record<string, un
   // field exported, add it here explicitly.
   const SAFE_KEYS = new Set<string>([
     // Common config (non-secret)
-    "url",
+    // Destination URLs can be credentials themselves (Slack/Discord webhook
+    // paths, signed query strings, userinfo). They are intentionally omitted
+    // from the allowlist and therefore exported as [REDACTED].
     "method",
     "auth_type",
     "preset",

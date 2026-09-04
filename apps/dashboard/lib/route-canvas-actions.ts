@@ -85,8 +85,8 @@ export async function listRecentSamplePayloads(
       { workspace_id: workspaceId, source_id: sourceId, limit: safeLimit },
     );
     return { ok: true, samples: result.rows };
-  } catch (err) {
-    console.error("[listRecentSamplePayloads] clickhouse failed:", err);
+  } catch {
+    console.error("[listRecentSamplePayloads] clickhouse failed");
     return { ok: false, reason: "clickhouse_failed" };
   }
 }
@@ -134,8 +134,8 @@ export async function loadSamplePayload(
     r2_key = result.rows[0]!.r2_key;
     received_at = result.rows[0]!.received_at;
     size_bytes = result.rows[0]!.size_bytes;
-  } catch (err) {
-    console.error("[loadSamplePayload] clickhouse failed:", err);
+  } catch {
+    console.error("[loadSamplePayload] clickhouse failed");
     return { ok: false, reason: "clickhouse_failed" };
   }
 
@@ -143,7 +143,11 @@ export async function loadSamplePayload(
     return { ok: false, reason: "payload_too_large" };
   }
 
-  const payload = await fetchPayloadForR2Key(r2_key);
+  const payload = await fetchPayloadForR2Key(r2_key, {
+    workspaceId,
+    eventId,
+    sourceId,
+  });
   if (payload === null) return { ok: false, reason: "r2_fetch_failed" };
   return { ok: true, payload, size_bytes, received_at };
 }
@@ -210,8 +214,11 @@ export async function savePipelineGraph(
     });
   } catch (err) {
     const reason = err instanceof RouteEngineError ? err.reason : "graph_invalid";
-    const message = err instanceof Error ? err.message.slice(0, 400) : String(err).slice(0, 400);
-    return { ok: false, reason: "validation", details: { reason, message } };
+    return {
+      ok: false,
+      reason: "validation",
+      details: { reason, message: "Pipeline graph validation failed." },
+    };
   }
 
   const serialized = JSON.stringify(validated);

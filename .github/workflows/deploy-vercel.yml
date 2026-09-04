@@ -49,16 +49,36 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 9.12.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install locked deployment dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Install Postgres client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Mark the production mutation attempt
+        id: mutation_attempt
+        run: echo "attempted=true" >> "$GITHUB_OUTPUT"
       - name: Apply pending Postgres migrations
         run: ./scripts/run-migrations.sh
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL: ${{ secrets.DATABASE_MIGRATION_URL }}
+          DATABASE_MIGRATION_ROLE: ${{ vars.DATABASE_MIGRATION_ROLE }}
+          DATABASE_MIGRATION_LOGIN_ROLE: ${{ vars.DATABASE_MIGRATION_LOGIN_ROLE }}
+          DATABASE_MIGRATION_EXISTING_LOGIN_ROLES: ${{ vars.DATABASE_MIGRATION_EXISTING_LOGIN_ROLES }}
+          DATABASE_MIGRATION_OWNER_PARENT_ROLES: ${{ vars.DATABASE_MIGRATION_OWNER_PARENT_ROLES }}
+          DATABASE_MIGRATION_OWNER_CAN_CREATE_ROLES: ${{ vars.DATABASE_MIGRATION_OWNER_CAN_CREATE_ROLES }}
+          DATABASE_TRANSITIONAL_OWNER_LOGIN_ROLE: ${{ vars.DATABASE_TRANSITIONAL_OWNER_LOGIN_ROLE }}
+          DATABASE_CANARY_WRITER_ROLE: ${{ vars.DATABASE_CANARY_WRITER_ROLE }}
+          DATABASE_RUNTIME_CAPABILITY_ROLES: ${{ vars.DATABASE_RUNTIME_CAPABILITY_ROLES }}
+          DATABASE_VERIFY_CAPABILITY_ROLE: ${{ vars.DATABASE_VERIFY_CAPABILITY_ROLE }}
+          DATABASE_MIGRATION_ROLE_REQUIRED: "1"
 
       - name: Stage dashboard at the reviewed commit
         id: dashboard
@@ -119,7 +139,7 @@ jobs:
           mkdir -p .vercel
           jq -n --arg org "$VERCEL_ORG_ID" --arg project "$VERCEL_PROJECT_ID_DASHBOARD" \
             '{orgId:$org,projectId:$project}' > .vercel/project.json
-          npx --yes vercel@58.4.0 promote "$STAGED_URL" --yes --token "$VERCEL_TOKEN"
+          pnpm exec vercel promote "$STAGED_URL" --yes
 
       - name: Promote staged marketing
         env:
@@ -131,9 +151,10 @@ jobs:
           mkdir -p .vercel
           jq -n --arg org "$VERCEL_ORG_ID" --arg project "$VERCEL_PROJECT_ID_MARKETING" \
             '{orgId:$org,projectId:$project}' > .vercel/project.json
-          npx --yes vercel@58.4.0 promote "$STAGED_URL" --yes --token "$VERCEL_TOKEN"
+          pnpm exec vercel promote "$STAGED_URL" --yes
 
       - name: Smoke production domains
+        if: ${{ always() && steps.mutation_attempt.outputs.attempted == 'true' }}
         run: bash scripts/smoke.sh
         env:
           AXEL_MARKETING_URL: ${{ vars.AXEL_MARKETING_URL || 'https://axelapp.ai' }}

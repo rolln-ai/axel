@@ -41,3 +41,14 @@ updates:
     labels:
       - area/infra
       - type/chore
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "10:00"
+      timezone: America/Denver
+    labels:
+      - area/infra
+      - type/chore

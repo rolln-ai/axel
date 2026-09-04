@@ -60,10 +60,25 @@ describe("sendImmediateErrorAlert", () => {
   it("records a send failure without throwing", async () => {
     const summary = await sendImmediateErrorAlert("ws1", notification, {
       listRecipients: async () => [recipient()],
-      send: async () => ({ ok: false, error: "bounce" }) as SendResult,
+      send: async () => ({ ok: false, error: "provider-private-detail" }) as SendResult,
     });
     expect(summary.emails_sent).toBe(0);
-    expect(summary.errors).toEqual([{ user_id: "u1", message: "bounce" }]);
+    expect(summary.errors).toEqual([{ code: "email_send_rejected" }]);
+    expect(JSON.stringify(summary)).not.toContain("provider-private-detail");
+    expect(JSON.stringify(summary)).not.toContain("u1");
+  });
+
+  it("does not retain thrown provider diagnostics or recipient identity", async () => {
+    const summary = await sendImmediateErrorAlert("ws1", notification, {
+      listRecipients: async () => [recipient()],
+      send: async () => {
+        throw new Error("provider-private-exception");
+      },
+    });
+
+    expect(summary.errors).toEqual([{ code: "email_send_failed" }]);
+    expect(JSON.stringify(summary)).not.toContain("provider-private-exception");
+    expect(JSON.stringify(summary)).not.toContain("u1");
   });
 });
 
@@ -71,7 +86,7 @@ describe("renderImmediateAlert", () => {
   it("includes the title, an investigate link, and a manage-settings link", () => {
     const { subject, html, text } = renderImmediateAlert("Acme", notification);
     expect(subject).toContain("Acme");
-    expect(subject).toContain("New delivery error: http_5xx");
+    expect(subject).toContain("operation_failed");
     expect(html).toContain("/inbox");
     expect(html).toContain("/settings?tab=notifications");
     expect(text).toContain("/settings?tab=notifications");
@@ -80,7 +95,8 @@ describe("renderImmediateAlert", () => {
   it("escapes HTML in the title", () => {
     const { html } = renderImmediateAlert("Acme", { ...notification, title: "<script>x</script>" });
     expect(html).not.toContain("<script>x</script>");
-    expect(html).toContain("&lt;script&gt;");
+    expect(html).not.toContain("&lt;script&gt;");
+    expect(html).toContain("operation_failed");
   });
 
   it("sanitizes payload echoes and secrets at the email boundary", () => {
@@ -94,6 +110,6 @@ describe("renderImmediateAlert", () => {
     expect(rendered).not.toContain("victim@example.test");
     expect(rendered).not.toContain("private webhook text");
     expect(rendered).not.toContain("opaque-token");
-    expect(rendered).toContain("[REDACTED]");
+    expect(rendered).toContain("authorization_failed");
   });
 });

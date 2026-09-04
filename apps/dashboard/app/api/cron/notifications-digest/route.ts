@@ -44,13 +44,12 @@ async function handle(request: Request): Promise<Response> {
         if (s.errors.length > 0) {
           for (const err of s.errors.slice(0, 20)) {
             await captureDashboardException(
-              new Error(`notifications-digest: ${err.message}`),
+              new Error("notifications_digest_item_failed"),
               {
                 level: "warning",
                 tags: {
                   component: "notifications_digest_cron",
-                  user_id: err.user_id,
-                  workspace_id: err.workspace_id,
+                  error_code: err.code,
                 },
               },
             );
@@ -60,12 +59,12 @@ async function handle(request: Request): Promise<Response> {
       },
     );
     return Response.json({ ok: true, summary });
-  } catch (err) {
-    await captureDashboardException(err, {
+  } catch {
+    await captureDashboardException(new Error("notifications_digest_failed"), {
       tags: { component: "notifications_digest_cron", phase: "job" },
     });
     return Response.json(
-      { ok: false, error: err instanceof Error ? err.message : String(err) },
+      { ok: false, error: "notifications_digest_failed" },
       { status: 500 },
     );
   }

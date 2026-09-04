@@ -58,8 +58,9 @@ export function FixWithAiButton({
           {state.notice}
         </span>
       ) : (
-        <span className="text-[10px] text-muted-foreground">
-          AI rewrites the transform, replays the {count.toLocaleString("en-US")} failed event{count === 1 ? "" : "s"}
+        <span className="max-w-[18rem] text-right text-[10px] text-muted-foreground">
+          AI sees field paths, type markers, and DSL shape, never event values. An approved fix
+          replays the {count.toLocaleString("en-US")} failed event{count === 1 ? "" : "s"}.
         </span>
       )}
     </form>

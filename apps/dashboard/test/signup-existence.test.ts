@@ -58,10 +58,6 @@ vi.mock("../lib/admin-signup-alert", () => ({
   sendAdminSignupAlert: vi.fn(async () => ({ errors: [] })),
 }));
 
-vi.mock("../lib/posthog-server", () => ({
-  captureServerEvent: vi.fn(async () => {}),
-}));
-
 vi.mock("next/cache", () => ({
   updateTag: vi.fn(),
   unstable_cache: (fn: unknown) => fn,

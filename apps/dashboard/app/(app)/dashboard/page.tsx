@@ -65,7 +65,7 @@ const KPI_METRICS_TIMEOUT_MS = 2_500;
  * Log + capture before returning null.
  */
 function reportAnalyticsLoadFailure(component: string, err: unknown): null {
-  console.error(`[dashboard] ${component} failed:`, err);
+  console.error(`[dashboard] ${component} failed`);
   void captureDashboardException(err, { tags: { component } });
   return null;
 }

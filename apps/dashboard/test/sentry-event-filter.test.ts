@@ -61,8 +61,9 @@ describe("dashboard Sentry event filter", () => {
     for (const secret of [...Object.values(secrets), "browser-credential"]) {
       expect(serialized).not.toContain(secret);
     }
-    expect(event.request.url).toBe("https://app.axel.invalid/reset");
-    expect(event.request.headers.authorization).toBe("[REDACTED]");
+    expect(event).not.toHaveProperty("request");
+    expect(event).not.toHaveProperty("breadcrumbs");
+    expect(event.exception.values[0]?.value).toBe("dashboard_error");
   });
 
   it("keeps ordinary SDK events", () => {
@@ -73,6 +74,34 @@ describe("dashboard Sentry event filter", () => {
         originalException: new Error("checkout failed"),
       }),
     ).toBe(event);
+  });
+
+  it("keeps the SDK event id while removing user and business identifiers", () => {
+    const event = {
+      event_id: "sentry-event-id",
+      user: {
+        id: "user-private",
+        email: "private@example.test",
+      },
+      tags: {
+        component: "billing_checkout",
+        workspace_id: "workspace-private",
+        destinationId: "destination-private",
+      },
+      extra: {
+        event_id: "event-private",
+        nested: { source_id: "source-private", routeId: "route-private" },
+      },
+      breadcrumbs: [{ data: { customer_id: "customer-private" } }],
+    };
+
+    expect(filterDashboardSentryEvent(event)).toBe(event);
+    expect(event.event_id).toBe("sentry-event-id");
+    expect(event).not.toHaveProperty("user");
+    expect(event.tags).toEqual({ component: "billing_checkout" });
+    expect(event).not.toHaveProperty("extra");
+    expect(event).not.toHaveProperty("breadcrumbs");
+    expect(JSON.stringify(event)).not.toContain("private");
   });
 
   it("removes receiver-controlled HTTP details and plaintext URL credentials", () => {
@@ -90,10 +119,60 @@ describe("dashboard Sentry event filter", () => {
 
     expect(filterDashboardSentryEvent(event)).toBe(event);
     const serialized = JSON.stringify(event);
-    expect(serialized).toContain("HTTP 400: [REDACTED]");
+    expect(serialized).toContain("dashboard_error");
     expect(serialized).not.toContain("hunter2");
     expect(serialized).not.toContain("db-password");
     expect(serialized).not.toContain("private-key");
+  });
+
+  it("drops arbitrary exception types, frame text, extras, and tag values", () => {
+    const event = {
+      event_id: "sentry-event-id",
+      tags: {
+        component: "delivery_panel",
+        workspace_id: "workspace-canary",
+      },
+      extra: { innocuous: "webhook-canary" },
+      exception: {
+        values: [
+          {
+            type: "WebhookCanaryError",
+            value: "webhook-canary",
+            stacktrace: {
+              frames: [
+                {
+                  filename: "https://private-host.invalid/webhook-canary.js?token=secret",
+                  function: "webhookCanary",
+                  lineno: 42,
+                  colno: 7,
+                },
+              ],
+            },
+          },
+        ],
+      },
+    };
+
+    expect(filterDashboardSentryEvent(event)).toBe(event);
+    expect(event.tags).toEqual({ component: "delivery_panel" });
+    expect(event).not.toHaveProperty("extra");
+    expect(event.exception.values[0]).toEqual({
+      type: "Error",
+      value: "dashboard_error",
+      mechanism: undefined,
+      stacktrace: {
+        frames: [
+          {
+            filename: "[external]",
+            function: "<anonymous>",
+            lineno: 42,
+            colno: 7,
+          },
+        ],
+      },
+    });
+    expect(JSON.stringify(event)).not.toContain("canary");
+    expect(JSON.stringify(event)).not.toContain("private-host");
   });
 
   it("drops TikTok WebView performance injection errors", () => {
@@ -280,10 +359,7 @@ describe("dashboard Sentry event filter", () => {
         { originalException: new Error("Connection terminated unexpectedly") },
       ),
     ).toBeNull();
-    expect(warn).toHaveBeenCalledWith(
-      "[sentry] dropping transient pg SDK event:",
-      "Connection terminated unexpectedly",
-    );
+    expect(warn).toHaveBeenCalledWith("[sentry] dropping transient pg SDK event");
   });
 
   it("keeps explicitly captured transient Postgres errors", () => {

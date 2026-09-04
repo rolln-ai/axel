@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createInMemoryRouterDeps,
   processQueueMessage,
@@ -8,13 +8,32 @@ import type { RouteWithDestinationTypes } from "../src/index.ts";
 
 const receivedAt = "2026-05-02T12:00:00.000Z";
 const now = () => new Date("2026-05-02T12:00:01.000Z");
+const RAW_KEY = "events/ws-1/2026-05-02/evt-1";
 
 describe("router processor (declarative engine)", () => {
+  it("rejects a foreign raw key before R2, route, or delivery access", async () => {
+    const deps = createInMemoryRouterDeps({
+      routes: [route({ route_id: "rt-1", destination_ids: ["dest-a"] })],
+    });
+    const r2Get = vi.fn(async () => null);
+    deps.rawPayloads = { get: r2Get };
+    const routeLookup = vi.spyOn(deps.routes, "listActiveBySource");
+
+    await expect(processQueueMessage(deps, message({
+      r2_key: "events/ws-victim/2026-05-02/evt-1",
+    }))).rejects.toThrow("raw_payload_key_mismatch");
+
+    expect(r2Get).not.toHaveBeenCalled();
+    expect(routeLookup).not.toHaveBeenCalled();
+    expect(deps.deliveryRecords).toHaveLength(0);
+    expect(deps.nativeDeliveryRecords).toHaveLength(0);
+  });
+
   it("evaluates active routes and enqueues one delivery per destination", async () => {
     const deps = createInMemoryRouterDeps({
       now,
       payloads: {
-        "events/ws-1/evt-1": JSON.stringify({ total: 21, type: "invoice.paid" }),
+        [RAW_KEY]: JSON.stringify({ total: 21, type: "invoice.paid" }),
       },
       routes: [
         route({
@@ -63,11 +82,24 @@ describe("router processor (declarative engine)", () => {
     expect(deps.deliveryRecords[0]?.idempotency_key).toBe("ws-1:evt-1:rt-1:dest-a");
   });
 
+  it("accepts the canonical pull-worker raw key shape", async () => {
+    const pullKey = "pull/ws-1/src-1/customers/evt-pull.json";
+    const deps = createInMemoryRouterDeps({
+      payloads: { [pullKey]: "{}" },
+      routes: [],
+    });
+
+    await expect(processQueueMessage(deps, message({
+      event_id: "evt-pull",
+      r2_key: pullKey,
+    }))).resolves.toMatchObject({ event_id: "evt-pull" });
+  });
+
   it("dead-letters routes whose declarative DSL fails to parse and leaves other routes flowing", async () => {
     const deps = createInMemoryRouterDeps({
       now,
       payloads: {
-        "events/ws-1/evt-1": JSON.stringify({ ok: true }),
+        [RAW_KEY]: JSON.stringify({ ok: true }),
       },
       routes: [
         route({
@@ -98,7 +130,7 @@ describe("router processor (declarative engine)", () => {
     const deps = createInMemoryRouterDeps({
       now,
       payloads: {
-        "events/ws-1/evt-1": JSON.stringify({ ok: true }),
+        [RAW_KEY]: JSON.stringify({ ok: true }),
       },
       routes: [
         route({
@@ -124,7 +156,7 @@ describe("router processor (declarative engine)", () => {
     const deps = createInMemoryRouterDeps({
       now,
       payloads: {
-        "events/ws-1/evt-1": JSON.stringify({ ok: true }),
+        [RAW_KEY]: JSON.stringify({ ok: true }),
       },
       routes: [
         route({
@@ -157,7 +189,7 @@ describe("router processor (declarative engine)", () => {
     const deps = createInMemoryRouterDeps({
       now,
       payloads: {
-        "events/ws-1/evt-1": JSON.stringify({ type: "x" }),
+        [RAW_KEY]: JSON.stringify({ type: "x" }),
       },
       routes: [
         route({
@@ -183,7 +215,7 @@ describe("router processor (declarative engine)", () => {
     const setup = () =>
       createInMemoryRouterDeps({
         now,
-        payloads: { "events/ws-1/evt-1": JSON.stringify({ ok: true }) },
+        payloads: { [RAW_KEY]: JSON.stringify({ ok: true }) },
         routes: [
           route({ route_id: "rt-1", destination_ids: ["dest-a", "dest-b"] }),
           route({ route_id: "rt-2", destination_ids: ["dest-c"] }),
@@ -227,7 +259,7 @@ describe("router processor (declarative engine)", () => {
       event_id: "evt-1",
       route_id: "rt-1",
       reason: "payload_missing",
-      r2_key: "events/ws-1/evt-1",
+      r2_key: RAW_KEY,
     });
   });
 
@@ -256,7 +288,7 @@ describe("router processor (declarative engine)", () => {
     const deps = createInMemoryRouterDeps({
       now,
       payloads: {
-        "events/ws-1/evt-1": JSON.stringify({ internal: { flag: "on" }, public: "yes" }),
+        [RAW_KEY]: JSON.stringify({ internal: { flag: "on" }, public: "yes" }),
       },
       routes: [
         route({
@@ -299,7 +331,7 @@ describe("router processor (declarative engine)", () => {
     const deps = createInMemoryRouterDeps({
       now,
       payloads: {
-        "events/ws-1/evt-1": JSON.stringify({ event_id: "evt-1", internal: { flag: "on" } }),
+        [RAW_KEY]: JSON.stringify({ event_id: "evt-1", internal: { flag: "on" } }),
       },
       routes: [
         route({
@@ -323,7 +355,7 @@ describe("router processor (declarative engine)", () => {
   it("PINS error reporting (b): a pipeline-graph engine error marks the route errored AND dead-letters", async () => {
     const deps = createInMemoryRouterDeps({
       now,
-      payloads: { "events/ws-1/evt-1": JSON.stringify({ ok: true }) },
+      payloads: { [RAW_KEY]: JSON.stringify({ ok: true }) },
       routes: [
         route({
           route_id: "rt-graph-bad",
@@ -341,18 +373,19 @@ describe("router processor (declarative engine)", () => {
   });
 });
 
-function message(): QueueMessage {
+function message(overrides: Partial<QueueMessage> = {}): QueueMessage {
   return {
     event_id: "evt-1",
     workspace_id: "ws-1",
     source_id: "src-1",
-    r2_key: "events/ws-1/evt-1",
+    r2_key: RAW_KEY,
     received_at: receivedAt,
     content_type: "application/json",
     size_bytes: 42,
     shard: 0,
     headers: { "x-source": "stripe" },
     query: {},
+    ...overrides,
   };
 }
 

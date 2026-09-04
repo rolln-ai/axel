@@ -22,7 +22,14 @@ import http from "node:http";
 import { createHash } from "node:crypto";
 import type pg from "pg";
 import { captureException } from "@axel/observability";
-import { cloudflareR2ObjectUrl } from "@axel/shared";
+import {
+  cloudflareR2ObjectUrl,
+  isCanonicalRawPayloadKey,
+} from "@axel/shared";
+import {
+  readResponseBytesLimited,
+  readResponseTextLimited,
+} from "./cli-bounded-io.js";
 import { handleListenStream } from "./cli-events-stream.js";
 
 // Loosely typed sentry client — observability exposes a SentryClient
@@ -44,6 +51,9 @@ export interface CliAuthCtx {
 }
 
 const TOKEN_PREFIX = "axe_pat_";
+export const MAX_CLI_REQUEST_BODY_BYTES = 5 * 1024 * 1024;
+const MAX_CLI_UPSTREAM_JSON_BYTES = 8 * 1024 * 1024;
+const MAX_CLI_SINGLE_PAYLOAD_BYTES = 25 * 1024 * 1024;
 // Token format: `axe_pat_<48-char base32>`. Hashed with sha256-hex
 // before lookup so a leaked DB doesn't yield usable tokens.
 function hashToken(plaintext: string): string {
@@ -110,8 +120,8 @@ export async function authenticateCliRequest(
   // Fire-and-forget — don't block the request on the bookkeeping.
   pool
     .query("UPDATE personal_access_tokens SET last_used_at = now() WHERE id = $1", [row.pat_id])
-    .catch((err: unknown) => {
-      console.error("[cli-api] failed to update last_used_at:", err);
+    .catch(() => {
+      console.error("[cli-api] failed to update last_used_at");
     });
   return {
     user_id: row.user_id,
@@ -138,9 +148,33 @@ function jsonResponse(res: http.ServerResponse, status: number, body: unknown): 
   res.end(JSON.stringify(body));
 }
 
-async function readJsonBody<T>(req: http.IncomingMessage): Promise<T> {
+export class CliRequestBodyTooLargeError extends Error {
+  constructor() {
+    super("cli_request_body_too_large");
+    this.name = "CliRequestBodyTooLargeError";
+  }
+}
+
+export async function readJsonBody<T>(req: http.IncomingMessage): Promise<T> {
+  const declared = req.headers["content-length"];
+  if (typeof declared === "string") {
+    const declaredBytes = Number(declared);
+    if (Number.isFinite(declaredBytes) && declaredBytes > MAX_CLI_REQUEST_BODY_BYTES) {
+      throw new CliRequestBodyTooLargeError();
+    }
+  }
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
+  let total = 0;
+  for await (const chunk of req) {
+    const bytes = Buffer.isBuffer(chunk)
+      ? chunk
+      : Buffer.from(chunk as string | Uint8Array);
+    total += bytes.byteLength;
+    if (total > MAX_CLI_REQUEST_BODY_BYTES) {
+      throw new CliRequestBodyTooLargeError();
+    }
+    chunks.push(bytes);
+  }
   const raw = Buffer.concat(chunks).toString("utf8");
   if (raw.length === 0) return {} as T;
   return JSON.parse(raw) as T;
@@ -162,6 +196,8 @@ export interface CliApiDeps {
   clickhouseUrl: string | undefined;
   clickhouseUser: string | undefined;
   clickhousePassword: string | undefined;
+  /** Test injection point. */
+  fetchImpl?: typeof fetch;
 }
 
 /**
@@ -225,7 +261,10 @@ export async function handleCliApi(
     return true;
   }
 
-  jsonResponse(res, 404, { error: "not_found", message: `Unknown CLI route: ${path}` });
+  jsonResponse(res, 404, {
+    error: "not_found",
+    message: "CLI route not found.",
+  });
   return true;
 }
 
@@ -246,7 +285,14 @@ async function handleTrigger(
   let body: TriggerRequest;
   try {
     body = await readJsonBody<TriggerRequest>(req);
-  } catch (_err: unknown) {
+  } catch (err: unknown) {
+    if (err instanceof CliRequestBodyTooLargeError) {
+      jsonResponse(res, 413, {
+        error: "request_too_large",
+        message: "CLI request body exceeds the allowed size.",
+      });
+      return;
+    }
     jsonResponse(res, 400, {
       error: "invalid_json",
       message: "Request body is not valid JSON.",
@@ -267,7 +313,7 @@ async function handleTrigger(
   if (!sourceCheck.rowCount) {
     jsonResponse(res, 404, {
       error: "source_not_found",
-      message: `Source ${body.source_id} is not in workspace ${ctx.workspace_id}.`,
+      message: "Source not found.",
     });
     return;
   }
@@ -287,7 +333,7 @@ async function handleTrigger(
   };
   let ingestRes: Response;
   try {
-    ingestRes = await fetch(ingestUrl, {
+    ingestRes = await (deps.fetchImpl ?? fetch)(ingestUrl, {
       method: "POST",
       redirect: "manual",
       headers: {
@@ -310,11 +356,24 @@ async function handleTrigger(
     });
     return;
   }
-  const ingestText = await ingestRes.text().catch(() => "");
   if (!ingestRes.ok) {
+    await ingestRes.body?.cancel().catch(() => undefined);
     jsonResponse(res, 502, {
       error: `ingest_${ingestRes.status}`,
-      message: ingestText.slice(0, 200),
+      message: "Ingest service rejected the request.",
+    });
+    return;
+  }
+  let ingestText: string;
+  try {
+    ingestText = await readResponseTextLimited(
+      ingestRes,
+      MAX_CLI_UPSTREAM_JSON_BYTES,
+    );
+  } catch {
+    jsonResponse(res, 502, {
+      error: "ingest_invalid_response",
+      message: "Ingest service returned an invalid response.",
     });
     return;
   }
@@ -331,7 +390,7 @@ async function handleTrigger(
   });
 }
 
-async function handleEventPayload(
+export async function handleEventPayload(
   _req: http.IncomingMessage,
   res: http.ServerResponse,
   ctx: CliAuthCtx,
@@ -345,14 +404,14 @@ async function handleEventPayload(
     });
     return;
   }
-  // Resolve event_id → r2_key + headers + content_type via ClickHouse.
+  // Resolve event_id → r2_key + content_type via ClickHouse.
   // Same query the dashboard's getEventDetail uses; scoped to the
   // caller's workspace.
   const chHeaders: Record<string, string> = { accept: "application/json" };
   if (deps.clickhouseUser) chHeaders["x-clickhouse-user"] = deps.clickhouseUser;
   if (deps.clickhousePassword) chHeaders["x-clickhouse-key"] = deps.clickhousePassword;
   const query = `SELECT event_id, source_id, toString(received_at) AS received_at,
-                         content_type, r2_key, headers_json
+                         content_type, r2_key
                     FROM events
                    WHERE workspace_id = {workspace_id:String}
                      AND event_id     = {event_id:String}
@@ -364,7 +423,7 @@ async function handleEventPayload(
   chUrl.searchParams.set("param_event_id", eventId);
   let chRes: Response;
   try {
-    chRes = await fetch(chUrl, { headers: chHeaders, redirect: "manual" });
+    chRes = await (deps.fetchImpl ?? fetch)(chUrl, { headers: chHeaders, redirect: "manual" });
   } catch (err: unknown) {
     void captureException(deps.sentry, err, {
       tags: { component: "cli_event_payload", workspace_id: ctx.workspace_id },
@@ -376,28 +435,80 @@ async function handleEventPayload(
     return;
   }
   if (!chRes.ok) {
-    const body = await chRes.text().catch(() => "");
+    await chRes.body?.cancel().catch(() => undefined);
     jsonResponse(res, 502, {
       error: `clickhouse_${chRes.status}`,
-      message: body.slice(0, 200),
+      message: "ClickHouse request failed.",
     });
     return;
   }
-  const chJson = (await chRes.json()) as {
+  let chJson: {
     data?: Array<{
       event_id: string;
       source_id: string;
       received_at: string;
       content_type: string;
       r2_key: string;
-      headers_json: string;
     }>;
   };
+  try {
+    const parsed = JSON.parse(await readResponseTextLimited(
+      chRes,
+      MAX_CLI_UPSTREAM_JSON_BYTES,
+    )) as unknown;
+    if (
+      parsed === null
+      || typeof parsed !== "object"
+      || Array.isArray(parsed)
+      || (
+        "data" in parsed
+        && !Array.isArray((parsed as { data?: unknown }).data)
+      )
+    ) {
+      throw new Error("clickhouse_response_contract_invalid");
+    }
+    chJson = parsed as typeof chJson;
+  } catch {
+    jsonResponse(res, 502, {
+      error: "clickhouse_invalid_response",
+      message: "ClickHouse returned an invalid response.",
+    });
+    return;
+  }
   const event = chJson.data?.[0];
   if (!event) {
     jsonResponse(res, 404, {
       error: "event_not_found",
-      message: `No event ${eventId} in workspace ${ctx.workspace_id} (or outside the 30d ClickHouse TTL).`,
+      message: "Event not found or no longer retained.",
+    });
+    return;
+  }
+
+  if (
+    typeof event.event_id !== "string"
+    || typeof event.source_id !== "string"
+    || typeof event.received_at !== "string"
+    || typeof event.content_type !== "string"
+    || typeof event.r2_key !== "string"
+  ) {
+    jsonResponse(res, 502, {
+      error: "clickhouse_invalid_response",
+      message: "ClickHouse returned an invalid response.",
+    });
+    return;
+  }
+
+  if (
+    event.event_id !== eventId
+    || !isCanonicalRawPayloadKey(event.r2_key, {
+      workspaceId: ctx.workspace_id,
+      eventId,
+      sourceId: event.source_id,
+    })
+  ) {
+    jsonResponse(res, 502, {
+      error: "raw_payload_unavailable",
+      message: "Raw payload storage reference is invalid.",
     });
     return;
   }
@@ -410,31 +521,47 @@ async function handleEventPayload(
     deps.rawPayloadBucket,
     event.r2_key,
   );
-  const r2Res = await fetch(r2Url, {
-    redirect: "manual",
-    headers: { authorization: `Bearer ${deps.cloudflareApiToken}` },
-  });
+  let r2Res: Response;
+  try {
+    r2Res = await (deps.fetchImpl ?? fetch)(r2Url, {
+      redirect: "manual",
+      headers: { authorization: `Bearer ${deps.cloudflareApiToken}` },
+    });
+  } catch {
+    jsonResponse(res, 502, {
+      error: "r2_unreachable",
+      message: "Raw payload storage request failed.",
+    });
+    return;
+  }
   if (!r2Res.ok) {
+    await r2Res.body?.cancel().catch(() => undefined);
     jsonResponse(res, 502, {
       error: `r2_${r2Res.status}`,
       message: "Raw payload storage request failed.",
     });
     return;
   }
-  const buf = Buffer.from(await r2Res.arrayBuffer());
-  let headers: Record<string, string> = {};
+  let buf: Buffer;
   try {
-    headers = JSON.parse(event.headers_json) as Record<string, string>;
+    buf = Buffer.from(await readResponseBytesLimited(
+      r2Res,
+      MAX_CLI_SINGLE_PAYLOAD_BYTES,
+    ));
   } catch {
-    headers = {};
+    jsonResponse(res, 502, {
+      error: "r2_invalid_response",
+      message: "Raw payload storage returned an invalid response.",
+    });
+    return;
   }
-
   jsonResponse(res, 200, {
     event_id: event.event_id,
     source_id: event.source_id,
     received_at: event.received_at,
     content_type: event.content_type,
     body_base64: buf.toString("base64"),
-    headers,
+    // Historical request metadata is intentionally not re-exported.
+    headers: {},
   });
 }

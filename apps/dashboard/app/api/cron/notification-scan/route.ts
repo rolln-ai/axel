@@ -1,5 +1,6 @@
 import { sentryClientFromEnv, withCronCheckIn } from "@axel/observability";
 import {
+  publicNotificationScanSummary,
   runNotificationScan,
   shouldReportNotificationScanError,
 } from "../../../../lib/notification-scan";
@@ -38,32 +39,32 @@ async function handle(request: Request): Promise<Response> {
       async () => {
         const s = await runNotificationScan();
         if (s.errors.length > 0) {
-          for (const err of s.errors.slice(0, 20)) {
-            if (!shouldReportNotificationScanError(err.message)) continue;
+          for (const error of s.errors.slice(0, 20)) {
+            if (error.code === "transient_dependency") continue;
             await captureDashboardException(
-              new Error(`notification-scan: ${err.message}`),
+              new Error("notification_scan_item_failed"),
               {
                 level: "warning",
                 tags: {
                   component: "notification_scan_cron",
-                  workspace_id: err.workspace_id,
+                  error_code: error.code,
                 },
               },
             );
           }
         }
-        return s;
+        return publicNotificationScanSummary(s);
       },
     );
     return Response.json({ ok: true, summary });
   } catch (err) {
     if (shouldReportNotificationScanError(err)) {
-      await captureDashboardException(err, {
+      await captureDashboardException(new Error("notification_scan_failed"), {
         tags: { component: "notification_scan_cron", phase: "job" },
       });
     }
     return Response.json(
-      { ok: false, error: err instanceof Error ? err.message : String(err) },
+      { ok: false, error: "notification_scan_failed" },
       { status: 500 },
     );
   }

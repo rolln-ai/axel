@@ -17,8 +17,8 @@
  *      (mirrors apps/delivery-service/src/cli-api.ts:377).
  *   5. Delivery-queue writes via Cloudflare's Queues HTTP API
  *      (mirrors apps/delivery-service/src/server.ts:427 retry sink).
- *   6. ClickHouse `events` lookup for best-effort hint resolution
- *      (received_at / content_type / headers).
+ *   6. ClickHouse `events` lookup for bounded replay hints
+ *      (received_at / content_type / size / shard / test marker).
  *
  * The runner is started by `server.ts` and stopped during graceful shutdown
  * so an in-flight replay batch isn't truncated.
@@ -79,31 +79,6 @@ const R2_RETRY_BACKOFF_MS = [0, 100, 300] as const;
  *  520–530 — notably 525 "SSL handshake failed", which is transient. */
 function isRetryableR2Status(status: number): boolean {
   return status === 429 || status >= 500;
-}
-
-/**
- * Read a failed response body for use in an error message.
- *
- * Cloudflare's edge errors (520–530) answer with a full HTML page, not JSON.
- * Splicing the first 200 characters of that into an Error message gives
- * Sentry a title made of `<!DOCTYPE html>` and doctype comments, and the
- * conditional-comment lines get read as stack frames (JAVASCRIPT-38). Collapse
- * HTML to a fixed marker so every edge error of a given status groups as one
- * issue; pass other bodies (the JSON API errors) through as before.
- */
-async function errorBodyExcerpt(res: Response): Promise<string> {
-  let text: string;
-  try {
-    text = await res.text();
-  } catch {
-    return "<unreadable body>";
-  }
-  const trimmed = text.trim();
-  if (/^<(?:!doctype|html)\b/i.test(trimmed)) {
-    const title = /<title[^>]*>([^<]{1,120})<\/title>/i.exec(trimmed)?.[1]?.trim();
-    return title ? `<cloudflare html error: ${title}>` : "<cloudflare html error>";
-  }
-  return trimmed.slice(0, 200);
 }
 
 /** Declared body size, or null when the header is absent or unparseable. */
@@ -337,7 +312,8 @@ export function createR2HttpRawPayloadStore(deps: R2HttpDeps): RawPayloadStore {
       });
       if (res.status === 404) return null;
       if (!res.ok) {
-        throw new Error(`r2_get_${res.status}: ${await errorBodyExcerpt(res)}`);
+        await res.body?.cancel().catch(() => undefined);
+        throw new Error(`r2_get_${res.status}`);
       }
       return await res.arrayBuffer();
     },
@@ -368,7 +344,8 @@ export function createR2HttpSpillStore(deps: R2HttpDeps): QueueSpillWriter {
         body,
       });
       if (!res.ok) {
-        throw new Error(`r2_put_${res.status}: ${await errorBodyExcerpt(res)}`);
+        await res.body?.cancel().catch(() => undefined);
+        throw new Error(`r2_put_${res.status}`);
       }
     },
   };
@@ -405,7 +382,8 @@ export function createR2HttpObjectStore(deps: R2HttpDeps): ObjectStoreLike {
         body: value,
       });
       if (!res.ok) {
-        throw new Error(`r2_put_${res.status}: ${await errorBodyExcerpt(res)}`);
+        await res.body?.cancel().catch(() => undefined);
+        throw new Error(`r2_put_${res.status}`);
       }
     },
   };
@@ -433,7 +411,8 @@ export function createR2HttpSpillReader(deps: R2HttpDeps): {
       });
       if (res.status === 404) return null;
       if (!res.ok) {
-        throw new Error(`r2_get_${res.status}: ${await errorBodyExcerpt(res)}`);
+        await res.body?.cancel().catch(() => undefined);
+        throw new Error(`r2_get_${res.status}`);
       }
       const declared = contentLength(res);
       const buf = await res.arrayBuffer();
@@ -442,7 +421,7 @@ export function createR2HttpSpillReader(deps: R2HttpDeps): {
       // SyntaxError (JAVASCRIPT-3M) that reads like a payload bug rather than
       // the transient read it is. Name it so the caller retries.
       if (declared !== null && buf.byteLength < declared) {
-        throw new Error(`r2_get_truncated: ${key} (${buf.byteLength}/${declared} bytes)`);
+        throw new Error(`r2_get_truncated (${buf.byteLength}/${declared} bytes)`);
       }
       return buf;
     },
@@ -452,7 +431,8 @@ export function createR2HttpSpillReader(deps: R2HttpDeps): {
         headers: { authorization: `Bearer ${deps.cloudflareApiToken}` },
       });
       if (!res.ok && res.status !== 404) {
-        throw new Error(`r2_delete_${res.status}: ${await errorBodyExcerpt(res)}`);
+        await res.body?.cancel().catch(() => undefined);
+        throw new Error(`r2_delete_${res.status}`);
       }
     },
   };
@@ -484,7 +464,8 @@ export function createCloudflareDeliveryQueueSink(deps: CfQueueDeps): DeliveryQu
         },
       );
       if (!res.ok) {
-        throw new Error(`queue_enqueue_${res.status}: ${(await res.text()).slice(0, 200)}`);
+        await res.body?.cancel().catch(() => undefined);
+        throw new Error(`queue_enqueue_${res.status}`);
       }
     },
   };
@@ -505,13 +486,19 @@ const CLICKHOUSE_HINTS_MAX_EXECUTION_SECONDS = 5;
 export function createClickhousePayloadHints(deps: ClickhouseHttpDeps): ReplayPayloadHints {
   const fetchImpl = deps.fetchImpl ?? fetch;
   return {
-    async resolveHints(eventId: string, _r2Key: string) {
-      // The events table stores headers_json/query_json as String, content_type
-      // as LowCardinality(String). We re-hydrate them so the replayed
-      // QueueMessage looks as much like the original as possible.
+    async resolveHints(
+      eventId: string,
+      _r2Key: string,
+      workspaceId: string,
+      sourceId: string,
+    ) {
+      // Raw request metadata is deliberately outside the replay boundary.
+      // Fetch only dedicated scalar hints and return value-free maps.
       const url = new URL(deps.url);
       url.searchParams.set("default_format", "JSON");
       url.searchParams.set("param_event_id", eventId);
+      url.searchParams.set("param_workspace_id", workspaceId);
+      url.searchParams.set("param_source_id", sourceId);
       url.searchParams.set("max_execution_time", String(CLICKHOUSE_HINTS_MAX_EXECUTION_SECONDS));
       url.searchParams.set("max_memory_usage", String(CLICKHOUSE_HINTS_MAX_MEMORY_BYTES));
       url.searchParams.set("max_threads", "1");
@@ -521,11 +508,11 @@ export function createClickhousePayloadHints(deps: ClickhouseHttpDeps): ReplayPa
                content_type,
                size_bytes,
                shard,
-               headers_json,
-               query_json,
                is_test
           FROM events
-         WHERE event_id = {event_id:String}
+         WHERE workspace_id = {workspace_id:String}
+           AND source_id = {source_id:String}
+           AND event_id = {event_id:String}
          ORDER BY received_at DESC
          LIMIT 1
       `;
@@ -544,8 +531,6 @@ export function createClickhousePayloadHints(deps: ClickhouseHttpDeps): ReplayPa
           content_type: string;
           size_bytes: number;
           shard: number;
-          headers_json: string;
-          query_json: string;
           is_test: boolean;
         }>;
       };
@@ -556,18 +541,6 @@ export function createClickhousePayloadHints(deps: ClickhouseHttpDeps): ReplayPa
       }
       const row = json.data?.[0];
       if (!row) return null;
-      let parsedHeaders: Record<string, string> = {};
-      try {
-        parsedHeaders = JSON.parse(row.headers_json) as Record<string, string>;
-      } catch {
-        // tolerate malformed historical rows
-      }
-      let parsedQuery: Record<string, string> = {};
-      try {
-        parsedQuery = JSON.parse(row.query_json) as Record<string, string>;
-      } catch {
-        // tolerate malformed historical rows
-      }
       // ClickHouse hands back "2026-05-18 12:34:56.789" — convert to ISO so
       // downstream consumers don't need to know the wire format.
       const receivedAtIso = row.received_at.replace(" ", "T") + "Z";
@@ -576,8 +549,8 @@ export function createClickhousePayloadHints(deps: ClickhouseHttpDeps): ReplayPa
         content_type: row.content_type,
         size_bytes: row.size_bytes,
         shard: row.shard,
-        headers: parsedHeaders,
-        query: parsedQuery,
+        headers: {},
+        query: {},
         // Carry the original test-flag forward so replaying a test event
         // stays non-billable. ClickHouse returns is_test as a boolean.
         is_test: row.is_test === true,
@@ -590,8 +563,11 @@ export function createClickhousePayloadHints(deps: ClickhouseHttpDeps): ReplayPa
 
 function createConsoleEventLogger(): EventLogSink {
   return {
-    record(event: string, payload: unknown) {
-      console.log(`[replay] ${event}`, JSON.stringify(payload));
+    record(event: string, _payload: unknown) {
+      // Event names are low-cardinality slugs. Replay payloads contain tenant,
+      // source, route, destination, and event identifiers and never belong in
+      // hosted logs.
+      console.log(`[replay] ${event}`);
     },
   };
 }

@@ -25,10 +25,10 @@ async function handle(request: Request): Promise<Response> {
   try {
     const result = await backfillRedactFixtures();
     return Response.json({ ok: true, ...result });
-  } catch (err) {
-    captureDashboardException(err, { tags: { component: "redact_fixtures_backfill" } });
+  } catch {
+    captureDashboardException(new Error("backfill_failed"), { tags: { component: "redact_fixtures_backfill" } });
     return Response.json(
-      { ok: false, error: err instanceof Error ? err.message : "backfill_failed" },
+      { ok: false, error: "backfill_failed" },
       { status: 500 },
     );
   }

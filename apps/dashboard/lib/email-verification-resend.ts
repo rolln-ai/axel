@@ -50,7 +50,7 @@ export async function sendVerificationEmail(userId: string, email: string): Prom
   });
   const sent = await sendEmail({ to: email, subject, html, text });
   if (!sent.ok) {
-    console.error("[sendVerificationEmail] email failed:", sent.error);
+    console.error("[sendVerificationEmail] email failed");
   }
   return sent;
 }
@@ -79,8 +79,8 @@ export async function resendVerificationEmailForUser(userId: string): Promise<Ac
     if (!sent.ok) {
       return { error: "Could not send the verification email. Try again." };
     }
-  } catch (err) {
-    console.error("[resendVerificationEmail] failed:", err);
+  } catch {
+    console.error("[resendVerificationEmail] failed");
     return { error: "Could not send the verification email. Try again." };
   }
   return { notice: `Verification email sent to ${user.email}. The link expires in 24 hours.` };

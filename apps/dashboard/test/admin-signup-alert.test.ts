@@ -78,9 +78,9 @@ describe("admin signup alerts", () => {
 
     expect(sent).toEqual(["a@example.com", "b@example.com"]);
     expect(summary).toMatchObject({ recipients_scanned: 2, emails_sent: 1 });
-    expect(summary.errors).toEqual([
-      { user_id: "usr_a", message: "resend unavailable" },
-    ]);
+    expect(summary.errors).toEqual([{ code: "email_send_rejected" }]);
+    expect(JSON.stringify(summary)).not.toContain("resend unavailable");
+    expect(JSON.stringify(summary)).not.toContain("usr_a");
   });
 
   it("turns recipient lookup failures into a non-throwing summary", async () => {
@@ -94,8 +94,7 @@ describe("admin signup alerts", () => {
     });
 
     expect(summary.emails_sent).toBe(0);
-    expect(summary.errors).toEqual([
-      { user_id: "recipient_lookup", message: "database unavailable" },
-    ]);
+    expect(summary.errors).toEqual([{ code: "recipient_lookup_failed" }]);
+    expect(JSON.stringify(summary)).not.toContain("database unavailable");
   });
 });

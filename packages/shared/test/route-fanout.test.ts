@@ -11,8 +11,8 @@ const ctx: RouteFanoutContext = {
     received_at: "2026-08-23T11:59:00.000Z",
     content_type: "application/json",
     size_bytes: 123,
-    headers: { "x-h": "1" },
-    query: { q: "1" },
+    headers: { "x-request-id": "secret-looking-header-value" },
+    query: { campaign: "secret-looking-query-value" },
     is_test: false,
   },
   enqueued_at: "2026-08-23T12:00:00.000Z",
@@ -53,6 +53,8 @@ describe("evaluateRouteFanout — legacy routes", () => {
     });
     expect(result.deliveries[0]!.destination_type).toBeNull();
     expect(result.deliveries[1]!.destination_type).toBe("postgres");
+    expect(result.deliveries[0]!.message.headers).toEqual({});
+    expect(result.deliveries[0]!.message.query).toEqual({});
   });
 
   it("filter=false → skipped", () => {

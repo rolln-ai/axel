@@ -50,6 +50,11 @@ axel replay evt_018... --forward-to http://localhost:3000/webhooks
 axel send stripe charge.succeeded --to http://localhost:3000/webhooks
 ```
 
+`axel trigger` uses the saved workspace PAT through the control-plane API. It
+does not accept a source token or build a credential-bearing ingest URL. A
+custom producer that calls ingest directly must send its one-time source token
+in the `x-axel-token` request header.
+
 ## Notes
 
 `axel listen` polls `/v1/cli/events` once a second rather than holding a

@@ -78,8 +78,11 @@ describe("Shopify pull connector", () => {
       { now: fixedNow },
     );
     // The stream fails (guard threw) rather than dialing the attacker host.
-    expect(summary.streams[0]?.status).toBe("failed");
-    expect(summary.streams[0]?.error).toMatch(/does not match shop|not a valid URL/);
+    expect(summary.streams[0]).toMatchObject({
+      status: "failed",
+      error: "operation_failed",
+    });
+    expect(JSON.stringify(summary)).not.toContain(evilUrl);
     expect(requestedUrls.some((url) => new URL(url).hostname === "attacker.example.com")).toBe(false);
   });
 
@@ -100,7 +103,7 @@ describe("Shopify pull connector", () => {
 
     expect(summary.streams[0]).toMatchObject({
       status: "failed",
-      error: "invalid JSON response",
+      error: "invalid_payload",
     });
     expect(JSON.stringify(summary)).not.toContain("victim@example.com");
     expect(JSON.stringify(summary)).not.toContain("shopify_source_secret");

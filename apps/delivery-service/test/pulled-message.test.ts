@@ -16,7 +16,7 @@ const MESSAGE: DestinationQueueMessage = {
   source_id: "src_contract",
   route_id: "route_contract",
   destination_id: "dest_contract",
-  r2_key: "events/ws_contract/evt_contract_1.json",
+  r2_key: "events/ws_contract/2026-08-26/evt_contract_1",
   received_at: "2026-08-26T12:00:00.000Z",
   enqueued_at: "2026-08-26T12:00:01.000Z",
   attempt_no: 1,
@@ -28,6 +28,12 @@ const MESSAGE: DestinationQueueMessage = {
   headers: { "content-type": "application/json" },
   query: {},
   is_test: true,
+};
+
+const DELIVERY_MESSAGE: DestinationQueueMessage = {
+  ...MESSAGE,
+  headers: {},
+  query: {},
 };
 
 function fixture(name: "plain" | "base64"): PulledMessage {
@@ -44,11 +50,11 @@ function encode(message: unknown): string {
 
 describe("parsePulledMessage", () => {
   it("accepts the captured base64 Cloudflare HTTP Pull shape", () => {
-    expect(parsePulledMessageBody(fixture("base64"))).toEqual(MESSAGE);
+    expect(parsePulledMessageBody(fixture("base64"))).toEqual(DELIVERY_MESSAGE);
   });
 
   it("accepts the plain JSON string observed in production", () => {
-    expect(parsePulledMessageBody(fixture("plain"))).toEqual(MESSAGE);
+    expect(parsePulledMessageBody(fixture("plain"))).toEqual(DELIVERY_MESSAGE);
   });
 
   it("normalizes an unversioned queued message during a rolling deploy", () => {
@@ -58,7 +64,7 @@ describe("parsePulledMessage", () => {
       metadata: { "CF-Content-Type": "json" },
     });
 
-    expect(parsed).toEqual({ ok: true, message: MESSAGE, wireVersion: 0 });
+    expect(parsed).toEqual({ ok: true, message: DELIVERY_MESSAGE, wireVersion: 0 });
   });
 
   it("rejects an unknown future contract version", () => {
@@ -76,14 +82,14 @@ describe("parsePulledMessage", () => {
         body: encode(MESSAGE),
         metadata: { "CF-Content-Type": "bytes" },
       }),
-    ).toEqual(MESSAGE);
+    ).toEqual(DELIVERY_MESSAGE);
     expect(
       parsePulledMessageBody({
         body: JSON.stringify(MESSAGE),
         metadata: { "CF-Content-Type": "text" },
       }),
-    ).toEqual(MESSAGE);
-    expect(parsePulledMessageBody({ body: MESSAGE })).toEqual(MESSAGE);
+    ).toEqual(DELIVERY_MESSAGE);
+    expect(parsePulledMessageBody({ body: MESSAGE })).toEqual(DELIVERY_MESSAGE);
   });
 
   it("keeps malformed encodings and unsupported v8 messages fail-closed", () => {
@@ -154,8 +160,8 @@ describe("parsePulledBatchResponse", () => {
       },
     ]);
     expect(parsed.map(parsePulledMessage)).toEqual([
-      { ok: true, message: MESSAGE, wireVersion: 1 },
-      { ok: true, message: MESSAGE, wireVersion: 1 },
+      { ok: true, message: DELIVERY_MESSAGE, wireVersion: 1 },
+      { ok: true, message: DELIVERY_MESSAGE, wireVersion: 1 },
     ]);
   });
 
@@ -228,5 +234,56 @@ describe("validateDestinationQueueMessage", () => {
 
     expect(parsed.ok).toBe(true);
     if (parsed.ok) expect(parsed.message).not.toHaveProperty("unexpected_secret");
+  });
+
+  it("erases legacy request metadata values before delivery", () => {
+    const parsed = validateDestinationQueueMessage({
+      ...MESSAGE,
+      headers: {
+        authorization: "Bearer obvious-secret",
+        "x-request-id": "secret-under-innocuous-name",
+      },
+      query: {
+        token: "obvious-query-secret",
+        campaign: "secret-under-innocuous-query-name",
+      },
+    });
+
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.message.headers).toEqual({});
+      expect(parsed.message.query).toEqual({});
+      expect(JSON.stringify(parsed.message)).not.toContain("secret-under");
+    }
+  });
+
+  it("rejects a foreign-workspace raw key without returning its value", () => {
+    const parsed = validateDestinationQueueMessage({
+      ...MESSAGE,
+      r2_key: "events/ws_victim/2026-08-26/evt_contract_1",
+    });
+
+    expect(parsed).toEqual({
+      ok: false,
+      code: "invalid_field",
+      field: "r2_key",
+    });
+    expect(JSON.stringify(parsed)).not.toContain("ws_victim");
+  });
+
+  it("accepts a canonical pull key and rejects a different pull source", () => {
+    const pullKey = "pull/ws_contract/src_contract/customers/evt_contract_1.json";
+    expect(validateDestinationQueueMessage({
+      ...MESSAGE,
+      r2_key: pullKey,
+    }).ok).toBe(true);
+    expect(validateDestinationQueueMessage({
+      ...MESSAGE,
+      r2_key: "pull/ws_contract/src_other/customers/evt_contract_1.json",
+    })).toEqual({
+      ok: false,
+      code: "invalid_field",
+      field: "r2_key",
+    });
   });
 });

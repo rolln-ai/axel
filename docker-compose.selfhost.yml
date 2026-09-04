@@ -6,11 +6,8 @@ x-control-plane-env: &control-plane-env
   # dashboard uses this capability marker to disable controls that would only
   # change configuration without deleting the corresponding R2 bytes.
   AXEL_SELF_HOST_PROFILE: small
-  DATABASE_URL: postgres://axel:${POSTGRES_PASSWORD}@postgres:5432/axel?sslmode=disable
   DATABASE_POOL_MAX: "10"
   CREDENTIALS_MASTER_KEY: ${CREDENTIALS_MASTER_KEY}
-  DELIVERY_SHARED_SECRET: ${DELIVERY_SHARED_SECRET}
-  SOURCE_LOOKUP_SHARED_SECRET: ${SOURCE_LOOKUP_SHARED_SECRET}
   INGEST_ADMIN_TOKEN: ${INGEST_ADMIN_TOKEN}
   AXEL_INGEST_URL: ${NEXT_PUBLIC_AXEL_INGEST_URL}
   NEXT_PUBLIC_AXEL_INGEST_URL: ${NEXT_PUBLIC_AXEL_INGEST_URL}
@@ -21,12 +18,13 @@ x-control-plane-env: &control-plane-env
 
 services:
   postgres:
-    image: postgres:16
+    image: postgres:16@sha256:f1c3376c26f2609ab9f29f71f824103fe2fcd8ee0346485cb6122a4f93df6f94
     restart: unless-stopped
     environment:
       POSTGRES_USER: axel
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?POSTGRES_ADMIN_PASSWORD is required}
       POSTGRES_DB: axel
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
     volumes:
       - selfhost_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -37,21 +35,25 @@ services:
     networks: [backend]
 
   migrate:
-    image: postgres:16
+    image: axel-selfhost-migration:local
+    build:
+      context: .
+      target: migration
     restart: "no"
-    user: postgres
+    user: node
+    read_only: true
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
-    working_dir: /workspace
-    command: ["/workspace/scripts/run-migrations.sh"]
+    working_dir: /app
+    command: ["bash", "/app/scripts/self-host/run-database-setup.sh"]
     environment:
-      DATABASE_URL: postgres://axel:${POSTGRES_PASSWORD}@postgres:5432/axel?sslmode=disable
-      PGSSLMODE: disable
-    volumes:
-      - ./scripts/run-migrations.sh:/workspace/scripts/run-migrations.sh:ro
-      - ./infra/postgres/schema.sql:/workspace/infra/postgres/schema.sql:ro
-      - ./infra/postgres/migrations:/workspace/infra/postgres/migrations:ro
+      DATABASE_ADMIN_URL: postgresql://axel:${POSTGRES_ADMIN_PASSWORD:?POSTGRES_ADMIN_PASSWORD is required}@postgres:5432/axel?sslmode=disable
+      DATABASE_MIGRATION_URL: postgresql://axel_migration:${POSTGRES_MIGRATION_PASSWORD:?POSTGRES_MIGRATION_PASSWORD is required}@postgres:5432/axel?sslmode=disable
+      DATABASE_DASHBOARD_URL: postgresql://axel_dashboard_app:${POSTGRES_DASHBOARD_PASSWORD:?POSTGRES_DASHBOARD_PASSWORD is required}@postgres:5432/axel?sslmode=disable
+      DATABASE_DELIVERY_URL: postgresql://axel_delivery_app:${POSTGRES_DELIVERY_PASSWORD:?POSTGRES_DELIVERY_PASSWORD is required}@postgres:5432/axel?sslmode=disable
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
     depends_on:
       postgres:
         condition: service_healthy
@@ -72,6 +74,7 @@ services:
         NEXT_PUBLIC_AXEL_DELIVERY_URL: ${AXEL_DELIVERY_PUBLIC_URL}
     environment:
       <<: *control-plane-env
+      DATABASE_URL: postgresql://axel_dashboard_app:${POSTGRES_DASHBOARD_PASSWORD:?POSTGRES_DASHBOARD_PASSWORD is required}@postgres:5432/axel?sslmode=disable
       # Dashboard code deliberately does not read CLOUDFLARE_API_TOKEN, so a
       # provisioning/Worker-deployment token cannot be used accidentally.
       CLOUDFLARE_R2_API_TOKEN: ${CLOUDFLARE_RUNTIME_API_TOKEN:?CLOUDFLARE_RUNTIME_API_TOKEN is required}
@@ -102,11 +105,16 @@ services:
       target: delivery
     environment:
       <<: *control-plane-env
+      DATABASE_URL: postgresql://axel_delivery_app:${POSTGRES_DELIVERY_PASSWORD:?POSTGRES_DELIVERY_PASSWORD is required}@postgres:5432/axel?sslmode=disable
       # The delivery service needs Queue plus R2 runtime access. This legacy
       # variable name is confined to the delivery container.
       CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_RUNTIME_API_TOKEN:?CLOUDFLARE_RUNTIME_API_TOKEN is required}
       PORT: "10000"
       DELIVERY_ROLE: all
+      DELIVERY_SHARED_SECRET: ${DELIVERY_SHARED_SECRET}
+      DELIVERY_SHARED_SECRET_PREVIOUS: ${DELIVERY_SHARED_SECRET_PREVIOUS:-}
+      SOURCE_LOOKUP_SHARED_SECRET: ${SOURCE_LOOKUP_SHARED_SECRET}
+      SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS: ${SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS:-}
       DELIVERY_QUEUE_ID: ${DELIVERY_QUEUE_ID}
       EDGE_DELIVERY_QUEUE_ID: ${DELIVERY_QUEUE_ID}
       INGEST_ADMIN_TOKEN: ${INGEST_ADMIN_TOKEN}
@@ -141,7 +149,7 @@ services:
     networks: [backend]
 
   caddy:
-    image: caddy:2.10-alpine
+    image: caddy:2.10-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true

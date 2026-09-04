@@ -1,15 +1,15 @@
 ---
 title: Privacy Policy
 slug: privacy
-version: "1.0"
+version: "1.1"
 effectiveDate: "2026-06-04"
-lastUpdated: "2026-07-31"
+lastUpdated: "2026-08-27"
 summary: How rolln, Inc. collects, uses, shares, and protects the personal data of Axel account holders, authorized users, and website visitors — and how to exercise your privacy rights.
 ---
 
 # Privacy Policy
 
-**Version 1.0 — Effective 2026-06-04. Last updated 2026-07-31.**
+**Version 1.1. Effective 2026-06-04. Last updated 2026-08-27.**
 
 This Privacy Policy explains how **rolln, Inc.** ("**rolln**", "**we**", "**us**", or "**our**") collects, uses, discloses, and otherwise processes **Personal Data** about people who create and administer accounts for the **Axel** webhook-ingestion service ("**Axel**" or the "**Service**"), people permitted to use the Service on a Customer's behalf, and people who visit our websites.
 
@@ -69,7 +69,7 @@ When you contact us (e.g., via **founders@axelapp.ai**, **security@axelapp.ai**,
 
 ### 3.6 Cookies and Similar Technologies
 
-We use a small number of cookies and similar technologies, primarily an **essential session cookie** to keep you signed in and to secure your session, and a **non-essential product-analytics cookie and associated device storage set via PostHog** to understand how Authorized Users use the dashboard so we can improve it. Once you sign in, PostHog associates dashboard activity with your Authorized User account (email, name) and your Workspace. Where the law requires it (notably under the EU ePrivacy Directive / GDPR and the UK PECR), the analytics cookie is set only with your prior, informed consent. See Section 12 and our [Cookie Policy](https://axelapp.ai/cookies) for details.
+We use a small number of cookies and similar technologies, primarily an **essential session cookie** to keep you signed in and secure your session. Axel does not load product-analytics or advertising tracking scripts. See Section 10 and our [Cookie Policy](https://axelapp.ai/cookies) for details.
 
 We do **not** intentionally collect special categories of personal data (such as health, biometric, or political-opinion data) about account holders, Authorized Users, or visitors as part of operating the Service.
 
@@ -83,7 +83,6 @@ We use the Personal Data described above for the following purposes:
 - **Transactional email** — to send service messages such as password resets, member invitations, and important account or security notifications, delivered through **Resend**.
 - **Product and service communications** — to send you administrative notices, changes to our terms or policies, and (where permitted) information about features and updates. You can opt out of non-essential product communications at any time; we will still send essential transactional and service messages.
 - **Monitoring, debugging, and reliability** — to detect, diagnose, and fix errors and performance issues, including through error monitoring with **Sentry**, which may incidentally capture request metadata.
-- **Product analytics and improvement** — to understand how Authorized Users interact with the dashboard so we can measure feature usage and improve the product, using **PostHog**. Once you sign in, PostHog associates dashboard activity with your Authorized User account (email, name) and your Workspace. We use PostHog only as a first-party product-analytics tool for our own product improvement; we do not use it for cross-context behavioral advertising. Where the law requires consent for the associated analytics cookie and device storage (see Sections 3.6, 10, and the [Cookie Policy](https://axelapp.ai/cookies)), this processing occurs only after you give prior consent.
 - **Security, fraud, and abuse prevention** — to maintain audit logs, investigate suspected misuse or violations of our [Acceptable Use Policy](https://axelapp.ai/acceptable-use), apply rate limits, and protect rolln, our Customers, and others.
 - **Legal and compliance** — to comply with applicable laws, respond to lawful requests and legal process, enforce our agreements, and establish, exercise, or defend legal claims.
 - **Business operations and improvement** — to understand how the Service is used in aggregate, maintain records, and improve and develop the Service.
@@ -103,7 +102,6 @@ If you are in the European Economic Area, the United Kingdom, or Switzerland, we
 | Transactional email (password resets, invites, service notices) | **Performance of a contract** (Art. 6(1)(b)); **legitimate interests** (Art. 6(1)(f)) in operating the Service |
 | Security, audit logging, fraud and abuse prevention | **Legitimate interests** (Art. 6(1)(f)) in keeping the Service and our users safe and secure |
 | Error monitoring, debugging, reliability, and product improvement (using controller Personal Data and aggregated, de-identified data only, never the contents of Customer Data except as permitted by the DPA) | **Legitimate interests** (Art. 6(1)(f)) in providing a reliable, well-functioning Service |
-| Product analytics via PostHog (dashboard usage associated with the Authorized User's account and Workspace) | **Consent** (Art. 6(1)(a)) where the analytics cookie/device storage requires it under the ePrivacy Directive / PECR; **legitimate interests** (Art. 6(1)(f)) in measuring and improving the Service elsewhere, subject to opt-out |
 | Non-essential product/marketing communications | **Consent** (Art. 6(1)(a)) where required, or **legitimate interests** (Art. 6(1)(f)) for B2B updates, subject to opt-out |
 | Essential session cookie | **Legitimate interests** (Art. 6(1)(f)) / strictly necessary; consent not required |
 | Responding to legal requests and complying with law | **Legal obligation** (Art. 6(1)(c)); **legitimate interests** (Art. 6(1)(f)) in defending claims |
@@ -116,7 +114,7 @@ We do not sell your Personal Data. We share it only as described below.
 
 ### 6.1 Sub-processors and Service Providers
 
-We use a small set of trusted **Sub-processors** to provide the Service. They process Personal Data on our behalf, under contract, only for the purposes we specify. Our current Sub-processors include Cloudflare (edge ingest, object storage, queues), Render (application compute, control database, analytics/log database), Vercel (hosting for our dashboard and marketing site), Stripe (billing and payments), Resend (transactional email), Sentry (error and performance monitoring), and PostHog (PostHog Inc., US — product analytics for the customer dashboard).
+We use a small set of trusted **Sub-processors** to provide the Service. They process Personal Data on our behalf, under contract, only for the purposes we specify. Our current Sub-processors include Cloudflare (edge ingest, object storage, queues), Render (application compute, control database, analytics/log database), Vercel (hosting for our dashboard and marketing site), Stripe (billing and payments), Resend (transactional email), and Sentry (error and performance monitoring).
 
 The current, authoritative list — with each provider's role and the categories of data involved — is maintained on our [Sub-processors](https://axelapp.ai/subprocessors) page.
 
@@ -172,7 +170,7 @@ This subsection concerns Personal Data for which rolln is the controller. Our ha
 
 ## 10. Cookies and Similar Technologies
 
-We use a minimal set of cookies, primarily an **essential session cookie** that keeps you signed in and protects your session. Because it is strictly necessary to provide the Service, this cookie does not require consent. We also use a **non-essential product-analytics cookie and device storage via PostHog** to measure dashboard usage and improve the product; where the law requires it, this analytics cookie is set only with your prior, informed consent, and you can decline or withdraw consent without affecting your ability to use the Service. For a full description of the cookies and similar technologies we use, their purposes, and how to manage them, see our [Cookie Policy](https://axelapp.ai/cookies).
+We use a minimal set of cookies, primarily an **essential session cookie** that keeps you signed in and protects your session. Because it is strictly necessary to provide the Service, this cookie does not require consent. Axel does not load product-analytics or advertising tracking scripts. For a full description of the cookies and similar technologies we use, their purposes, and how to manage them, see our [Cookie Policy](https://axelapp.ai/cookies).
 
 ## 11. Your Privacy Rights
 

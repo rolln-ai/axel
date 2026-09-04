@@ -49,8 +49,46 @@ export interface NotificationScanSummary {
   alerts_emailed: number;
   recipients_emailed: number;
   ledger_rows_reconciled: number;
-  errors: Array<{ workspace_id: string; message: string }>;
+  errors: Array<{ code: NotificationScanErrorCode }>;
   duration_ms: number;
+}
+
+export type NotificationScanErrorCode =
+  | "alert_send_failed"
+  | "workspace_scan_failed"
+  | "transient_dependency";
+
+export interface PublicNotificationScanSummary {
+  workspaces_scanned: number;
+  new_errors_detected: number;
+  alerts_emailed: number;
+  recipients_emailed: number;
+  ledger_rows_reconciled: number;
+  error_count: number;
+  error_counts: Record<NotificationScanErrorCode, number>;
+  duration_ms: number;
+}
+
+/** Project the cron result to aggregate, identifier-free response data. */
+export function publicNotificationScanSummary(
+  summary: NotificationScanSummary,
+): PublicNotificationScanSummary {
+  const errorCounts: Record<NotificationScanErrorCode, number> = {
+    alert_send_failed: 0,
+    workspace_scan_failed: 0,
+    transient_dependency: 0,
+  };
+  for (const error of summary.errors) errorCounts[error.code] += 1;
+  return {
+    workspaces_scanned: summary.workspaces_scanned,
+    new_errors_detected: summary.new_errors_detected,
+    alerts_emailed: summary.alerts_emailed,
+    recipients_emailed: summary.recipients_emailed,
+    ledger_rows_reconciled: summary.ledger_rows_reconciled,
+    error_count: summary.errors.length,
+    error_counts: errorCounts,
+    duration_ms: summary.duration_ms,
+  };
 }
 
 export interface NotificationScanDeps {
@@ -151,8 +189,9 @@ export async function runNotificationScan(
             emailed = true;
           } catch (err) {
             summary.errors.push({
-              workspace_id: workspaceId,
-              message: `immediate alert send failed (falls back to digest): ${err instanceof Error ? err.message : String(err)}`,
+              code: shouldReportNotificationScanError(err)
+                ? "alert_send_failed"
+                : "transient_dependency",
             });
           }
         }
@@ -181,8 +220,9 @@ export async function runNotificationScan(
       }
     } catch (err) {
       summary.errors.push({
-        workspace_id: workspaceId,
-        message: err instanceof Error ? err.message : String(err),
+        code: shouldReportNotificationScanError(err)
+          ? "workspace_scan_failed"
+          : "transient_dependency",
       });
     }
   }

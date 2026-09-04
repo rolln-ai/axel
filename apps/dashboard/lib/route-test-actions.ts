@@ -104,7 +104,7 @@ export async function testRouteAgainstRecentEvents(
   }
 
   if (!usageEnabled()) {
-    return { error: "ClickHouse is not configured on the dashboard, so recent events can't be queried." };
+    return { error: "Recent event data is unavailable for this deployment." };
   }
 
   let recent: RecentEventRow[] = [];
@@ -129,8 +129,8 @@ export async function testRouteAgainstRecentEvents(
       { workspace_id: workspaceId, source_id: sourceId, limit: RECENT_EVENT_LIMIT },
     );
     recent = result.rows;
-  } catch (err) {
-    return { error: err instanceof Error ? err.message : "ClickHouse query failed." };
+  } catch {
+    return { error: "Recent event data is temporarily unavailable." };
   }
 
   // Bounded parallelism — the R2 fetches dominate latency, so issue
@@ -140,7 +140,11 @@ export async function testRouteAgainstRecentEvents(
     recent.map(async (event): Promise<TestRouteResult> => {
       let payloadBefore: unknown;
       try {
-        payloadBefore = await fetchPayloadForR2Key(event.r2_key);
+        payloadBefore = await fetchPayloadForR2Key(event.r2_key, {
+          workspaceId,
+          eventId: event.event_id,
+          sourceId,
+        });
       } catch {
         payloadBefore = null;
       }
@@ -152,7 +156,7 @@ export async function testRouteAgainstRecentEvents(
           payload_after: null,
           deliveries: [],
           skipped: false,
-          error: { reason: "r2_fetch_failed", message: "Could not load the raw payload from R2." },
+          error: { reason: "r2_fetch_failed", message: "Could not load the event payload." },
         };
       }
 
@@ -200,7 +204,6 @@ export async function testRouteAgainstRecentEvents(
         };
       } catch (err) {
         const reason = err instanceof RouteEngineError ? err.reason : "engine_error";
-        const message = err instanceof Error ? err.message : String(err);
         return {
           event_id: event.event_id,
           received_at: event.received_at,
@@ -208,7 +211,12 @@ export async function testRouteAgainstRecentEvents(
           payload_after: null,
           deliveries: [],
           skipped: false,
-          error: { reason, message: message.slice(0, 400) },
+          error: {
+            reason,
+            message: err instanceof RouteEngineError
+              ? "Route evaluation failed. Check the route configuration."
+              : "Route evaluation failed.",
+          },
         };
       }
     }),

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   checkRateLimit,
-  checkRulesFailOpen,
+  checkRulesFailClosed,
   createMemoryRateLimitStore,
   createPgRateLimitStore,
   type RateLimitStore,
@@ -38,22 +38,37 @@ describe("rate-limit", () => {
     });
   });
 
-  describe("checkRulesFailOpen", () => {
+  describe("checkRulesFailClosed", () => {
     it("returns the first breached rule", async () => {
       const store = createMemoryRateLimitStore();
-      expect(await checkRulesFailOpen(store, [["k", 1, 60_000]], 0)).toBeNull(); // count 1, ok
-      const breach = await checkRulesFailOpen(store, [["k", 1, 60_000]], 0); // count 2, over
+      expect(await checkRulesFailClosed(store, [["k", 1, 60_000]], 0)).toBeNull(); // count 1, ok
+      const breach = await checkRulesFailClosed(store, [["k", 1, 60_000]], 0); // count 2, over
       expect(breach?.ok).toBe(false);
     });
 
-    it("fails OPEN (allows) when the store throws", async () => {
+    it("fails closed without logging the store exception", async () => {
       const spy = vi.spyOn(console, "error").mockImplementation(() => {});
       const throwingStore: RateLimitStore = {
         async hit() {
-          throw new Error("relation auth_rate_limits does not exist");
+          throw new Error(
+            "relation auth_rate_limits does not exist for victim@example.test",
+          );
         },
       };
-      expect(await checkRulesFailOpen(throwingStore, [["k", 1, 60_000]], 0)).toBeNull();
+      await expect(
+        checkRulesFailClosed(throwingStore, [["k", 1, 60_000]], 0),
+      ).resolves.toEqual({
+        ok: false,
+        count: 1,
+        limit: 0,
+        retryAfterSeconds: 60,
+      });
+      expect(spy).toHaveBeenCalledWith(
+        "[rate-limit] check failed — blocking request",
+      );
+      expect(JSON.stringify(spy.mock.calls)).not.toContain(
+        "victim@example.test",
+      );
       spy.mockRestore();
     });
   });

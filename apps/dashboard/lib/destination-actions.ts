@@ -34,6 +34,16 @@ export async function createDestination(_state: ActionState, formData: FormData)
     const name = formValue(formData, "name");
     const values = readDestinationValues(formData, type);
 
+    const nameError = entityNameError(name);
+    if (nameError) return { error: nameError };
+
+    for (const field of schemaFor(type).fields) {
+      if (field.required === false) continue;
+      if (!values[field.key]?.trim()) {
+        return { error: `Missing required field: ${field.label}.` };
+      }
+    }
+
     const validationError = validateDestinationValues(type, values);
     if (validationError) return { error: validationError };
 
@@ -97,8 +107,8 @@ export async function createDestination(_state: ActionState, formData: FormData)
       // for the non-secret path.
       return {
         notice: generatedWebhookSecret
-          ? `Webhook destination created (${result.destinationId}). Copy the signing secret below — it won't be shown again.`
-          : `Destination created (${result.destinationId}).${fingerprintNote}`,
+          ? "Webhook destination created. Copy the signing secret below. It won't be shown again."
+          : `Destination created.${fingerprintNote}`,
         ...(generatedWebhookSecret
           ? { data: { webhookSigningSecret: generatedWebhookSecret, destinationId: result.destinationId } }
           : {}),
@@ -107,12 +117,12 @@ export async function createDestination(_state: ActionState, formData: FormData)
       if (isUniqueViolation(err, "destinations")) {
         return { error: "A destination with that name already exists in this workspace." };
       }
-      if (err instanceof Error) {
-        if (err.message === "CREDENTIALS_MASTER_KEY is not set" || err.message.startsWith("CREDENTIALS_MASTER_KEY")) {
-          return { error: "Server is missing the credentials master key. Ask the operator to set CREDENTIALS_MASTER_KEY." };
-        }
-        // Validation errors propagate their human message.
-        return { error: err.message };
+      if (
+        err instanceof Error &&
+        (err.message === "CREDENTIALS_MASTER_KEY is not set" ||
+          err.message.startsWith("CREDENTIALS_MASTER_KEY"))
+      ) {
+        return { error: "Secure credential storage is unavailable. Contact the operator." };
       }
       return { error: "Could not create the destination. Try again." };
     }
@@ -195,7 +205,7 @@ export async function rotateDestinationCredentials(
       if (err instanceof Error && err.message === "no_secrets_to_rotate") {
         return { error: "This destination type doesn't have any rotatable credentials." };
       }
-      return { error: err instanceof Error ? err.message : "Could not rotate the credential." };
+      return { error: "Could not rotate the credential. Try again." };
     }
   });
 }
@@ -422,7 +432,7 @@ export async function destinationCircuitAction(_state: ActionState, formData: Fo
               AND read_at IS NULL`,
           [workspaceId, `breaker_open:${destinationId}`],
         )
-        .catch((err) => console.error("[circuit] notification resolve failed", err));
+        .catch(() => console.error("[circuit] notification resolve failed"));
     }
     tags("destinations");
     return { notice: `Circuit breaker ${action} applied.` };

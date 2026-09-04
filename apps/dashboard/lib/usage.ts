@@ -1,6 +1,7 @@
 import "server-only";
 import { unstable_cache } from "next/cache";
 import { cache } from "react";
+import { sanitizeDeliveryAttemptResponseForStorage } from "@axel/shared";
 import type { ClickhouseQueryable } from "./clickhouse";
 import { clickhouse, hasClickhouseUrl } from "./clickhouse";
 import {
@@ -8,8 +9,9 @@ import {
   TERMINAL_FAILURE_PREDICATE,
   latestOutcomesCTE,
 } from "./clickhouse-fragments";
-import { cacheTags } from "./repositories";
+import { cacheTags, workspaceCacheScope } from "./repositories";
 import { addDaysToDateKey, localDateKey, normalizeWorkspaceTimezone } from "./timezones";
+import { publicDeliveryErrorCode } from "./public-delivery-response";
 
 /**
  * Usage data is sourced from ClickHouse and aggregates ingest events / delivery
@@ -805,9 +807,9 @@ export interface EventDetailRow {
   size_bytes: number;
   shard: number;
   r2_key: string;
-  /** Headers captured at ingest time, parsed from the events.headers_json column. */
+  /** Reserved value-free request metadata map. */
   headers: Record<string, string>;
-  /** Query-string params (token stripped) captured at ingest time. */
+  /** Reserved value-free query metadata map. */
   query: Record<string, string>;
 }
 
@@ -833,13 +835,10 @@ export async function getEventDetail(
     size_bytes: string | number;
     shard: string | number;
     r2_key: string;
-    headers_json: string;
-    query_json: string;
   }>(
     `SELECT event_id, source_id, workspace_id,
             toString(received_at) AS received_at,
-            content_type, size_bytes, shard, r2_key,
-            headers_json, query_json
+            content_type, size_bytes, shard, r2_key
        FROM events
       WHERE workspace_id = {workspace_id:String}
         AND event_id = {event_id:String}
@@ -858,8 +857,8 @@ export async function getEventDetail(
     size_bytes: ROW_CAST.toNumber(row.size_bytes),
     shard: ROW_CAST.toNumber(row.shard),
     r2_key: row.r2_key,
-    headers: safeParseJson<Record<string, string>>(row.headers_json) ?? {},
-    query: safeParseJson<Record<string, string>>(row.query_json) ?? {},
+    headers: {},
+    query: {},
   };
 }
 
@@ -933,7 +932,7 @@ export async function listDeliveryAttemptsForEvent(
     attempt_no: ROW_CAST.toNumber(row.attempt_no),
     status: row.status,
     latency_ms: ROW_CAST.toNumber(row.latency_ms),
-    response: safeParseJson<DeliveryAttemptRow["response"]>(row.response_json) ?? {},
+    response: safeDeliveryAttemptResponse(row.response_json),
     created_at: row.created_at,
   }));
 }
@@ -992,7 +991,7 @@ export async function listWorkspaceDeliveryAttempts(
     attempt_no: ROW_CAST.toNumber(row.attempt_no),
     status: row.status,
     latency_ms: ROW_CAST.toNumber(row.latency_ms),
-    response: safeParseJson<DeliveryAttemptRow["response"]>(row.response_json) ?? {},
+    response: safeDeliveryAttemptResponse(row.response_json),
     created_at: row.created_at,
   }));
 }
@@ -1004,6 +1003,28 @@ function safeParseJson<T>(raw: string | null | undefined): T | null {
   } catch {
     return null;
   }
+}
+
+function safeDeliveryAttemptResponse(raw: string | null | undefined): DeliveryAttemptRow["response"] {
+  const parsed = sanitizeDeliveryAttemptResponseForStorage(
+    safeParseJson<DeliveryAttemptRow["response"]>(raw) ?? {},
+  ) as DeliveryAttemptRow["response"];
+  const response: DeliveryAttemptRow["response"] = {};
+  if (typeof parsed.destination_type === "string" && /^[a-z][a-z0-9_]{0,31}$/.test(parsed.destination_type)) {
+    response.destination_type = parsed.destination_type;
+  }
+  if (
+    typeof parsed.http_status === "number" &&
+    Number.isInteger(parsed.http_status) &&
+    parsed.http_status >= 100 &&
+    parsed.http_status <= 599
+  ) {
+    response.http_status = parsed.http_status;
+  }
+  if (typeof parsed.error === "string" && parsed.error.trim()) {
+    response.error = publicDeliveryErrorCode(parsed.error) ?? "delivery_failed";
+  }
+  return response;
 }
 
 // --- Per-route delivery stats (powers the routes canvas) ------------------- //
@@ -1262,7 +1283,7 @@ function failureTypeFromResponse(
 ): string {
   const error = response["error"];
   if (typeof error === "string" && error.trim().length > 0) {
-    return humanizeFailureType(error);
+    return humanizeFailureType(publicDeliveryErrorCode(error) ?? "delivery_failed");
   }
 
   const httpStatus = response["http_status"];
@@ -1291,9 +1312,10 @@ export const getDailyUsageCached = cache(function getDailyUsageCached(
   timezone = "UTC",
 ): Promise<DailyUsageRow[]> {
   const normalizedTimezone = normalizeWorkspaceTimezone(timezone);
+  const scope = workspaceCacheScope(workspaceId);
   return unstable_cache(
     () => getDailyUsage(workspaceId, days, { timezone: normalizedTimezone }),
-    ["daily-usage", workspaceId, String(days), normalizedTimezone],
+    ["daily-usage", scope, String(days), normalizedTimezone],
     { tags: [cacheTags.metrics(workspaceId)], revalidate: USAGE_REVALIDATE_SECONDS },
   )();
 });
@@ -1304,17 +1326,19 @@ export const getDailyDeliveryStatsCached = cache(function getDailyDeliveryStatsC
   timezone = "UTC",
 ): Promise<DailyDeliveryRow[]> {
   const normalizedTimezone = normalizeWorkspaceTimezone(timezone);
+  const scope = workspaceCacheScope(workspaceId);
   return unstable_cache(
     () => getDailyDeliveryStats(workspaceId, days, { timezone: normalizedTimezone }),
-    ["daily-delivery", workspaceId, String(days), normalizedTimezone],
+    ["daily-delivery", scope, String(days), normalizedTimezone],
     { tags: [cacheTags.metrics(workspaceId)], revalidate: USAGE_REVALIDATE_SECONDS },
   )();
 });
 
 export function listSourceUsageCached(workspaceId: string): Promise<SourceUsageRow[]> {
+  const scope = workspaceCacheScope(workspaceId);
   return unstable_cache(
     () => listSourceUsage(workspaceId),
-    ["source-usage", workspaceId],
+    ["source-usage", scope],
     { tags: [cacheTags.metrics(workspaceId), cacheTags.sources(workspaceId)], revalidate: USAGE_REVALIDATE_SECONDS },
   )();
 }
@@ -1322,9 +1346,10 @@ export function listSourceUsageCached(workspaceId: string): Promise<SourceUsageR
 export function getSourceEventCountsByWindowCached(
   workspaceId: string,
 ): Promise<SourceEventCounts[]> {
+  const scope = workspaceCacheScope(workspaceId);
   return unstable_cache(
     () => getSourceEventCountsByWindow(workspaceId),
-    ["source-event-counts-windows", workspaceId],
+    ["source-event-counts-windows", scope],
     { tags: [cacheTags.metrics(workspaceId), cacheTags.sources(workspaceId)], revalidate: USAGE_REVALIDATE_SECONDS },
   )();
 }

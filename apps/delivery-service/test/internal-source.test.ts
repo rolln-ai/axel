@@ -4,7 +4,9 @@ import { sourceSigningSecretAadString } from "@axel/shared";
 import {
   handleInternalSourceRequest,
   isInternalSecretAuthorized,
+  isRotatingInternalSecretAuthorized,
   loadInternalSource,
+  resolveDeliveryAuthSecrets,
   resolveInternalSourceAuthSecrets,
   type InternalSourceRow,
   type SourceLookupPool,
@@ -13,6 +15,7 @@ import {
 const SOURCE_LOOKUP_SECRET = "source-lookup-test-secret"; // gitleaks:allow
 const PREVIOUS_SOURCE_LOOKUP_SECRET = "previous-source-lookup-test-secret"; // gitleaks:allow
 const DELIVERY_SHARED_SECRET = "delivery-shared-test-secret"; // gitleaks:allow
+const PREVIOUS_DELIVERY_SHARED_SECRET = "previous-delivery-shared-test-secret"; // gitleaks:allow
 const MASTER_KEY = Buffer.from(
   "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
   "hex",
@@ -84,6 +87,26 @@ describe("POST /internal/source", () => {
       current: DELIVERY_SHARED_SECRET,
       previous: "",
       usingDeliveryFallback: true,
+    });
+  });
+
+  it("inherits the delivery overlap only while using the bootstrap fallback", () => {
+    expect(resolveInternalSourceAuthSecrets({
+      DELIVERY_SHARED_SECRET,
+      DELIVERY_SHARED_SECRET_PREVIOUS: PREVIOUS_DELIVERY_SHARED_SECRET,
+    })).toEqual({
+      current: DELIVERY_SHARED_SECRET,
+      previous: PREVIOUS_DELIVERY_SHARED_SECRET,
+      usingDeliveryFallback: true,
+    });
+    expect(resolveInternalSourceAuthSecrets({
+      DELIVERY_SHARED_SECRET,
+      DELIVERY_SHARED_SECRET_PREVIOUS: PREVIOUS_DELIVERY_SHARED_SECRET,
+      SOURCE_LOOKUP_SHARED_SECRET: SOURCE_LOOKUP_SECRET,
+    })).toEqual({
+      current: SOURCE_LOOKUP_SECRET,
+      previous: "",
+      usingDeliveryFallback: false,
     });
   });
 
@@ -248,5 +271,16 @@ describe("internal shared-secret comparison", () => {
     expect(isInternalSecretAuthorized(["same-secret"], "same-secret")).toBe(false);
     expect(isInternalSecretAuthorized(undefined, "same-secret")).toBe(false);
     expect(isInternalSecretAuthorized("", "")).toBe(false);
+  });
+
+  it("accepts current and previous delivery credentials only during overlap", () => {
+    const secrets = resolveDeliveryAuthSecrets({
+      DELIVERY_SHARED_SECRET,
+      DELIVERY_SHARED_SECRET_PREVIOUS: PREVIOUS_DELIVERY_SHARED_SECRET,
+    });
+    expect(isRotatingInternalSecretAuthorized(DELIVERY_SHARED_SECRET, secrets)).toBe(true);
+    expect(isRotatingInternalSecretAuthorized(PREVIOUS_DELIVERY_SHARED_SECRET, secrets)).toBe(true);
+    expect(isRotatingInternalSecretAuthorized("unreviewed-secret", secrets)).toBe(false);
+    expect(isRotatingInternalSecretAuthorized([DELIVERY_SHARED_SECRET], secrets)).toBe(false);
   });
 });

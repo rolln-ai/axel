@@ -33,8 +33,10 @@ export async function logEventToClickhouse(
     // is_test, and omitting the field let the ClickHouse column default apply
     // instead of the message's value (drift from the ingest-worker writer).
     is_test: message.is_test === true,
-    headers_json: JSON.stringify(message.headers ?? {}),
-    query_json: JSON.stringify(message.query ?? {}),
+    // Pull record metadata may contain customer identifiers. Analytics keeps
+    // only the dedicated bounded scalar columns, never request-style maps.
+    headers_json: "{}",
+    query_json: "{}",
     event_type: message.event_type ?? "",
   };
 

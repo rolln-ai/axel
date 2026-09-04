@@ -36,7 +36,7 @@ function safeStringify(value: unknown): string {
   if (value === undefined) return "undefined";
   try {
     return JSON.stringify(value, null, 2);
-  } catch (err) {
-    return `// could not stringify: ${err instanceof Error ? err.message : String(err)}`;
+  } catch {
+    return "// could not display this value";
   }
 }

@@ -40,8 +40,10 @@ export async function logEventToClickhouse(
     size_bytes: message.size_bytes,
     shard: message.shard,
     is_test: message.is_test === true,
-    headers_json: JSON.stringify(message.headers ?? {}),
-    query_json: JSON.stringify(message.query ?? {}),
+    // Defense in depth for rolling upgrades and callers outside public ingest:
+    // request metadata values are never part of the analytics boundary.
+    headers_json: "{}",
+    query_json: "{}",
     // '' default matches the LowCardinality(String) DEFAULT '' column, so an
     // older producer that omits the field still inserts cleanly.
     event_type: message.event_type ?? "",

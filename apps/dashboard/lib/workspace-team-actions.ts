@@ -71,8 +71,8 @@ export async function createWorkspace(_state: ActionState, formData: FormData): 
       });
       return nextWorkspaceId;
     });
-  } catch (err) {
-    console.error("[createWorkspace] transaction failed:", err);
+  } catch {
+    console.error("[createWorkspace] transaction failed");
     return { error: "Could not create the workspace. Try again." };
   }
 
@@ -137,8 +137,8 @@ export async function updateWorkspaceSettings(_state: ActionState, formData: For
           },
         }, client);
       });
-    } catch (err) {
-      console.error("[updateWorkspaceSettings] failed:", err);
+    } catch {
+      console.error("[updateWorkspaceSettings] failed");
       return { error: "Could not update workspace settings. Try again." };
     }
 
@@ -175,8 +175,8 @@ export async function updateNotificationPreferencesAction(
       targetId: session.user.id,
       metadata: update,
     });
-  } catch (err) {
-    console.error("[updateNotificationPreferencesAction] failed:", err);
+  } catch {
+    console.error("[updateNotificationPreferencesAction] failed");
     return { error: "Could not save notification settings. Try again." };
   }
   return { notice: "Notification settings saved." };
@@ -249,7 +249,7 @@ export async function inviteMember(_state: ActionState, formData: FormData): Pro
     });
     const sent = await sendEmail({ to: email, subject, html, text });
     if (!sent.ok) {
-      console.error("[inviteMember] invite email failed:", sent.error);
+      console.error("[inviteMember] invite email failed");
       // Email failed (e.g. RESEND_API_KEY unset) — still surface the absolute link
       // so the inviter can share it manually rather than being stuck.
       return { notice: `Invite created, but the email couldn't be sent. Share this link: ${link}` };

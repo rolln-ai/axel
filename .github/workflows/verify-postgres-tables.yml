@@ -1,15 +1,13 @@
 name: Verify Postgres tables
 
-# Ad-hoc verifier for "does table X exist in prod and have row Y" kinds
-# of questions. Read-only — runs `to_regclass` + COUNT(*) and exits.
-# Useful when triaging stale Sentry "relation X does not exist" reports
-# without needing a psql shell to prod.
+# Ad-hoc verifier for table-existence questions. The credential has catalog
+# visibility but no application-row privilege; row data is never queried.
 
 on:
   workflow_dispatch:
     inputs:
       tables:
-        description: Comma-separated unqualified table names (e.g. `data_contracts,event_maps`)
+        description: Comma-separated unqualified table names, such as data_contracts,event_maps
         required: true
         default: data_contracts
 
@@ -22,26 +20,53 @@ jobs:
     name: Verify
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     environment: Production
     permissions:
       contents: read
+    env:
+      DATABASE_SERVICE_REQUIRE_FINAL_STATE: ${{ vars.DATABASE_SERVICE_REQUIRE_FINAL_STATE }}
+      DATABASE_LEGACY_RUNTIME_CAPABILITY_ROLE: ${{ vars.DATABASE_LEGACY_RUNTIME_CAPABILITY_ROLE }}
+      DATABASE_LEGACY_RUNTIME_LOGIN_ROLES: ${{ vars.DATABASE_LEGACY_RUNTIME_LOGIN_ROLES }}
+      DATABASE_DASHBOARD_CAPABILITY_ROLE: ${{ vars.DATABASE_DASHBOARD_CAPABILITY_ROLE }}
+      DATABASE_DASHBOARD_LOGIN_ROLE: ${{ vars.DATABASE_DASHBOARD_LOGIN_ROLE }}
+      DATABASE_DASHBOARD_EXISTING_LOGIN_ROLES: ${{ vars.DATABASE_DASHBOARD_EXISTING_LOGIN_ROLES }}
+      DATABASE_DELIVERY_NATIVE_CAPABILITY_ROLE: ${{ vars.DATABASE_DELIVERY_NATIVE_CAPABILITY_ROLE }}
+      DATABASE_DELIVERY_NATIVE_LOGIN_ROLE: ${{ vars.DATABASE_DELIVERY_NATIVE_LOGIN_ROLE }}
+      DATABASE_DELIVERY_NATIVE_EXISTING_LOGIN_ROLES: ${{ vars.DATABASE_DELIVERY_NATIVE_EXISTING_LOGIN_ROLES }}
+      DATABASE_DELIVERY_WORKERS_CAPABILITY_ROLE: ${{ vars.DATABASE_DELIVERY_WORKERS_CAPABILITY_ROLE }}
+      DATABASE_DELIVERY_WORKERS_LOGIN_ROLE: ${{ vars.DATABASE_DELIVERY_WORKERS_LOGIN_ROLE }}
+      DATABASE_DELIVERY_WORKERS_EXISTING_LOGIN_ROLES: ${{ vars.DATABASE_DELIVERY_WORKERS_EXISTING_LOGIN_ROLES }}
+      DATABASE_PULL_WORKER_CAPABILITY_ROLE: ${{ vars.DATABASE_PULL_WORKER_CAPABILITY_ROLE }}
+      DATABASE_PULL_WORKER_LOGIN_ROLE: ${{ vars.DATABASE_PULL_WORKER_LOGIN_ROLE }}
+      DATABASE_PULL_WORKER_EXISTING_LOGIN_ROLES: ${{ vars.DATABASE_PULL_WORKER_EXISTING_LOGIN_ROLES }}
+      DATABASE_DELIVERY_EDGE_CAPABILITY_ROLE: ${{ vars.DATABASE_DELIVERY_EDGE_CAPABILITY_ROLE }}
+      DATABASE_DELIVERY_EDGE_LOGIN_ROLE: ${{ vars.DATABASE_DELIVERY_EDGE_LOGIN_ROLE }}
+      DATABASE_DELIVERY_EDGE_EXISTING_LOGIN_ROLES: ${{ vars.DATABASE_DELIVERY_EDGE_EXISTING_LOGIN_ROLES }}
+      DATABASE_MIGRATION_ROLE: ${{ vars.DATABASE_MIGRATION_ROLE }}
+      DATABASE_MIGRATION_LOGIN_ROLE: ${{ vars.DATABASE_MIGRATION_LOGIN_ROLE }}
+      DATABASE_MIGRATION_EXISTING_LOGIN_ROLES: ${{ vars.DATABASE_MIGRATION_EXISTING_LOGIN_ROLES }}
+      DATABASE_MIGRATION_OWNER_PARENT_ROLES: ${{ vars.DATABASE_MIGRATION_OWNER_PARENT_ROLES }}
+      DATABASE_TRANSITIONAL_OWNER_LOGIN_ROLE: ${{ vars.DATABASE_TRANSITIONAL_OWNER_LOGIN_ROLE }}
+      DATABASE_VERIFY_CAPABILITY_ROLE: ${{ vars.DATABASE_VERIFY_CAPABILITY_ROLE }}
+      DATABASE_VERIFY_LOGIN_ROLE: ${{ vars.DATABASE_VERIFY_LOGIN_ROLE }}
+      DATABASE_VERIFY_EXISTING_LOGIN_ROLES: ${{ vars.DATABASE_VERIFY_EXISTING_LOGIN_ROLES }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: .node-version
       - run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - run: corepack pnpm install --frozen-lockfile
+
       - name: Build verify SQL
         env:
           TABLES_INPUT: ${{ inputs.tables }}
         run: |
           set -euo pipefail
           sql_file="$RUNNER_TEMP/verify.sql"
-          # Use a DO block so each table's row-count branch is planned at
-          # runtime via EXECUTE rather than at the outer query's parse
-          # time. (UNION-ALL-of-CASE blew up at plan time when one table
-          # didn't exist — PG validates the COUNT(*) reference even when
-          # its CASE branch is unreachable.)
-          #
-          # Write to a file rather than pass the generated block through an
-          # extra shell-quoting layer in the execution step.
           IFS=',' read -ra arr <<< "$TABLES_INPUT"
           if [ "${#arr[@]}" -eq 0 ]; then
             echo "::error::At least one table name is required."
@@ -49,26 +74,31 @@ jobs:
           fi
 
           {
-            printf 'BEGIN TRANSACTION READ ONLY;\nDO $$\nDECLARE n bigint;\nBEGIN\n'
+            printf 'BEGIN TRANSACTION READ ONLY;\nDO $$\nBEGIN\n'
             for raw_table in "${arr[@]}"; do
-              t="${raw_table#"${raw_table%%[![:space:]]*}"}"
-              t="${t%"${t##*[![:space:]]}"}"
-              if [[ ! "$t" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
-                echo "::error::Invalid table name. Use letters, numbers, and underscores, starting with a letter or underscore." >&2
+              table_name="${raw_table#"${raw_table%%[![:space:]]*}"}"
+              table_name="${table_name%"${table_name##*[![:space:]]}"}"
+              if [[ ! "$table_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+                echo "::error::Invalid table name." >&2
                 exit 1
               fi
-              printf "  IF to_regclass('public.%s') IS NOT NULL THEN\n" "$t"
-              printf "    EXECUTE format('SELECT COUNT(*) FROM public.%%I', '%s') INTO n;\n" "$t"
-              printf "    RAISE NOTICE '%s: exists, %% rows', n;\n" "$t"
+              printf "  IF to_regclass('public.%s') IS NOT NULL THEN\n" "$table_name"
+              printf "    RAISE NOTICE '%s: exists';\n" "$table_name"
               printf "  ELSE\n"
-              printf "    RAISE NOTICE '%s: NOT FOUND';\n" "$t"
+              printf "    RAISE NOTICE '%s: NOT FOUND';\n" "$table_name"
               printf "  END IF;\n"
             done
             printf 'END $$;\nCOMMIT;\n'
           } > "$sql_file"
-          echo "--- sql ---"
-          cat "$sql_file"
-      - name: Run
-        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$RUNNER_TEMP/verify.sql"
+
+      - name: Prove the metadata login and all service ACLs are exact
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_SERVICE_URL: ${{ secrets.DATABASE_VERIFY_URL }}
+          DATABASE_SERVICE_PROFILE: dashboard
+          DATABASE_SERVICE_EXPECTED_CONNECTION_ROLE: ${{ vars.DATABASE_VERIFY_LOGIN_ROLE }}
+        run: node scripts/verify-database-service-role.mjs
+
+      - name: Query catalog names only
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_VERIFY_URL }}
+        run: node scripts/psql-safe.mjs -v ON_ERROR_STOP=1 -f "$RUNNER_TEMP/verify.sql"

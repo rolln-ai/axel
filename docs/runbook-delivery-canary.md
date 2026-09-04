@@ -38,7 +38,7 @@ address must be reachable by the delivery runtime and must pass Axel's
 destination SSRF policy. Never use a customer database or workspace for this
 canary.
 
-The provisioner requires four environment-only inputs:
+The provisioner requires six environment-only inputs:
 
 - `DATABASE_URL`: the production control-plane admin DSN. It is used for the
   reconciliation session and is not stored as the destination credential.
@@ -48,6 +48,12 @@ The provisioner requires four environment-only inputs:
   `axt_[A-Za-z0-9_-]{32,128}`.
 - `AXEL_CANARY_WRITER_PASSWORD`: a dedicated random password of 32 to 256
   bytes.
+- `INGEST_ADMIN_URL`: the production ingest base URL. The provisioner accepts
+  the base or an existing source cache/authority admin endpoint and normalizes
+  it to the authority endpoints.
+- `INGEST_ADMIN_TOKEN`: the existing ingest admin token. It fences the fixed
+  canary source before reconciliation and releases it only after the committed
+  source row is fetched again.
 
 Enter the existing secrets without shell echo, generate the two new values
 without putting plaintext in shell history, save the new values in the team's
@@ -59,7 +65,9 @@ at a zsh prompt.
 set -euo pipefail
 read -rsp 'Production DATABASE_URL: ' DATABASE_URL; printf '\n'
 read -rsp 'Production CREDENTIALS_MASTER_KEY: ' CREDENTIALS_MASTER_KEY; printf '\n'
-export DATABASE_URL CREDENTIALS_MASTER_KEY
+read -rp 'Production ingest base URL: ' INGEST_ADMIN_URL
+read -rsp 'Production INGEST_ADMIN_TOKEN: ' INGEST_ADMIN_TOKEN; printf '\n'
+export DATABASE_URL CREDENTIALS_MASTER_KEY INGEST_ADMIN_URL INGEST_ADMIN_TOKEN
 
 export AXEL_CANARY_SOURCE_TOKEN="axt_$(openssl rand -hex 32)"
 export AXEL_CANARY_WRITER_PASSWORD="$(openssl rand -hex 32)"
@@ -67,19 +75,24 @@ export AXEL_CANARY_WRITER_PASSWORD="$(openssl rand -hex 32)"
 pnpm --filter @axel/shared build
 node scripts/provision-delivery-canary.mjs
 
-unset DATABASE_URL CREDENTIALS_MASTER_KEY AXEL_CANARY_WRITER_PASSWORD
+unset DATABASE_URL CREDENTIALS_MASTER_KEY AXEL_CANARY_WRITER_PASSWORD INGEST_ADMIN_URL INGEST_ADMIN_TOKEN
 export -n AXEL_CANARY_SOURCE_TOKEN
 ```
 
 Do not paste any of these values into command arguments, a URL, an issue, or a
 log. The provisioner does not load dotenv files, accept command-line values, or
-print database responses. The block clears the admin DSN, master key, and
-writer password immediately, then removes the source token's export attribute
-so later child processes receive it only through explicit standard input. Keep
-the same source token for routine reruns. A deliberate token rotation can take
-up to five minutes to replace an ingest-edge cache entry.
+print database responses. The block clears the admin DSN, master key, writer
+password, ingest URL, and ingest admin token immediately, then removes the
+source token's export attribute so later child processes receive it only
+through explicit standard input. Keep the same source token for routine
+reruns. A deliberate token rotation is fenced before the database write, so
+the previous token cannot remain authorized by an edge cache.
 
-The operation is advisory-locked and idempotent. It reserves these fixed
+The operation fences the canary source before opening its reconciliation
+transaction. After commit, it fetches the source row again and releases the
+fence with that committed configuration. A failed transaction or authority
+sync leaves the canary source blocked until a successful rerun. The operation
+is advisory-locked and idempotent. It reserves these fixed
 identities:
 
 | Resource | Fixed identity |
@@ -182,7 +195,7 @@ read -rp 'Vercel team scope ID or slug: ' VERCEL_SCOPE
 export VERCEL_TOKEN
 
 printf %s "$DELIVERY_CANARY_RECEIPT_TOKEN" \
-  | npx --yes vercel@58.4.0 env add DELIVERY_CANARY_RECEIPT_TOKEN production \
+  | pnpm exec vercel env add DELIVERY_CANARY_RECEIPT_TOKEN production \
       --sensitive --force \
       --project "$VERCEL_PROJECT_ID_DASHBOARD" \
       --scope "$VERCEL_SCOPE"
@@ -243,11 +256,12 @@ authentication failures behind a 404 response, and prunes receipts older than
 seven days after successful reads.
 
 Keep all six `AXEL_CANARY_*` GitHub secrets identical between `Monitoring` and
-`Production`. The Render sync sends them only to `axel-delivery-workers` and
-sets `AXEL_CANARY_ENABLED=1` and `AXEL_CANARY_INTERVAL_MS=900000`. It does not
-send canary credentials to the native delivery or pull-worker services. The
-ingest, receipt, and Vercel automation-bypass credentials must all be distinct.
-Do not put either Axel token in a URL.
+`Production`. The dedicated Render canary sync sends them only to
+`axel-delivery-workers` and sets `AXEL_CANARY_ENABLED=1` and
+`AXEL_CANARY_INTERVAL_MS=900000`. It does not send canary credentials to the
+native delivery or pull-worker services. The ingest, receipt, and Vercel
+automation-bypass credentials must all be distinct. Do not put either Axel
+token in a URL.
 
 The Vercel deployment workflow proves the exact staged dashboard URL before it
 promotes it. The GitHub `Production` environment or repository must contain the
@@ -282,6 +296,10 @@ gh run watch <canary-settings-run-id> --exit-status
 ```
 
 Replace the placeholder with the run ID printed by the preceding `gh run list`.
+Wait for this run to finish before dispatching another protected production
+mutation. All such workflows share the `production-deploy` concurrency group,
+and GitHub retains only one pending run in a concurrency group.
+
 The workflow retrieves the exact service ID, verifies its owner, name,
 background-worker type, connected `rolln-ai/axel` repository, `main` branch,
 Node runtime, singleton count, and disabled auto-deploy state. It also verifies
@@ -293,7 +311,8 @@ existing direct environment to retain `DELIVERY_ROLE=worker`,
 `SENTRY_ENVIRONMENT=production`, and a nonempty `SENTRY_DSN`. It changes only
 the eight `AXEL_CANARY_*` settings, performs one save-only bulk update, and
 reads every variable back. All unrelated values must remain byte-for-byte
-unchanged. Stop on any non-success result.
+unchanged. The generic Render runtime-secret sync preserves these eight canary
+values but cannot set or delete them. Stop on any non-success result.
 
 After the save succeeds, open the Render dashboard and select the project, then
 the `axel-delivery-workers` background worker whose immutable service ID matches
@@ -309,12 +328,37 @@ outside this worker-only change. Do not dispatch
 credentials. Never select an all-services option or call Render's deploy API
 for this procedure.
 
+## Source-authority rollout order
+
+For the source-authority rollout, the dashboard promotion must reach terminal
+success before the ingest-worker deployment starts. The new dashboard fences
+each source before its database mutation; deploying ingest first could leave an
+old in-flight dashboard action using only the legacy post-commit invalidation.
+The worker keeps that legacy endpoint for rolling compatibility: it enters a
+fail-closed state, reloads committed source config from the authenticated
+origin, and retries that reload on the next ingest if the origin was
+temporarily unavailable. It never lets the legacy path override an explicit
+mutation fence. Do not treat this compatibility path as a substitute for the
+dashboard-first sequence.
+
 ## Start the 72-hour observation window
 
-The singleton Render worker must have `SENTRY_DSN` and
-`SENTRY_ENVIRONMENT=production`. The save-only sync reads back its complete
-result, but a successful save is not a monitor check-in. Confirm the Sentry
-transport from the running worker separately.
+The singleton `axel-delivery-workers` process owns the authoritative canary.
+The first check starts 15 minutes after startup. Each later check starts 15
+minutes after the previous check settles, so checks never overlap. The Render
+Blueprint fixes this service at one instance, and the release and secret-sync
+helpers reject live service metadata that is not exactly one instance. The
+worker must have `SENTRY_DSN` and `SENTRY_ENVIRONMENT=production`. Its Sentry
+monitor uses an interval schedule of 15 minutes, a five-minute check-in margin,
+and a 10-minute maximum runtime.
+
+The GitHub Actions workflow remains available for manual checks and has a
+best-effort schedule. It reads the six canary secrets from the `Monitoring`
+environment, but it does not create Sentry check-ins or set the monitor
+schedule. GitHub schedule gaps do not replace or reset the Render singleton's
+authoritative cadence. The save-only sync reads back its complete result, but
+a successful save is not a monitor check-in. Confirm the Sentry transport from
+the running worker separately.
 
 After the exact-SHA worker deploy succeeds, pin the merged candidate SHA as a
 repository variable. Every manual and scheduled canary fails if `main` drifts
@@ -338,7 +382,8 @@ gh run watch <canary-run-id> --exit-status
 The worker waits one full interval before its first check. In Sentry, verify
 that `production-delivery-canary` records `in_progress` and `ok` from the pinned
 worker release. The monitor must show a 15-minute interval, a 10-minute maximum
-runtime, and a five-minute check-in margin.
+runtime, and a five-minute check-in margin. The manual GitHub fallback must not
+change that schedule.
 
 Then send one controlled critical queue-lag alert through the authenticated
 dashboard route. Read both credentials from the operator environment. Do not
@@ -369,8 +414,15 @@ probe. A Sentry event, workflow success, or configured notification rule is
 not delivery proof. Do not start T0 without both confirmations and the final
 resolved state.
 
-Do not start T0 until two consecutive worker check-ins succeed at the pinned
-SHA after the manual proof. During the window, a missing, wrong-SHA, or failed
-worker check-in invalidates the observation evidence and restarts the soak after
-investigation. GitHub schedules are best-effort fallback evidence only. Keep
-the worker monitor and fallback workflow under observation for the full 72 hours.
+Do not start T0 until Sentry records two consecutive successful scheduled
+check-ins from the singleton Render worker after the manual proof. Both
+`in_progress` timestamps must be later than terminal success of the exact-SHA
+worker deployment, and both check-ins must carry the pinned candidate SHA as
+their Sentry release. They must be about 15 minutes apart. Do not count a
+manual GitHub workflow run toward these two check-ins.
+
+During the 72-hour window, any missing or failed singleton check-in, wrong
+Render release, delivery failure, or monitor degradation invalidates the soak
+and restarts it after investigation. GitHub schedules are best-effort fallback
+evidence only. Keep the worker monitor and fallback workflow under observation
+for the full 72 hours.

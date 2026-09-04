@@ -1,5 +1,8 @@
-blank_issues_enabled: true
+blank_issues_enabled: false
 contact_links:
+  - name: Help and questions
+    url: https://github.com/rolln-ai/axel/discussions
+    about: Ask setup, usage, and self-hosting questions in Discussions.
   - name: Security vulnerability
     url: https://github.com/rolln-ai/axel/blob/main/SECURITY.md
-    about: Do not open a public issue — report privately per SECURITY.md.
+    about: Do not open a public issue. Report it privately through SECURITY.md.

@@ -25,18 +25,14 @@ function summarize(res: ProcessErasureResult): ActionState {
   if (res.state === "blocked_large_set") return { error: res.error };
   const erasedCount = () => res.storeResults.filter((s) => s.status === "deleted").reduce((n, s) => n + s.count, 0);
   if (res.state === "failed") {
-    // Distinguish a pre-execute throw (res.error set, nothing erased) from a
-    // partial store failure (some stores erased; details in the audit row).
-    const failed = res.storeResults.filter((s) => s.status === "failed").map((s) => s.store);
-    const detail = res.error ?? `${failed.join(", ")} failed — ${erasedCount()} record(s) erased before the failure`;
-    return { error: `Erasure incomplete (request ${res.requestId}): ${detail}. See the erasure_requests audit row.` };
+    return { error: "The erasure request did not complete. Review the erasure audit record." };
   }
   const located = `Located ${res.matchedEventCount} event${res.matchedEventCount === 1 ? "" : "s"} (coverage: ${res.coverage})`;
   if (!res.executed) {
-    return { notice: `${located}. Execution is disabled (ERASURE_EXECUTE_ENABLED off) — nothing erased. Request ${res.requestId}.` };
+    return { notice: `${located}. This deployment is in erasure dry-run mode, so nothing was deleted.` };
   }
   const erased = erasedCount();
-  return { notice: `${located}. Erased ${erased} record${erased === 1 ? "" : "s"} across stores. Request ${res.requestId}.` };
+  return { notice: `${located}. Erased ${erased} record${erased === 1 ? "" : "s"} across stores.` };
 }
 
 /**
@@ -56,8 +52,8 @@ export async function runErasureAction(_state: ActionState, formData: FormData):
   const confirmLargeSet = String(formData.get("confirm_large_set") ?? "") === "yes";
   try {
     return summarize(await processErasureRequest(workspaceId, identifiers, auth.user.id, { confirmLargeSet }));
-  } catch (err) {
-    return { error: err instanceof Error ? err.message : "Erasure request failed." };
+  } catch {
+    return { error: "The erasure request failed. Review the operator logs and try again." };
   }
 }
 
@@ -81,7 +77,7 @@ export async function runWorkspaceErasureAction(_state: ActionState, formData: F
   const confirmLargeSet = String(formData.get("confirm_large_set") ?? "") === "yes";
   try {
     return summarize(await processErasureRequest(workspaceId, identifiers, session.user.id, { confirmLargeSet }));
-  } catch (err) {
-    return { error: err instanceof Error ? err.message : "Erasure request failed." };
+  } catch {
+    return { error: "The erasure request failed. Review the operator logs and try again." };
   }
 }

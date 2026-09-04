@@ -124,6 +124,29 @@ describe("delivery-service source lookup client", () => {
     )).rejects.toBeInstanceOf(SourceLookupUnavailableError);
   });
 
+  it.each([
+    "http://delivery.example",
+    "https://user:password@delivery.example",
+    "https://delivery.example/prefix",
+    "https://delivery.example?target=other",
+  ])("rejects an unsafe service URL before sending the credential: %s", async (url) => {
+    const fetchMock = vi.fn();
+    await expect(lookupSourceFromDeliveryService(
+      { ...ENV, DELIVERY_SERVICE_URL: url },
+      "src_1",
+      fetchMock as SourceLookupFetch,
+    )).rejects.toBeInstanceOf(SourceLookupUnavailableError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized source response", async () => {
+    await expect(lookupSourceFromDeliveryService(
+      ENV,
+      "src_1",
+      (async () => response({ padding: "x".repeat(1024 * 1024) })) as SourceLookupFetch,
+    )).rejects.toBeInstanceOf(SourceLookupUnavailableError);
+  });
+
   it("wires production cache misses through HTTP even when DATABASE_URL exists", async () => {
     const fetchMock = vi.fn(async (_input: string, _init: RequestInit) => (
       response({ source: SOURCE })

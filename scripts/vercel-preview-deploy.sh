@@ -29,11 +29,19 @@ if [ -z "${VERCEL_TOKEN:-}" ] || [ -z "${VERCEL_ORG_ID:-}" ] || [ -z "$project_i
   echo "VERCEL_TOKEN, VERCEL_ORG_ID, and the ${app} project id secret are required." >&2
   exit 1
 fi
+if [[ ! "$VERCEL_ORG_ID" =~ ^[A-Za-z0-9_-]{3,128}$ ]] \
+  || [[ ! "$project_id" =~ ^[A-Za-z0-9_-]{3,128}$ ]]; then
+  echo "Vercel organization and project ids must use their fixed provider format." >&2
+  exit 1
+fi
+
+command -v pnpm >/dev/null
 
 mkdir -p .vercel
-cat > .vercel/project.json <<JSON
-{"orgId":"${VERCEL_ORG_ID}","projectId":"${project_id}"}
-JSON
+VERCEL_PROJECT_ID="$project_id" node -e '
+  const { VERCEL_ORG_ID: orgId, VERCEL_PROJECT_ID: projectId } = process.env;
+  process.stdout.write(`${JSON.stringify({ orgId, projectId })}\n`);
+' > .vercel/project.json
 
 export VERCEL_PROJECT_ID="$project_id"
 export VERCEL=1
@@ -50,38 +58,33 @@ if [ "$environment" = "production" ]; then
   export VERCEL_GIT_COMMIT_SHA="$SENTRY_RELEASE"
 fi
 
-# Pinned, NOT `@latest`: the CLI is a third-party dependency of a required
-# check, so an upstream release can (and did) break every open PR at once.
+# The CLI is installed from the repository's integrity-locked dependency graph.
 # 58.4.4 fails `deploy --prebuilt` against this pnpm workspace with
 #   ENOENT ... node_modules/.pnpm/@opentelemetry+api@1.9.1/.../context.js
 # while the builder downloads deployment files. 58.4.0 is the last version
 # verified green here. Bump deliberately, after a green preview run.
-cli="vercel@${VERCEL_CLI_VERSION:-58.4.0}"
-
-npx --yes "$cli" pull --yes --environment="$environment" --token "$VERCEL_TOKEN"
+pnpm exec vercel pull --yes --environment="$environment"
 if [ "$app" = "dashboard" ] && [ "$environment" = "production" ]; then
   # Vercel Sensitive values intentionally cannot be pulled back into CI. Prove
   # the expected configuration names here, then let the remote Vercel build run
   # the full R2/negative-permission probe inside the provider trust boundary.
   node "$ROOT_DIR/scripts/verify-dashboard-r2-token.mjs" \
     --configuration-only ".vercel/.env.production.local"
-  deploy_output="$(npx --yes "$cli" deploy --prod --skip-domain --logs \
+  deploy_output="$(pnpm exec vercel deploy --prod --skip-domain \
     --build-env "SENTRY_RELEASE=$SENTRY_RELEASE" \
-    --env "SENTRY_RELEASE=$SENTRY_RELEASE" \
-    --token "$VERCEL_TOKEN")"
+    --env "SENTRY_RELEASE=$SENTRY_RELEASE")"
 elif [ "$environment" = "production" ]; then
-  npx --yes "$cli" build --prod --token "$VERCEL_TOKEN"
+  pnpm exec vercel build --prod
   # Build with production configuration but leave custom domains untouched.
   # The workflow smokes this exact URL before a separate promote command.
-  deploy_output="$(npx --yes "$cli" deploy --prebuilt --prod --skip-domain --token "$VERCEL_TOKEN")"
+  deploy_output="$(pnpm exec vercel deploy --prebuilt --prod --skip-domain)"
 else
-  npx --yes "$cli" build --token "$VERCEL_TOKEN"
-  deploy_output="$(npx --yes "$cli" deploy --prebuilt --token "$VERCEL_TOKEN")"
+  pnpm exec vercel build
+  deploy_output="$(pnpm exec vercel deploy --prebuilt)"
 fi
 
 # Vercel prints the deployment URL as its last line. Treat every provider/CLI
-# byte as untrusted before it becomes a GitHub step output or promotion target.
-printf '%s\n' "$deploy_output"
+# byte as untrusted, and never forward captured provider output into CI logs.
 deployment_url="$(printf '%s\n' "$deploy_output" | tail -n 1)"
 if ! DEPLOYMENT_URL="$deployment_url" node - <<'NODE'
 const raw = process.env.DEPLOYMENT_URL ?? "";

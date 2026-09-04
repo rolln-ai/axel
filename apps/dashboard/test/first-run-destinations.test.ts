@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   FIRST_RUN_DESTINATIONS,
+  FIRST_RUN_TLS_NO_VERIFY_DEFAULT,
   deriveDestinationNameBase,
   firstRunDestination,
   parseDestinationUrl,
@@ -63,13 +64,16 @@ describe("FIRST_RUN_DESTINATIONS catalogue", () => {
   });
 
   it("offers the self-signed-certificate toggle on the database types", () => {
-    // A real Railway Postgres failed every delivery with "self-signed
-    // certificate in certificate chain" because the shortened form omitted
-    // this. Managed Postgres and Mongo both need it; the others don't.
+    // Private/self-hosted databases sometimes need this escape hatch; the
+    // other destination types do not use a database TLS client here.
     const withToggle = FIRST_RUN_DESTINATIONS.filter((d) => d.tlsToggle).map((d) => d.type);
     expect(withToggle.sort()).toEqual(["mongodb", "postgres"]);
     expect(firstRunDestination("postgres")?.tlsToggle?.key).toBe("pg_ssl_no_verify");
     expect(firstRunDestination("mongodb")?.tlsToggle?.key).toBe("mongo_tls_no_verify");
+  });
+
+  it("keeps certificate identity verification enabled by default", () => {
+    expect(FIRST_RUN_TLS_NO_VERIFY_DEFAULT).toBe(false);
   });
 
   it("names the toggle's field so the delivery path actually reads it", () => {

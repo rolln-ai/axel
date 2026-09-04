@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import type { SourceProvider } from "@axel/shared";
 import Link from "next/link";
 import { TriangleAlert } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -8,6 +9,10 @@ import { Button } from "@/components/ui/button";
 import { IngestActivityMonitor } from "../../[id]/IngestActivityMonitor";
 import { TestEventRunner } from "../../[id]/TestEventRunner";
 import { SecretRow, SigningSecretHint } from "./shared";
+import {
+  sourceAuthenticationCopy,
+  sourceUsesAxelToken,
+} from "../../../../../lib/source-ingest-auth";
 
 /**
  * Final wizard step — closes the activation loop right after the pipeline is
@@ -23,6 +28,7 @@ export function ActivationStep({
   ingestUrl,
   plaintextToken,
   webhookSigningSecret,
+  sourceProvider,
   hasRoute,
   onBack,
   onClose,
@@ -31,10 +37,15 @@ export function ActivationStep({
   ingestUrl?: string;
   plaintextToken?: string;
   webhookSigningSecret?: string;
+  sourceProvider: SourceProvider;
   hasRoute: boolean;
   onBack: () => void;
   onClose: () => void;
 }) {
+  const usesAxelToken = sourceUsesAxelToken(sourceProvider);
+  const hasOneShotSecret = Boolean(
+    (usesAxelToken && plaintextToken) || webhookSigningSecret,
+  );
   // The wizard form is display:none'd on step 4, so the button that brought the
   // user here is gone — pull focus into this step and announce it so keyboard /
   // screen-reader users don't get dropped on <body>.
@@ -54,32 +65,34 @@ export function ActivationStep({
         {/* One-shot endpoint + secrets. Also shown on step 3, but that form is
             display:none on step 4, so repeat them here so they stay copyable on
             the go-live step. */}
-        {ingestUrl || plaintextToken || webhookSigningSecret ? (
+        {ingestUrl || hasOneShotSecret ? (
           <div className="space-y-1 rounded-md border border-border bg-muted/30 p-3">
-            <div
-              role="alert"
-              className="flex items-start gap-1.5 rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs font-medium text-foreground"
-            >
-              <TriangleAlert className="size-3.5 shrink-0 text-amber-600" />
-              <span>The Webhook URL contains your ingest token — copy it now. The ingest token and signing secret cannot be retrieved after you close this dialog.</span>
-            </div>
-            {ingestUrl && plaintextToken ? (
+            {hasOneShotSecret ? (
+              <div
+                role="alert"
+                className="flex items-start gap-1.5 rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs font-medium text-foreground"
+              >
+                <TriangleAlert className="size-3.5 shrink-0 text-amber-600" />
+                <span>
+                  Copy each secret below now. One-shot secrets cannot be retrieved after you close
+                  this dialog.
+                </span>
+              </div>
+            ) : null}
+            {ingestUrl ? (
               <>
-                <SecretRow
-                  label="Webhook URL — point your provider here"
-                  value={`${ingestUrl}?token=${plaintextToken}`}
-                />
+                <SecretRow label="Webhook URL — point your provider here" value={ingestUrl} />
                 <p className="text-[11px] text-muted-foreground">
-                  Or POST to the Ingest URL with the token as an{" "}
-                  <code className="font-mono">x-axel-token</code> header.
+                  {sourceAuthenticationCopy(sourceProvider)}
                 </p>
               </>
             ) : null}
-            {ingestUrl ? <SecretRow label="Ingest URL" value={ingestUrl} /> : null}
-            {plaintextToken ? <SecretRow label="Ingest token" value={plaintextToken} /> : null}
+            {usesAxelToken && plaintextToken ? (
+              <SecretRow label="Ingest token — send only as x-axel-token" value={plaintextToken} />
+            ) : null}
             {webhookSigningSecret ? (
               <>
-                <SecretRow label="Webhook signing secret" value={webhookSigningSecret} />
+                <SecretRow label="Destination signing secret" value={webhookSigningSecret} />
                 <SigningSecretHint />
               </>
             ) : null}
@@ -99,14 +112,14 @@ export function ActivationStep({
           </p>
           <TestEventRunner sourceId={sourceId} />
         </div>
-        {ingestUrl && plaintextToken ? (
+        {ingestUrl && usesAxelToken && plaintextToken ? (
           <details className="rounded-md border border-border bg-muted/30 px-3 py-2 text-xs">
             <summary className="cursor-pointer font-medium text-foreground">
               Or send one yourself with curl
             </summary>
             <SecretRow
               label="curl"
-              value={`curl -X POST "${ingestUrl}?token=${plaintextToken}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"hello":"world"}'`}
+              value={`curl -X POST "${ingestUrl}" \\\n  -H "x-axel-token: ${plaintextToken}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"hello":"world"}'`}
             />
           </details>
         ) : null}
@@ -126,8 +139,8 @@ export function ActivationStep({
           <p className="text-sm font-medium text-foreground">Then go live</p>
           <p className="mt-0.5 text-xs leading-5 text-muted-foreground">
             {hasRoute
-              ? "Point your provider at the webhook URL above — you can do this any time, even after closing this dialog. Axel watches the ingest endpoint live: the moment a real event lands it shows up here, and the route delivers it to your destination."
-              : "Point your provider at the webhook URL above — you can do this any time, even after closing this dialog. Axel watches the ingest endpoint live; events show up here as they arrive."}
+              ? "Point your provider at the ingest URL above and configure the authentication shown with it. Axel watches the endpoint live. When a real event lands, it appears here and the route delivers it to your destination."
+              : "Point your provider at the ingest URL above and configure the authentication shown with it. Axel watches the endpoint live and shows events here as they arrive."}
           </p>
         </div>
         <IngestActivityMonitor sourceId={sourceId} />

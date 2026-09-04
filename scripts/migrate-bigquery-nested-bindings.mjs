@@ -18,6 +18,7 @@ import { createRequire } from "node:module";
 import { parseArgs } from "node:util";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { controlPlanePgSslOption } from "./control-plane-pg.mjs";
 import { loadDotEnv, loadLocalEnv } from "./load-env.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -203,7 +204,10 @@ async function main() {
   const { Client } = require("pg");
   const client = new Client({
     connectionString: databaseUrl,
-    ssl: databaseUrl.includes("localhost") ? false : { rejectUnauthorized: false },
+    ssl: controlPlanePgSslOption(
+      databaseUrl,
+      process.env.CONTROL_PLANE_DB_SSL_VERIFY,
+    ),
   });
   await client.connect();
 

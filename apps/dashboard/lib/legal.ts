@@ -8,17 +8,22 @@
 // non-prod via NEXT_PUBLIC_AXEL_MARKETING_URL.
 const MARKETING_BASE = (process.env.NEXT_PUBLIC_AXEL_MARKETING_URL ?? "https://axelapp.ai").replace(/\/$/, "");
 
-export const CURRENT_TERMS_VERSION = "1.0";
-export const TERMS_EFFECTIVE_DATE = "2026-06-04";
+export const CURRENT_TERMS_VERSION = "1.1";
+export const TERMS_EFFECTIVE_DATE = "2026-09-03";
 
 /**
  * The documents a user affirmatively agrees to when they check the signup
  * consent box. Keep this list in sync with the checkbox label in SignupForm.
  */
 export const CONSENT_DOCUMENTS = [
-  { slug: "terms", title: "Terms of Service", href: `${MARKETING_BASE}/terms` },
-  { slug: "acceptable-use", title: "Acceptable Use Policy", href: `${MARKETING_BASE}/acceptable-use` },
-  { slug: "privacy", title: "Privacy Policy", href: `${MARKETING_BASE}/privacy` },
+  { slug: "terms", title: "Terms of Service", version: "1.1", href: `${MARKETING_BASE}/terms` },
+  {
+    slug: "acceptable-use",
+    title: "Acceptable Use Policy",
+    version: "1.1",
+    href: `${MARKETING_BASE}/acceptable-use`,
+  },
+  { slug: "privacy", title: "Privacy Policy", version: "1.1", href: `${MARKETING_BASE}/privacy` },
 ] as const;
 
 /**
@@ -26,5 +31,5 @@ export const CONSENT_DOCUMENTS = [
  * exactly which document versions a user agreed to even after the docs change.
  */
 export function acceptedDocumentVersions(): Record<string, string> {
-  return Object.fromEntries(CONSENT_DOCUMENTS.map((doc) => [doc.slug, CURRENT_TERMS_VERSION]));
+  return Object.fromEntries(CONSENT_DOCUMENTS.map((doc) => [doc.slug, doc.version]));
 }

@@ -6,6 +6,7 @@ import type { ClickhouseQueryable } from "../lib/clickhouse";
 import { cancelSubscriptionWithFinalInvoice } from "../lib/billing/cancellation";
 import { flushWorkspaceMeterUsage } from "../lib/billing/meter-reporter";
 import {
+  publicWorkspaceTeardownSweepSummary,
   sweepWorkspaceTeardowns,
   teardownSingleWorkspace,
   WorkspaceTeardownSweepError,
@@ -334,7 +335,7 @@ describe("sweepWorkspaceTeardowns billing stages", () => {
             {
               workspaceId: "ws_fail",
               stage: "error",
-              detail: "No such meter: axel_tasks",
+              detail: "workspace_teardown_step_failed",
             },
             { workspaceId: "ws_ok", stage: "settling" },
           ],
@@ -343,6 +344,25 @@ describe("sweepWorkspaceTeardowns billing stages", () => {
     } finally {
       logged.mockRestore();
     }
+  });
+});
+
+describe("publicWorkspaceTeardownSweepSummary", () => {
+  it("returns fixed stage counts without workspace IDs or error details", () => {
+    const privateMarker = "private-workspace-provider-marker";
+    const summary = publicWorkspaceTeardownSweepSummary({
+      swept: 3,
+      results: [
+        { workspaceId: privateMarker, stage: "flushed", detail: privateMarker },
+        { workspaceId: `${privateMarker}-2`, stage: "wiping", detail: privateMarker },
+        { workspaceId: `${privateMarker}-3`, stage: "error", detail: privateMarker },
+      ],
+    });
+
+    expect(summary.code).toBe("workspace_teardown_partial");
+    expect(summary.stage_counts).toMatchObject({ flushed: 1, wiping: 1, error: 1 });
+    expect(JSON.stringify(summary)).not.toContain(privateMarker);
+    expect(summary).not.toHaveProperty("results");
   });
 });
 

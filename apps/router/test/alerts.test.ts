@@ -90,12 +90,16 @@ describe("threshold evaluators", () => {
       attempts: 100,
       window_seconds: 300,
     })).toEqual([]);
-    expect(evaluateDestinationLatency({
+    const warning = evaluateDestinationLatency({
       destination_id: "dst_1",
+      route_id: "rte_private_marker",
       p95_latency_ms: 2500,
       attempts: 100,
       window_seconds: 300,
-    })[0]?.severity).toBe("warn");
+    })[0];
+    expect(warning?.severity).toBe("warn");
+    expect(JSON.stringify(warning)).not.toContain("dst_1");
+    expect(JSON.stringify(warning)).not.toContain("rte_private_marker");
     expect(evaluateDestinationLatency({
       destination_id: "dst_1",
       p95_latency_ms: 6000,
@@ -175,9 +179,13 @@ describe("alert sinks", () => {
     await webhookAlertSink({ url: "https://example.com/hook", token: "tk", fetchImpl: fakeFetch }).notify({
       severity: "warn",
       rule: "retry_rate",
-      summary: "high",
+      summary: "customer-summary-marker",
       source: "router",
-      details: { rate: 0.18 },
+      details: {
+        rate: 0.18,
+        destination_id: "destination-marker",
+        nested: { count: 2, provider_response: "provider-marker" },
+      },
       occurred_at: "2026-05-15T10:00:00Z",
     });
 
@@ -185,9 +193,17 @@ describe("alert sinks", () => {
     expect(calls[0]?.url).toBe("https://example.com/hook");
     expect(calls[0]?.init.redirect).toBe("manual");
     expect((calls[0]?.init.headers as Record<string, string>)["x-axel-alert-token"]).toBe("tk");
-    const body = JSON.parse(calls[0]?.init.body as string) as { text: string; event: { rule: string } };
+    const body = JSON.parse(calls[0]?.init.body as string) as {
+      text: string;
+      event: { rule: string; summary: string; details: Record<string, unknown> };
+    };
     expect(body.text).toMatch(/WARN/);
     expect(body.event.rule).toBe("retry_rate");
+    expect(body.event.summary).toBe("Operational alert emitted.");
+    expect(body.event.details).toEqual({ rate: 0.18, nested: { count: 2 } });
+    expect(JSON.stringify(body)).not.toContain("customer-summary-marker");
+    expect(JSON.stringify(body)).not.toContain("destination-marker");
+    expect(JSON.stringify(body)).not.toContain("provider-marker");
   });
 
   it("webhook sink swallows fetch failures (alerting must not page itself)", async () => {
@@ -229,10 +245,7 @@ describe("alert sinks", () => {
     })).resolves.toBeUndefined();
 
     expect(bodyRead).toBe(false);
-    expect(errSpy).toHaveBeenCalledWith(
-      "[alert webhook] post failed",
-      expect.objectContaining({ message: "alert_webhook_http_503" }),
-    );
+    expect(errSpy).toHaveBeenCalledWith("[alert webhook] post failed");
     expect(JSON.stringify(errSpy.mock.calls)).not.toContain("receiver-secret-never-log");
     errSpy.mockRestore();
   });

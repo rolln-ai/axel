@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { capturingPg } from "@axel/test-utils";
 import type { Pool } from "pg";
 import { deadLetterFingerprint } from "@axel/shared";
+import { processReplayBatch } from "@axel/router";
 import {
   createPgReplayStore,
   createPgRouteStore,
@@ -94,14 +95,14 @@ describe("replay-worker — ReplayStore (Postgres)", () => {
     expect(calls).toHaveLength(1);
   });
 
-  it("markFailed records the error message capped at 1000 chars and RETURNS replay_job_id", async () => {
+  it("markFailed projects arbitrary text to a fixed code and RETURNS replay_job_id", async () => {
     const { pool, calls } = fakePool([{ rows: [] }]);
     const store = createPgReplayStore(pool);
     const huge = "x".repeat(2000);
     await store.markFailed("rpl_1", huge);
     expect(calls[0]?.sql).toMatch(/RETURNING replay_job_id/);
     expect(calls[0]?.params[0]).toBe("rpl_1");
-    expect((calls[0]?.params[1] as string).length).toBe(1000);
+    expect(calls[0]?.params[1]).toBe("operation_failed");
     expect(calls).toHaveLength(1);
   });
 
@@ -116,7 +117,7 @@ describe("replay-worker — ReplayStore (Postgres)", () => {
     const stored = calls[0]?.params[1] as string;
     expect(stored).not.toContain("victim@example.test");
     expect(stored).not.toContain("hunter2");
-    expect(stored).toContain("payload=[REDACTED]");
+    expect(stored).toBe("operation_failed");
   });
 
   it("markFailed advances + finishes the tracked job (the dispatch-failed terminal path)", async () => {
@@ -148,6 +149,45 @@ describe("replay-worker — ReplayStore (Postgres)", () => {
     const store = createPgReplayStore(pool);
     await store.markDispatched("rpl_1", { replay_id: "rpl_1", event_id: "evt_1", matched_routes: 1, skipped_routes: 0, enqueued_deliveries: 1, dead_lettered: 0 });
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("replay-worker — raw payload key boundary", () => {
+  it("fails a poisoned claimed row before ClickHouse, R2, route, or queue HTTP", async () => {
+    const { pool, calls } = fakePool([
+      {
+        rows: [{
+          id: "rpl_1",
+          workspace_id: "ws_alpha",
+          event_id: "evt_alpha",
+          source_id: "src_alpha",
+          r2_key: "events/ws_victim/2026-08-27/evt_alpha",
+          scope: "route",
+          route_id: "rt_alpha",
+          destination_id: null,
+          reason: null,
+          replay_job_id: null,
+        }],
+      },
+      { rows: [], rowCount: 1 },
+    ]);
+    const fetchImpl = vi.fn();
+    const processor = buildReplayProcessorDeps({
+      pool,
+      cloudflareAccountId: "account_test",
+      cloudflareApiToken: "test-only-api-token",
+      rawPayloadBucket: "raw-test",
+      deliveryQueueId: "queue-test",
+      clickhouseUrl: "https://clickhouse.example.test",
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    await expect(processReplayBatch(processor)).resolves.toEqual([]);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.sql).toContain("state = 'failed'");
+    expect(calls[1]?.params).toEqual(["rpl_1", "replay_payload_key_mismatch"]);
   });
 });
 
@@ -257,8 +297,13 @@ describe("replay-worker — DeadLetterSink (Postgres)", () => {
     // 9 params now — the 9th is the fingerprint, stamped from the same
     // route_id/reason/message so it matches the inbox + mute join.
     expect(calls[0]?.params).toHaveLength(9);
+    expect(calls[0]?.params[6]).toBe("operation_failed");
     expect(calls[0]?.params[8]).toBe(
-      await deadLetterFingerprint({ route_id: "rt_1", reason: "filter_invalid", message: "boom" }),
+      await deadLetterFingerprint({
+        route_id: "rt_1",
+        reason: "filter_invalid",
+        message: "operation_failed",
+      }),
     );
   });
 
@@ -386,7 +431,7 @@ describe("replay-worker — R2 spill reader", () => {
     expect(String(fetchImpl.mock.calls[0]?.[0])).not.toContain("%2F");
   });
 
-  it("collapses a Cloudflare HTML error page to a single fingerprintable marker", async () => {
+  it("drops Cloudflare response bodies from fingerprintable errors", async () => {
     const html = [
       "<!DOCTYPE html>",
       '<!--[if lt IE 7]> <html class="no-js ie6 oldie" lang="en-US"> <![endif]-->',
@@ -398,10 +443,9 @@ describe("replay-worker — R2 spill reader", () => {
 
     const err = await reader.get(SPILL_KEY).catch((e: unknown) => e as Error);
     expect(err).toBeInstanceOf(Error);
-    // No raw HTML: the doctype and conditional comments were what Sentry read
-    // as the issue title and as bogus stack frames.
-    expect((err as Error).message).toBe("r2_get_521: <cloudflare html error: example.com | 521: Web server is down>");
+    expect((err as Error).message).toBe("r2_get_521");
     expect((err as Error).message).not.toContain("<!DOCTYPE");
+    expect((err as Error).message).not.toContain("example.com");
   });
 
   it("returns null on 404 rather than treating it as an error", async () => {
@@ -416,7 +460,7 @@ describe("replay-worker — R2 spill reader", () => {
       new Response("x".repeat(64), { status: 200, headers: { "content-length": "131072" } }),
     );
     const reader = createR2HttpSpillReader({ ...deps, fetchImpl: fetchImpl as unknown as typeof fetch });
-    await expect(reader.get(SPILL_KEY)).rejects.toThrow(/r2_get_truncated: .*\(64\/131072 bytes\)/);
+    await expect(reader.get(SPILL_KEY)).rejects.toThrow("r2_get_truncated (64/131072 bytes)");
   });
 
   it("accepts a complete body and a body with no content-length header", async () => {
@@ -604,7 +648,7 @@ describe("replay-worker — ClickHouse hints", () => {
       url: "https://ch.example",
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
-    const result = await hints.resolveHints("evt_1", "k");
+    const result = await hints.resolveHints("evt_1", "k", "ws_1", "src_1");
     expect(result).toBeNull();
   });
 
@@ -617,16 +661,23 @@ describe("replay-worker — ClickHouse hints", () => {
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
 
-    await hints.resolveHints("evt_1", "k");
+    await hints.resolveHints("evt_1", "k", "ws_1", "src_1");
 
     const url = new URL(String(fetchImpl.mock.calls[0]?.[0]));
     expect(url.searchParams.get("max_execution_time")).toBe("5");
     expect(url.searchParams.get("max_memory_usage")).toBe("268435456");
     expect(url.searchParams.get("max_threads")).toBe("1");
     expect(url.searchParams.get("max_result_rows")).toBe("1");
+    expect(url.searchParams.get("param_workspace_id")).toBe("ws_1");
+    expect(url.searchParams.get("param_source_id")).toBe("src_1");
+    const request = fetchImpl.mock.calls[0]?.[1] as RequestInit | undefined;
+    expect(String(request?.body)).toContain("workspace_id = {workspace_id:String}");
+    expect(String(request?.body)).toContain("source_id = {source_id:String}");
+    expect(String(request?.body)).not.toContain("headers_json");
+    expect(String(request?.body)).not.toContain("query_json");
   });
 
-  it("converts ClickHouse DateTime64 string to ISO and parses headers/query JSON", async () => {
+  it("converts ClickHouse DateTime64 string to ISO without exporting historical metadata", async () => {
     const row = {
       received_at: "2026-05-18 12:34:56.789",
       content_type: "application/json",
@@ -643,14 +694,14 @@ describe("replay-worker — ClickHouse hints", () => {
       url: "https://ch.example",
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
-    const result = await hints.resolveHints("evt_1", "k");
+    const result = await hints.resolveHints("evt_1", "k", "ws_1", "src_1");
     expect(result).toEqual({
       received_at: "2026-05-18T12:34:56.789Z",
       content_type: "application/json",
       size_bytes: 42,
       shard: 3,
-      headers: { "x-foo": "bar" },
-      query: { q: "1" },
+      headers: {},
+      query: {},
       is_test: false,
     });
   });
@@ -672,18 +723,18 @@ describe("replay-worker — ClickHouse hints", () => {
       url: "https://ch.example",
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
-    const result = await hints.resolveHints("evt_1", "k");
+    const result = await hints.resolveHints("evt_1", "k", "ws_1", "src_1");
     expect(result?.is_test).toBe(true);
   });
 
-  it("tolerates malformed headers_json by returning empty headers", async () => {
+  it("ignores historical header and query columns returned by an older ClickHouse proxy", async () => {
     const row = {
       received_at: "2026-05-18 00:00:00.000",
       content_type: "application/json",
       size_bytes: 0,
       shard: 0,
-      headers_json: "{not-json",
-      query_json: "{also-not-json",
+      headers_json: JSON.stringify({ campaign: "secret-looking-value" }),
+      query_json: JSON.stringify({ ref: "another-secret-looking-value" }),
       is_test: false,
     };
     const fetchImpl = vi.fn(
@@ -693,7 +744,7 @@ describe("replay-worker — ClickHouse hints", () => {
       url: "https://ch.example",
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
-    const result = await hints.resolveHints("evt_1", "k");
+    const result = await hints.resolveHints("evt_1", "k", "ws_1", "src_1");
     expect(result?.headers).toEqual({});
     expect(result?.query).toEqual({});
   });

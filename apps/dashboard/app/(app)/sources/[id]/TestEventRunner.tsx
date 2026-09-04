@@ -81,8 +81,8 @@ export function useTestEventPoll(
 
     const poll = async (tries: number) => {
       const res = await getTestEventOutcome(eventId).catch(
-        (err): { error: string } => ({
-          error: err instanceof Error ? err.message : "Failed to read test-event result.",
+        (): { error: string } => ({
+          error: "Failed to read the test-event result.",
         }),
       );
       if (cancelled) return;

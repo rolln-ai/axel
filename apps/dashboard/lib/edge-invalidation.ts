@@ -5,24 +5,14 @@ import { decryptSourceSigningSecret } from "./source-secret";
 import { captureDashboardException } from "./sentry-capture";
 
 /**
- * Edge cache helpers — keep KV-backed worker source lookups in sync with the
- * Postgres control plane.
+ * Source authorization coordination between the Postgres control plane and
+ * the ingest worker. Security-sensitive mutations fence the source first, then
+ * publish freshly loaded committed state with the same one-use token. A failed
+ * sync leaves the hosted source blocked.
  *
- * The dashboard mutates sources (create / disable / rotate token / delete) in
- * Postgres, but the ingest worker reads source config from a KV cache at the
- * edge. Two helpers bridge the gap:
- *
- *   - `pushSourceToEdge(source)`     — write current state into KV (5m TTL)
- *   - `invalidateEdgeSourceCache()`  — drop the cached entry by source_id
- *
- * Required env:
- *   - INGEST_ADMIN_URL   — base ingest URL, e.g. https://ingest.axelapp.ai
- *                          (we derive /admin/source-cache/{put,invalidate})
- *   - INGEST_ADMIN_TOKEN — must match the ingest worker's ADMIN_TOKEN binding
- *
- * Best-effort helpers are a no-op when these values are unset, which is useful
- * in dev when there is no edge to sync. Auth-sensitive mutations use
- * `requireEdgeSourceCacheInvalidation`, which fails closed instead.
+ * Self-host installs omit the Durable Object binding. Their ingest worker does
+ * an authenticated delivery-service lookup on every request, so the same admin
+ * calls return 204 without introducing a cache.
  */
 
 interface EdgeSource {
@@ -36,10 +26,10 @@ interface EdgeSource {
   max_events_per_minute?: number;
   /**
    * AXE-23 provider preset + plaintext signing secret. The dashboard
-   * decrypts the at-rest ciphertext server-side and pushes plaintext
-   * over the HTTPS admin channel to the worker, which stores it in KV
-   * for hot-path verification. Token is the same INGEST_ADMIN_TOKEN
-   * that already protects this endpoint.
+   * decrypts the at-rest ciphertext server-side and pushes plaintext over the
+   * HTTPS admin channel. The per-source authority retains it only in live
+   * memory and persists a digest, never the secret itself. Token is the same
+   * INGEST_ADMIN_TOKEN that already protects this endpoint.
    */
   provider?: "custom" | "stripe" | "github" | "shopify" | "chargebee";
   signing_secret?: string;
@@ -64,16 +54,26 @@ export interface EdgeInvalidationOptions {
   env?: Record<string, string | undefined>;
 }
 
-function endpointUrls(env: Record<string, string | undefined>): { put: string; invalidate: string } | null {
-  // Backwards compat: INGEST_ADMIN_URL was originally the full /invalidate path.
-  // Derive the put endpoint from the same base if possible.
+interface EdgeAdminUrls {
+  put: string;
+  invalidate: string;
+  fence: string;
+  sync: string;
+}
+
+function endpointUrls(env: Record<string, string | undefined>): EdgeAdminUrls | null {
+  // INGEST_ADMIN_URL historically accepted a full cache endpoint. Normalize
+  // old and new endpoint forms so existing installations can update in place.
   const raw = env.INGEST_ADMIN_URL;
   if (!raw) return null;
-  // Strip any trailing /admin/source-cache/* if present, then append both paths.
-  const base = raw.replace(/\/admin\/source-cache\/(invalidate|put)\/?$/, "").replace(/\/$/, "");
+  const base = raw
+    .replace(/\/admin\/(?:source-cache\/(?:invalidate|put)|source-authority\/(?:fence|sync))\/?$/, "")
+    .replace(/\/$/, "");
   return {
     put: `${base}/admin/source-cache/put`,
     invalidate: `${base}/admin/source-cache/invalidate`,
+    fence: `${base}/admin/source-authority/fence`,
+    sync: `${base}/admin/source-authority/sync`,
   };
 }
 
@@ -100,11 +100,12 @@ async function adminPost(
       },
       body: JSON.stringify(body),
     });
-  } catch (err) {
-    console.error(`[edge] POST failed for ${url}:`, err);
-    await reportEdgeSyncFailure(options, err, url);
+  } catch {
+    const failure = new Error("edge_admin_transport_failed");
+    console.error("[edge] admin POST transport failed");
+    await reportEdgeSyncFailure(options, failure);
     if (required) {
-      throw new Error(`required edge cache POST failed for ${url}`, { cause: err });
+      throw failure;
     }
     return;
   } finally {
@@ -112,26 +113,25 @@ async function adminPost(
   }
 
   if (!res.ok) {
-    const responseText = await res.text().catch(() => "");
-    const failure = new Error(`edge admin POST ${res.status}: ${responseText.slice(0, 200)}`);
-    console.error(`[edge] non-2xx ${res.status} for ${url}: ${responseText.slice(0, 200)}`);
-    await reportEdgeSyncFailure(options, failure, url, String(res.status));
+    await res.body?.cancel().catch(() => undefined);
+    const failure = new Error(`edge_admin_http_${res.status}`);
+    console.error(`[edge] admin POST returned ${res.status}`);
+    await reportEdgeSyncFailure(options, failure, String(res.status));
     if (required) throw failure;
   }
 }
 
 /**
- * Report an edge cache-sync failure through the dashboard Sentry SDK.
+ * Report an edge authorization-sync failure through the dashboard Sentry SDK.
  * The adapter swallows its own errors, so this can't break the action.
  */
 async function reportEdgeSyncFailure(
   _options: EdgeInvalidationOptions,
   err: unknown,
-  url: string,
   httpStatus?: string,
 ): Promise<void> {
   await captureDashboardException(err, {
-    tags: { component: "edge_cache_sync", url, ...(httpStatus ? { http_status: httpStatus } : {}) },
+    tags: { component: "edge_cache_sync", ...(httpStatus ? { http_status: httpStatus } : {}) },
   });
 }
 
@@ -146,51 +146,102 @@ export async function invalidateEdgeSourceCache(
   await adminPost(urls.invalidate, { source_id: sourceId }, token, options, false);
 }
 
-/**
- * Delete a source cache entry and prove that the worker accepted the delete.
- * Security-sensitive source mutations call this before and after their
- * Postgres write to narrow stale-credential and stale-policy races. Missing
- * admin configuration, transport failures, and non-2xx responses all reject;
- * the short positive TTL bounds distributed propagation and lookups already
- * in flight after the last delete.
- */
-export async function requireEdgeSourceCacheInvalidation(
+export interface EdgeSourceFence {
+  sourceId: string;
+  fenceToken: string;
+}
+
+/** Block hosted authorization before changing a source in Postgres. */
+export async function requireEdgeSourceFence(
   sourceId: string,
+  options: EdgeInvalidationOptions = {},
+): Promise<EdgeSourceFence> {
+  const env = options.env ?? process.env;
+  const token = env.INGEST_ADMIN_TOKEN;
+  const urls = endpointUrls(env);
+  if (!urls || !token) {
+    throw new Error("required edge source authority is not configured");
+  }
+  const fenceToken = crypto.randomUUID().replaceAll("-", "");
+  await adminPost(
+    urls.fence,
+    { source_id: sourceId, fence_token: fenceToken },
+    token,
+    options,
+    true,
+  );
+  return { sourceId, fenceToken };
+}
+
+/** Fence a workspace's sources with bounded fan-out. */
+export async function requireEdgeSourceFences(
+  sourceIds: readonly string[],
+  options: EdgeInvalidationOptions = {},
+): Promise<EdgeSourceFence[]> {
+  const concurrency = 10;
+  const fences: EdgeSourceFence[] = [];
+  for (let index = 0; index < sourceIds.length; index += concurrency) {
+    fences.push(...await Promise.all(
+      sourceIds.slice(index, index + concurrency).map((sourceId) => (
+        requireEdgeSourceFence(sourceId, options)
+      )),
+    ));
+  }
+  return fences;
+}
+
+/** Publish committed source state and release its matching fence. */
+export async function requireEdgeSourceAuthoritySync(
+  fence: EdgeSourceFence,
+  workspaceId: string,
   options: EdgeInvalidationOptions = {},
 ): Promise<void> {
   const env = options.env ?? process.env;
   const token = env.INGEST_ADMIN_TOKEN;
   const urls = endpointUrls(env);
   if (!urls || !token) {
-    throw new Error("required edge cache invalidation is not configured");
+    throw new Error("required edge source authority is not configured");
   }
-  await adminPost(urls.invalidate, { source_id: sourceId }, token, options, true);
+
+  const row = await loadSourceForEdge(fence.sourceId, workspaceId);
+  const source = row ? await rowToEdgePayload(row) : null;
+  await adminPost(
+    urls.sync,
+    {
+      source_id: fence.sourceId,
+      fence_token: fence.fenceToken,
+      source,
+    },
+    token,
+    options,
+    true,
+  );
 }
 
-/** Required invalidation for a workspace-wide status change, with bounded fan-out. */
-export async function requireEdgeSourceCacheInvalidations(
-  sourceIds: readonly string[],
+/** Sync a workspace's committed source state with bounded fan-out. */
+export async function requireEdgeSourceAuthoritySyncs(
+  fences: readonly EdgeSourceFence[],
+  workspaceId: string,
   options: EdgeInvalidationOptions = {},
 ): Promise<void> {
   const concurrency = 10;
-  for (let index = 0; index < sourceIds.length; index += concurrency) {
+  for (let index = 0; index < fences.length; index += concurrency) {
     await Promise.all(
-      sourceIds.slice(index, index + concurrency).map((sourceId) => (
-        requireEdgeSourceCacheInvalidation(sourceId, options)
+      fences.slice(index, index + concurrency).map((fence) => (
+        requireEdgeSourceAuthoritySync(fence, workspaceId, options)
       )),
     );
   }
 }
 
 /**
- * Push the current state of a newly created source to warm the edge cache.
- * Existing-source auth/privacy mutations invalidate instead, so a failed push
- * can never preserve an older credential or policy.
+ * Push a newly created source as an optional cold-start warm-up. The Durable
+ * Object accepts bootstrap only before it has any state, so this best-effort
+ * call cannot overwrite an existing credential or a mutation fence.
  *
  * The worker validates the source shape strictly — if the worker rejects it
  * (400 invalid_source_shape), we log and move on rather than failing the
- * dashboard action; the worker falls through to its authenticated source
- * lookup when the cache is empty.
+ * dashboard action. A cold object falls through to authenticated origin lookup.
  */
 export async function pushSourceToEdge(
   source: EdgeSource,
@@ -270,12 +321,9 @@ export async function rowToEdgePayload(row: SourceDbRow, overrides: Partial<{ se
         throw new Error(`${label} signing secret decrypted to an empty value`);
       }
       return plaintext;
-    } catch (err) {
-      console.error(`[edge] decrypt ${label} signing secret failed for source ${row.id}:`, err);
-      throw new Error(
-        `${label} signing secret is configured but could not be decrypted for source ${row.id}; refusing to publish an unsigned edge payload`,
-        { cause: err },
-      );
+    } catch {
+      console.error(`[edge] decrypt ${label} signing secret failed`);
+      throw new Error(`${label}_signing_secret_decrypt_failed`);
     }
   };
   const signingSecret = await decryptConfiguredSecret(row.signing_secret_ciphertext, "current");

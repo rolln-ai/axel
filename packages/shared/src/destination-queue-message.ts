@@ -2,6 +2,7 @@ import type {
   DestinationQueueMessage,
   RouteDestinationBinding,
 } from "./types.js";
+import { isCanonicalRawPayloadKey } from "./raw-payload-key.js";
 
 export const DESTINATION_QUEUE_MESSAGE_VERSION = 1 as const;
 
@@ -72,6 +73,12 @@ export function validateDestinationQueueMessage(
   for (const field of ["received_at", "enqueued_at"] as const) {
     if (!validIsoDate(value[field])) return { ok: false, code: "invalid_field", field };
   }
+  if (!isCanonicalRawPayloadKey(value.r2_key as string, {
+    workspaceId: value.workspace_id as string,
+    sourceId: value.source_id as string,
+  })) {
+    return { ok: false, code: "invalid_field", field: "r2_key" };
+  }
 
   for (const field of ["attempt_no", "max_attempts", "size_bytes", "payload", "headers", "query", "is_test"] as const) {
     if (!Object.hasOwn(value, field)) return { ok: false, code: "missing_field", field };
@@ -133,8 +140,10 @@ export function validateDestinationQueueMessage(
     content_type: value.content_type as string,
     size_bytes: value.size_bytes as number,
     payload: value.payload,
-    headers: copyStringRecord(value.headers),
-    query: copyStringRecord(value.query),
+    // Rolling/backlogged pre-hardening messages may carry inbound request
+    // values. Validate the legacy shape above, then erase it before delivery.
+    headers: {},
+    query: {},
     is_test: value.is_test,
     ...(value.next_attempt_at !== undefined ? { next_attempt_at: value.next_attempt_at as string } : {}),
     ...(value.binding !== undefined
@@ -169,11 +178,4 @@ function validStringRecord(value: unknown): value is Record<string, string> {
     && Object.entries(value).every(
       ([key, entry]) => key.length <= 1_024 && typeof entry === "string" && entry.length <= 64 * 1_024,
     );
-}
-
-function copyStringRecord(value: Record<string, string>): Record<string, string> {
-  // Object.fromEntries creates own data properties even for a key named
-  // "__proto__". That avoids prototype mutation while retaining valid headers
-  // or query keys byte-for-byte.
-  return Object.fromEntries(Object.entries(value));
 }

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import type { SourceProvider } from "@axel/shared";
 import { CheckCircle2, Copy } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -13,6 +14,10 @@ import {
 } from "@/components/ui/select";
 import { useCopyToClipboard } from "../../../_components/CopyButton";
 import { useToast } from "../../../../_components/Toast";
+import {
+  sourceAuthenticationCopy,
+  sourceProviderLabel,
+} from "../../../../../lib/source-ingest-auth";
 
 export function SecretRow({ label, value }: { label: string; value: string }) {
   const toast = useToast();
@@ -40,9 +45,8 @@ export function SecretRow({ label, value }: { label: string; value: string }) {
           {copied ? "Copied" : "Copy"}
         </button>
       </div>
-      {/* break-all + whitespace-pre-wrap so long unbroken secrets (ingest URL +
-          token) wrap inside the modal instead of forcing it wider than the
-          viewport. */}
+      {/* break-all + whitespace-pre-wrap keeps long URLs and one-shot secrets
+          inside the modal on narrow viewports. */}
       <pre className="w-full max-w-full whitespace-pre-wrap break-all rounded-md bg-muted p-2 font-mono text-[11px] leading-tight select-all">
         {value}
       </pre>
@@ -138,16 +142,15 @@ export function StepDots({
  * nothing to backfill server-side. (For already-recorded ClickHouse events,
  * the route detail page has a separate "Replay window" backfill control.)
  */
-export function SyncBehaviorNotice() {
+export function SyncBehaviorNotice({ provider }: { provider: SourceProvider }) {
   return (
     <div className="rounded-md border border-border bg-muted/30 px-3 py-2.5 text-xs">
       <p className="font-medium text-foreground">Captures events going forward.</p>
       <p className="mt-0.5 leading-5 text-muted-foreground">
         {"Webhook sources start receiving events the moment you create them — there's no historical record to backfill. " +
-          "Point your provider at the ingest URL Axel returns to start the stream. " +
-          "After you create the source, Axel generates a unique ingest URL like " +
-          "https://<your-ingest-host>/in/<id>?token=<token> — copy it to your provider in the next step. " +
-          "Your consumer should verify the X-Axel-Signature header (HMAC-SHA256, format t=<timestamp>,v1=<hex>) on each delivery."}
+          `After creation, point ${sourceProviderLabel(provider)} at the clean ingest URL Axel returns. ` +
+          sourceAuthenticationCopy(provider) +
+          " Your consumer should verify the X-Axel-Signature header (HMAC-SHA256, format t=<timestamp>,v1=<hex>) on each delivery."}
       </p>
     </div>
   );
@@ -182,18 +185,32 @@ export function ModeRadio({
   );
 }
 
-export function InboundProviderFields() {
+export function InboundProviderFields({
+  value,
+  onValueChange,
+}: {
+  value?: SourceProvider;
+  onValueChange?: (provider: SourceProvider) => void;
+} = {}) {
   // AXE-23 — provider preset for inbound HMAC verification.
   // Lives client-side so the signing-secret input can show/hide based
   // on the picked provider without a round-trip.
-  const [provider, setProvider] = useState<"custom" | "stripe" | "github" | "shopify" | "chargebee">("custom");
+  const [localProvider, setLocalProvider] = useState<SourceProvider>("custom");
+  const provider = value ?? localProvider;
+
+  function selectProvider(nextValue: string) {
+    const nextProvider = nextValue as SourceProvider;
+    if (value === undefined) setLocalProvider(nextProvider);
+    onValueChange?.(nextProvider);
+  }
+
   return (
     <div className="space-y-1.5">
       <Label htmlFor="pipeline-inbound-provider">Inbound provider</Label>
       <Select
         name="inbound_provider"
         value={provider}
-        onValueChange={(v) => setProvider(v as typeof provider)}
+        onValueChange={selectProvider}
       >
         <SelectTrigger id="pipeline-inbound-provider" className="w-full">
           <SelectValue />
@@ -207,8 +224,8 @@ export function InboundProviderFields() {
         </SelectContent>
       </Select>
       <p className="text-xs text-muted-foreground">
-        Choosing a provider enables HMAC signature verification — Axel rejects any payload whose
-        signature does not match. Leave as Custom to accept any POST with a valid token.
+        Choosing a named provider enables its native webhook authentication. Axel rejects requests
+        that do not verify. Leave this set to Custom for token-authenticated requests.
       </p>
       {provider !== "custom" ? (
         <div className="space-y-1.5 rounded-md border border-input bg-muted/30 p-3">

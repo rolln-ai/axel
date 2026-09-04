@@ -2,12 +2,12 @@
   "name": "axel",
   "private": true,
   "version": "0.0.0",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "packageManager": "pnpm@9.12.0",
   "scripts": {
     "build": "turbo run build",
     "test": "turbo run test && pnpm test:deploy-scripts",
-    "test:deploy-scripts": "bash scripts/test/sentry-release-deploy.test.sh && bash scripts/test/deploy-render-service.test.sh && bash scripts/test/harden-render-auto-deploy.test.sh && bash scripts/test/vercel-preview-deploy.test.sh && bash scripts/test/self-host-provisioner.test.sh && bash scripts/test/self-host-compose.test.sh && bash scripts/test/docker-build-context.test.sh && node scripts/test/migrate-bigquery-nested-bindings.test.mjs && node --test scripts/test/production-workflows.test.mjs scripts/test/delivery-canary.test.mjs scripts/test/harden-cloudflare-native-queue.test.mjs scripts/test/self-host-runtime-token.test.mjs scripts/test/dashboard-r2-runtime-token.test.mjs scripts/test/provision-delivery-canary.test.mjs scripts/test/sync-render-canary-settings.test.mjs",
+    "test:deploy-scripts": "bash scripts/test/sentry-release-deploy.test.sh && bash scripts/test/deploy-render-service.test.sh && bash scripts/test/harden-render-auto-deploy.test.sh && bash scripts/test/vercel-preview-deploy.test.sh && bash scripts/test/sync-cloudflare-secret-version.test.sh && bash scripts/test/self-host-provisioner.test.sh && bash scripts/test/self-host-compose.test.sh && bash scripts/test/docker-build-context.test.sh && node scripts/test/migrate-bigquery-nested-bindings.test.mjs && node --test scripts/test/production-workflows.test.mjs scripts/test/dependency-license-policy.test.mjs scripts/test/marketing-tracker-privacy.test.mjs scripts/test/postgres-integration-test-helpers.test.mjs scripts/test/postgres-migration-safety.test.mjs scripts/test/psql-safe.test.mjs scripts/test/sync-render-database-url.test.mjs scripts/test/sync-render-node-version.test.mjs scripts/test/sync-render-runtime-secrets.test.mjs scripts/test/verify-database-runtime-role.test.mjs scripts/test/database-service-access-profiles.test.mjs scripts/test/hosted-database-bootstrap.test.mjs scripts/test/database-service-roles.integration.mjs scripts/test/provision-database-access-roles.test.mjs scripts/test/provision-database-access-roles.integration.mjs scripts/test/self-host-database-access.integration.mjs scripts/test/cloudflare-worker-release.test.mjs scripts/test/delivery-canary.test.mjs scripts/test/harden-cloudflare-native-queue.test.mjs scripts/test/self-host-runtime-token.test.mjs scripts/test/dashboard-r2-runtime-token.test.mjs scripts/test/provision-delivery-canary.test.mjs scripts/test/sync-render-canary-settings.test.mjs",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "lint:sql": "node scripts/check-clickhouse-aliases.mjs",
@@ -22,8 +22,10 @@
   "devDependencies": {
     "@biomejs/biome": "^2.5.0",
     "@playwright/test": "^1.51.1",
+    "pg": "8.21.0",
     "turbo": "^2.9.18",
     "typescript": "^6.0.3",
+    "vercel": "58.4.0",
     "vite": "^8.0.16",
     "wrangler": "^4.101.0"
   },
@@ -38,20 +40,28 @@
       "js-yaml": "4.3.1",
       "dompurify": "3.4.13",
       "@babel/core": "7.29.6",
-      "qs": "6.15.2",
+      "ajv@8.6.3": "8.20.0",
+      "smol-toml@1.5.2": "1.6.1",
+      "@tootallnate/once@2.0.0": "2.0.1",
+      "qs": "6.16.0",
       "brace-expansion": "5.0.9",
       "ip-address": "10.3.1",
       "postcss": "8.5.23",
-      "fast-uri": ">=4.1.2",
+      "browserslist": "4.28.8",
+      "path-to-regexp@>=8.0.0 <8.4.0": "8.4.0",
+      "fast-uri": "4.1.4",
+      "minimatch@>=10.0.0 <10.2.3": "10.2.3",
       "nanoid@<3.3.18": "3.3.18",
       "nanoid@>=4.0.0 <5.1.16": "5.1.16",
+      "postcss-selector-parser": "7.1.6",
       "sharp": ">=0.35.0",
+      "tar": "7.5.21",
       "wrangler": "^4.101.0",
       "@cloudflare/workers-types": "^4.20260616.1"
     }
   },
   "engines": {
-    "node": ">=20",
-    "pnpm": ">=9"
+    "node": ">=22.13.0 <23",
+    "pnpm": "9.12.0"
   }
 }

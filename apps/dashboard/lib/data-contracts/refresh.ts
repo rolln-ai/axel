@@ -107,14 +107,13 @@ export async function refreshDataContractNow(
     });
   } catch (err: unknown) {
     if (err instanceof SamplerPayloadFetchError) {
-      // R2 unreachable — the event metadata IS in ClickHouse but the
-      // payload store can't be read. Tell the operator exactly what to
-      // check rather than the generic "no events" notice they'd get if
-      // we papered over this.
-      return { error: err.message };
+      return {
+        error:
+          "Couldn't read recent event payloads from storage. Check the payload-store configuration and try again.",
+      };
     }
     return {
-      error: `Couldn't fetch recent events: ${err instanceof Error ? err.message : String(err)}`,
+      error: "Couldn't fetch recent events. Try again.",
     };
   }
   if (samples.length === 0) {
@@ -164,10 +163,11 @@ export async function refreshDataContractNow(
       },
       createdByUserId: session.user.id,
     });
-  } catch (err: unknown) {
+  } catch {
     revalidatePath(`/data-contracts/${dataContractId}`);
     return {
-      error: `Couldn't save the refreshed version — another refresh may have just landed. Reload the page and try again if the new event types aren't there. (${err instanceof Error ? err.message : String(err)})`,
+      error:
+        "Couldn't save the refreshed version. Another refresh may have just landed. Reload the page and try again if the new event types aren't there.",
     };
   }
 
@@ -184,10 +184,10 @@ export async function refreshDataContractNow(
         sample_size: samples.length,
       },
     });
-  } catch (err) {
+  } catch {
     // Audit soft-fail: the version is already committed, so don't convert a
     // logging hiccup into a user-facing error (they'd retry and append again).
-    console.error("[data-contracts] refresh audit_log insert failed:", err);
+    console.error("[data-contracts] refresh audit_log insert failed");
   }
 
   revalidatePath(`/data-contracts/${dataContractId}`);

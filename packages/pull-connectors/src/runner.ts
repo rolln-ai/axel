@@ -220,12 +220,10 @@ function selectStreams<TConfig>(
  */
 export function sanitizePullRunSummaryForStorage(summary: PullRunSummary): Record<string, unknown> {
   return {
-    source_id: summary.source_id,
-    source_type: summary.source_type,
     started_at: summary.started_at,
     finished_at: summary.finished_at,
     streams: summary.streams.slice(0, 100).map((stream) => ({
-      stream: safeStreamName(stream.stream),
+      stream: safeStoredStreamName(summary.source_type, stream.stream),
       records: stream.records,
       pages: stream.pages,
       cursor_present: stream.cursor !== null,
@@ -236,7 +234,26 @@ export function sanitizePullRunSummaryForStorage(summary: PullRunSummary): Recor
 }
 
 function safeStreamName(value: string): string {
-  return sanitizeConnectorDiagnosticForStorage(value, 160) || "pull_stream";
+  const trimmed = value.trim();
+  return /^[a-z0-9][a-z0-9_.-]{0,159}$/iu.test(trimmed)
+    ? trimmed
+    : "pull_stream";
+}
+
+const SAFE_STORED_STREAMS_BY_SOURCE = new Map<string, ReadonlySet<string>>([
+  ["chargebee", new Set(["customers", "subscriptions", "invoices"])],
+  ["shopify", new Set(["customers", "orders", "products"])],
+  [
+    "stripe",
+    new Set(["customers", "subscriptions", "invoices", "payment_intents"]),
+  ],
+]);
+
+function safeStoredStreamName(sourceType: string, value: string): string {
+  const safeName = safeStreamName(value);
+  return SAFE_STORED_STREAMS_BY_SOURCE.get(sourceType)?.has(safeName)
+    ? safeName
+    : "pull_stream";
 }
 
 function safePullDiagnostic(value: unknown): string {

@@ -2,7 +2,10 @@ import { sentryClientFromEnv, withCronCheckIn } from "@axel/observability";
 import { dispatchBillingEmails } from "../../../../lib/billing/email-dispatcher";
 import { reportMeterEvents } from "../../../../lib/billing/meter-reporter";
 import { computeAllPlanStates, pushPlanStates } from "../../../../lib/billing/plan-state";
-import { runBillingRollup } from "../../../../lib/billing/rollup";
+import {
+  publicBillingRollupCronSummary,
+  runBillingRollup,
+} from "../../../../lib/billing/rollup";
 import { hasStripeConfigured } from "../../../../lib/billing/stripe-client";
 import { hasClickhouseUrl } from "../../../../lib/clickhouse";
 import { isCronAuthorized } from "../../../../lib/cron-auth";
@@ -70,16 +73,16 @@ async function handle(request: Request): Promise<Response> {
         // hour. sendBillingEmail dedups via billing_events PK so this is
         // safe to call every run (only the first cross per period emails).
         const emails = await dispatchBillingEmails();
-        return { summary, meter, planPush, emails };
+        return publicBillingRollupCronSummary({ summary, meter, planPush, emails });
       },
     );
-    return Response.json({ ok: true, ...result });
-  } catch (err) {
-    await captureDashboardException(err, {
+    return Response.json({ ok: true, summary: result });
+  } catch {
+    await captureDashboardException(new Error("billing_rollup_failed"), {
       tags: { component: "billing_rollup_cron" },
     });
     return Response.json(
-      { ok: false, error: err instanceof Error ? err.message : String(err) },
+      { ok: false, error: "billing_rollup_failed" },
       { status: 500 },
     );
   }

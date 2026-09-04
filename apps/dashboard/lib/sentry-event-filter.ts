@@ -1,5 +1,4 @@
 import { isTransientPostgresError } from "@axel/observability";
-import { sanitizeTelemetryValue } from "./telemetry-sanitization";
 
 interface SentryEventHint {
   originalException?: unknown;
@@ -23,7 +22,7 @@ interface SentryEventWithMechanism {
       value?: string;
       mechanism?: { handled?: boolean };
       stacktrace?: {
-        frames?: Array<{
+        frames?: Array<Record<string, unknown> & {
           filename?: string;
           function?: string;
         }>;
@@ -36,12 +35,108 @@ interface SentryEventWithMechanism {
     url?: string;
     [key: string]: unknown;
   };
+  tags?: Record<string, unknown>;
   transaction?: string;
+  user?: unknown;
+  [key: string]: unknown;
 }
 
-/** Scrub browser-owned URL fields immediately before an event can leave. */
+const SAFE_EXCEPTION_TYPES = new Set([
+  "AggregateError",
+  "Error",
+  "EvalError",
+  "RangeError",
+  "ReferenceError",
+  "SyntaxError",
+  "TypeError",
+  "URIError",
+]);
+
+const SAFE_TAG_KEYS = new Set([
+  "category",
+  "component",
+  "error_code",
+  "http_status",
+  "kind",
+  "phase",
+  "service",
+  "status",
+  "unhandled",
+]);
+
+/** Enforce a value-free boundary immediately before an event can leave. */
 export function scrubDashboardSentryEvent(event: SentryEventWithMechanism): void {
-  Object.assign(event, sanitizeTelemetryValue(event));
+  delete event.user;
+  delete event.request;
+  delete event.breadcrumbs;
+  delete event.contexts;
+  delete event.transaction;
+  delete event.extra;
+  delete event.fingerprint;
+
+  if ("message" in event) event.message = "dashboard_message";
+
+  const safeTags: Record<string, string | number | boolean | null> = {};
+  for (const [key, value] of Object.entries(event.tags ?? {})) {
+    if (!SAFE_TAG_KEYS.has(key)) continue;
+    if (typeof value === "string") {
+      safeTags[key] = safeSlug(value);
+    } else if (typeof value === "number") {
+      if (Number.isFinite(value)) safeTags[key] = value;
+    } else if (typeof value === "boolean" || value === null) {
+      safeTags[key] = value;
+    }
+  }
+  if (Object.keys(safeTags).length > 0) event.tags = safeTags;
+  else delete event.tags;
+
+  for (const value of event.exception?.values ?? []) {
+    value.type = SAFE_EXCEPTION_TYPES.has(value.type ?? "") ? value.type : "Error";
+    value.value = "dashboard_error";
+    const handled = value.mechanism?.handled;
+    value.mechanism = typeof handled === "boolean" ? { handled } : undefined;
+    const frames = value.stacktrace?.frames;
+    if (!frames) continue;
+    value.stacktrace = {
+      frames: frames.slice(0, 100).map(safeStackFrame),
+    };
+  }
+}
+
+function safeSlug(value: string): string {
+  const trimmed = value.trim();
+  return /^[a-z0-9][a-z0-9_.:-]{0,95}$/iu.test(trimmed) ? trimmed : "redacted";
+}
+
+function safeStackFrame(frame: Record<string, unknown>): Record<string, unknown> {
+  const safe: Record<string, unknown> = {
+    filename: safeStackFilename(typeof frame.filename === "string" ? frame.filename : ""),
+    function: "<anonymous>",
+  };
+  if (typeof frame.lineno === "number" && Number.isFinite(frame.lineno)) {
+    safe.lineno = frame.lineno;
+  }
+  if (typeof frame.colno === "number" && Number.isFinite(frame.colno)) {
+    safe.colno = frame.colno;
+  }
+  if (typeof frame.in_app === "boolean") safe.in_app = frame.in_app;
+  return safe;
+}
+
+function safeStackFilename(value: string): string {
+  let candidate = value;
+  try {
+    candidate = new URL(value).pathname;
+  } catch {
+    // Relative and runtime-owned paths are handled below.
+  }
+  candidate = candidate.split("?")[0]?.split("#")[0] ?? "";
+  for (const root of ["/_next/", "/apps/", "/packages/"] as const) {
+    const index = candidate.lastIndexOf(root);
+    if (index >= 0) return candidate.slice(index, index + 240);
+  }
+  if (/^node:[a-z0-9_./-]{1,160}$/iu.test(candidate)) return candidate;
+  return "[external]";
 }
 
 function isAndroidWebViewPerfInjectionError(event: SentryEventWithMechanism): boolean {
@@ -171,10 +266,6 @@ export function filterDashboardSentryEvent<T>(
     return event;
   }
 
-  const error = hint.originalException;
-  console.warn(
-    "[sentry] dropping transient pg SDK event:",
-    error instanceof Error ? error.message : error,
-  );
+  console.warn("[sentry] dropping transient pg SDK event");
   return null;
 }

@@ -7,13 +7,12 @@ import { generateSourceToken } from "./source-tokens";
 import { RETENTION_BOUNDS } from "./retention-bounds";
 import { deploymentCapabilities } from "./deployment-capabilities";
 import {
-  invalidateEdgeSourceCache,
-  requireEdgeSourceCacheInvalidation,
+  requireEdgeSourceAuthoritySync,
+  requireEdgeSourceFence,
 } from "./edge-invalidation";
 import { runDashboardPullSync } from "./pull-sync";
 import { entityNameError } from "./entity-name";
 import {
-  sanitizeConnectorDiagnosticForStorage,
   validateSubjectKeyPaths,
 } from "@axel/shared";
 import { withWorkspaceMutation } from "./with-mutation";
@@ -37,22 +36,18 @@ function _isValidSourceName(name: string): boolean {
 }
 
 /**
- * Existing-source auth and privacy policy changes must not commit while a
- * stale edge entry can remain live. The pre-delete proves the edge is
- * reachable before mutation; the post-delete removes lookups that repopulated
- * before it. Distributed KV propagation or a lookup already in flight can
- * still expose an old row, so the five-minute TTL is the residual bound.
+ * Fence hosted authorization, perform the database mutation, then publish a
+ * freshly loaded committed source. A failed sync leaves the source fenced.
  */
-async function withRequiredSourceCacheInvalidation<T>(
+async function withRequiredSourceAuthorityFence<T>(
   sourceId: string,
+  workspaceId: string,
   mutate: () => Promise<T>,
 ): Promise<T> {
-  await requireEdgeSourceCacheInvalidation(sourceId);
-  try {
-    return await mutate();
-  } finally {
-    await requireEdgeSourceCacheInvalidation(sourceId);
-  }
+  const fence = await requireEdgeSourceFence(sourceId);
+  const result = await mutate();
+  await requireEdgeSourceAuthoritySync(fence, workspaceId);
+  return result;
 }
 
 async function sourceExistsInWorkspace(sourceId: string, workspaceId: string): Promise<boolean> {
@@ -103,7 +98,7 @@ export async function updateSourceIpAllowlistAction(
     if (!await sourceExistsInWorkspace(sourceId, workspaceId)) {
       return { error: "Source not found in this workspace." };
     }
-    const updated = await withRequiredSourceCacheInvalidation(sourceId, async () => {
+    const updated = await withRequiredSourceAuthorityFence(sourceId, workspaceId, async () => {
       const result = await db().query(
         `UPDATE sources SET inbound_ip_allowlist = $1, updated_at = now()
           WHERE id = $2 AND workspace_id = $3`,
@@ -155,7 +150,7 @@ export async function updateSourceSubjectKeysAction(
     // does NOT reset it, so events indexed during an earlier active window stay
     // covered. (The fixed SQL fragment is chosen by keys.length, not user input.)
     const value = keys.length > 0 ? JSON.stringify(keys) : null;
-    const updated = await withRequiredSourceCacheInvalidation(sourceId, async () => {
+    const updated = await withRequiredSourceAuthorityFence(sourceId, workspaceId, async () => {
       const result = await db().query(
         `UPDATE sources
             SET subject_key_paths = $1::jsonb,
@@ -214,12 +209,7 @@ export async function triggerPullSourceSync(_state: ActionState, formData: FormD
       if (err instanceof Error && err.message === "pull_ingest_source_unavailable") return { error: "Enable the source before syncing, or recreate it if it was deleted." };
       if (err instanceof Error && err.message === "pull_sync_already_running") return { error: "This source is already syncing. Try again after the current run finishes." };
       if (err instanceof Error && err.message === "pull_source_type_unsupported") return { error: "Manual sync is not supported for this source type yet." };
-      return {
-        error: sanitizeConnectorDiagnosticForStorage(
-          err instanceof Error ? err.message : err,
-          400,
-        ) || "Could not run sync.",
-      };
+      return { error: "Could not run sync." };
     }
   });
 }
@@ -251,38 +241,32 @@ export async function setSourceStatus(_state: ActionState, formData: FormData): 
       }, client);
       return true;
     };
-    const outcome = status === "disabled"
-      ? (await withRequiredSourceCacheInvalidation(sourceId, () => updateStatus(db()))
-          ? "updated" as const
-          : "not_found" as const)
-      : await withTransaction(async (client) => {
-          // Serialize re-enable with workspace suspension/deletion and wipe-time
-          // source enumeration. The session liveness check happened before this
-          // transaction and can otherwise go stale before the UPDATE.
-          const workspace = await client.query<{ status: string }>(
-            "SELECT COALESCE(status, 'active') AS status FROM workspaces WHERE id = $1 FOR UPDATE",
-            [workspaceId],
-          );
-          if (workspace.rows[0]?.status !== "active") {
-            return "workspace_inactive" as const;
-          }
-          return await updateStatus(client) ? "updated" as const : "not_found" as const;
-        });
+    const outcome = await withRequiredSourceAuthorityFence(sourceId, workspaceId, async () => (
+      status === "disabled"
+        ? (await updateStatus(db()) ? "updated" as const : "not_found" as const)
+        : withTransaction(async (client) => {
+            // Serialize re-enable with workspace suspension/deletion and wipe-time
+            // source enumeration. The session liveness check happened before this
+            // transaction and can otherwise go stale before the UPDATE.
+            const workspace = await client.query<{ status: string }>(
+              "SELECT COALESCE(status, 'active') AS status FROM workspaces WHERE id = $1 FOR UPDATE",
+              [workspaceId],
+            );
+            if (workspace.rows[0]?.status !== "active") {
+              return "workspace_inactive" as const;
+            }
+            return await updateStatus(client) ? "updated" as const : "not_found" as const;
+          })
+    ));
     if (outcome === "workspace_inactive") {
       return { error: "This workspace is no longer active. The source was not enabled." };
     }
     if (outcome === "not_found") return { error: "Source not found in this workspace." };
-    if (status === "active") {
-      // Enabling only affects availability. Best-effort invalidation avoids
-      // blocking recovery when edge admin is down; the short TTL clears an old
-      // cached disabled row without weakening auth.
-      await invalidateEdgeSourceCache(sourceId);
-    }
     tags("sources");
     return {
       notice: status === "active"
-        ? "Source enabled. A cached disabled state can take up to five minutes to expire if edge refresh is unavailable."
-        : "Source disabled. Edge cache deletion was confirmed; distributed cache propagation or a lookup already in flight can retain the old state for up to five minutes.",
+        ? "Source enabled. The edge authority is using the committed source state."
+        : "Source disabled. The edge authority confirmed the committed disabled state.",
     };
   });
 }
@@ -296,7 +280,7 @@ export async function rotateSourceToken(_state: ActionState, formData: FormData)
     }
 
     const token = generateSourceToken();
-    const updated = await withRequiredSourceCacheInvalidation(sourceId, async () => {
+    const updated = await withRequiredSourceAuthorityFence(sourceId, workspaceId, async () => {
       const result = await db().query(
         `UPDATE sources
             SET secret_token_hash = $1, updated_at = now()
@@ -317,7 +301,7 @@ export async function rotateSourceToken(_state: ActionState, formData: FormData)
     tags("sources");
 
     return {
-      notice: "Token rotated. Copy the new token now — it won't be shown again. Edge cache deletion was confirmed; distributed cache propagation or a lookup already in flight can retain the old token for up to five minutes.",
+      notice: "Token rotated. Copy the new token now. It won't be shown again, and the old token is blocked at the edge.",
       data: {
         sourceId,
         plaintextToken: token.plaintext,
@@ -341,9 +325,10 @@ export async function deleteSource(_state: ActionState, formData: FormData): Pro
       // caller owned the deleted source, allowing a safe idempotent retry
       // without opening cross-tenant cache eviction.
       if (await sourceDeletionWasAudited(sourceId, workspaceId)) {
-        await requireEdgeSourceCacheInvalidation(sourceId);
+        const fence = await requireEdgeSourceFence(sourceId);
+        await requireEdgeSourceAuthoritySync(fence, workspaceId);
         tags("sources", "routes");
-        return { notice: "Source was already deleted. Edge cache deletion is now confirmed." };
+        return { notice: "Source was already deleted. The edge authority now confirms it is absent." };
       }
       return { error: "Source not found in this workspace." };
     }
@@ -355,7 +340,7 @@ export async function deleteSource(_state: ActionState, formData: FormData): Pro
     // Delete BOTH in one transaction; the ON DELETE CASCADE FKs on
     // pull_source_credentials / pull_source_stream_state / pull_sync_runs clean up
     // the rest. The pull_sources delete is a no-op for plain webhook sources.
-    const deleted = await withRequiredSourceCacheInvalidation(sourceId, async () => {
+    const deleted = await withRequiredSourceAuthorityFence(sourceId, workspaceId, async () => {
       const removed = await withTransaction(async (client) => {
         const result = await client.query(
           `DELETE FROM sources WHERE id = $1 AND workspace_id = $2`,
@@ -389,9 +374,8 @@ export async function deleteSource(_state: ActionState, formData: FormData): Pro
  * router projects payloads through before fanning out to destinations.
  *
  * Empty selection (no paths) clears the column → pass-through. Non-empty
- * selection writes the array as jsonb. The action also re-pushes the source
- * to the edge KV cache so the router-edge can see the new selection without
- * waiting for the cache TTL.
+ * selection writes the array as jsonb. The action fences authorization and
+ * publishes the committed source shape before the edge accepts another event.
  */
 export async function updateSourceFieldSelection(
   _state: ActionState,
@@ -418,7 +402,7 @@ export async function updateSourceFieldSelection(
     // decide whether to project at all.
     const value = paths.length > 0 ? JSON.stringify(paths) : null;
 
-    const updated = await withRequiredSourceCacheInvalidation(sourceId, async () => {
+    const updated = await withRequiredSourceAuthorityFence(sourceId, workspaceId, async () => {
       const result = await db().query(
         `UPDATE sources
             SET field_selection = $1::jsonb,
@@ -539,7 +523,7 @@ export async function updateSourceLimits(
     values.push(sourceId);
     values.push(workspaceId);
 
-    const updated = await withRequiredSourceCacheInvalidation(sourceId, async () => {
+    const updated = await withRequiredSourceAuthorityFence(sourceId, workspaceId, async () => {
       const result = await db().query(
         `UPDATE sources SET ${setParts.join(", ")} WHERE id = $${pIdx++} AND workspace_id = $${pIdx++}`,
         values,
@@ -571,7 +555,7 @@ export async function updateSourceLimits(
     if (depth.kind === "default") changes.push("max depth → default");
 
     return {
-      notice: `Limits updated: ${changes.join(", ")}. New caps apply within seconds (edge KV TTL).`,
+      notice: `Limits updated: ${changes.join(", ")}. The edge authority is using the committed caps.`,
       data: { sourceId },
     };
   });
@@ -613,20 +597,28 @@ export async function updateSourceTransientModeAction(
       }
       rawOverride = n;
     }
-    await db().query(
-      `UPDATE sources
-          SET transient_mode = $3,
-              raw_payload_retention_days = $4,
-              updated_at = now()
-        WHERE id = $1 AND workspace_id = $2`,
-      [sourceId, workspaceId, transientMode, transientMode ? 0 : rawOverride],
-    );
-    await audit({
-      action: "source.transient_mode_updated",
-      targetType: "source",
-      targetId: sourceId,
-      metadata: { transient_mode: transientMode, raw_override: rawOverride },
+    if (!await sourceExistsInWorkspace(sourceId, workspaceId)) {
+      return { error: "Source not found in this workspace." };
+    }
+    const updated = await withRequiredSourceAuthorityFence(sourceId, workspaceId, async () => {
+      const result = await db().query(
+        `UPDATE sources
+            SET transient_mode = $3,
+                raw_payload_retention_days = $4,
+                updated_at = now()
+          WHERE id = $1 AND workspace_id = $2`,
+        [sourceId, workspaceId, transientMode, transientMode ? 0 : rawOverride],
+      );
+      if (!result.rowCount) return false;
+      await audit({
+        action: "source.transient_mode_updated",
+        targetType: "source",
+        targetId: sourceId,
+        metadata: { transient_mode: transientMode, raw_override: rawOverride },
+      });
+      return true;
     });
+    if (!updated) return { error: "Source not found in this workspace." };
     tags("sources");
     return {
       notice: transientMode

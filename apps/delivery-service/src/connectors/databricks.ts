@@ -479,7 +479,7 @@ function classifyStatement(
       {
         status: out.httpStatus,
         statement_id: out.statementId,
-        error: sanitizeConnectorDiagnosticForStorage(out.errorMessage ?? "statement_failed", 1024),
+        error: "databricks_statement_failed",
       },
       startedAt,
     );
@@ -754,7 +754,7 @@ export function createDatabricksVolumeConnector(
           context,
           destination,
           transient ? "retry" : "dead",
-          { error: message.slice(0, 500) },
+          { error: transient ? "databricks_volume_transport_failed" : "databricks_volume_failed" },
           startedAt,
         );
       } finally {

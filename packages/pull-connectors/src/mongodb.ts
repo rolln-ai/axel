@@ -399,11 +399,11 @@ export async function testMongodbConnection(
     const db = client.db(config.database);
     await db.collection("__axel_ping").find({ _id: null }).limit(1).toArray();
     return { ok: true, latency_ms: Date.now() - started };
-  } catch (err: unknown) {
+  } catch {
     return {
       ok: false,
       reason: "connection_failed",
-      message: err instanceof Error ? err.message : String(err),
+      message: "connection_failed",
     };
   } finally {
     if (client) {

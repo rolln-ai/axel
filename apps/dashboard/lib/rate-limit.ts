@@ -94,13 +94,13 @@ export type RateLimitRule = readonly [key: string, limit: number, windowMs: numb
  * null when all are within limits. Every rule is recorded (each is a real
  * attempt).
  *
- * FAIL-OPEN: if the store itself errors (e.g. the auth_rate_limits table is
- * absent during a migrate/deploy window, or a transient DB hiccup), we log and
- * ALLOW the request. A rate limiter must never be able to lock everyone out of
- * authentication — availability of login wins over brute-force protection in
- * the degraded case.
+ * FAIL-CLOSED: a store error returns a short synthetic breach. Authentication
+ * and API-key validation use the same database, so continuing without this
+ * control does not provide a dependable availability benefit. It does create
+ * a brute-force and stolen-token bypass exactly when the control plane is
+ * degraded.
  */
-export async function checkRulesFailOpen(
+export async function checkRulesFailClosed(
   store: RateLimitStore,
   rules: readonly RateLimitRule[],
   now?: number,
@@ -112,16 +112,21 @@ export async function checkRulesFailOpen(
       if (!result.ok && !firstBreach) firstBreach = result;
     }
     return firstBreach;
-  } catch (err) {
-    console.error("[rate-limit] check failed — allowing request (fail-open):", err);
-    return null;
+  } catch {
+    console.error("[rate-limit] check failed — blocking request");
+    return {
+      ok: false,
+      count: 1,
+      limit: 0,
+      retryAfterSeconds: 60,
+    };
   }
 }
 
 /** Production entrypoint: enforce auth rules against the Postgres store. */
 export async function enforceAuthRateLimits(rules: readonly RateLimitRule[]): Promise<RateLimitResult | null> {
   const store = createPgRateLimitStore((sql, params) => db().query(sql, params) as Promise<{ rows: Array<{ count: number }> }>);
-  return checkRulesFailOpen(store, rules);
+  return checkRulesFailClosed(store, rules);
 }
 
 export function rateLimitMessage(result: RateLimitResult): string {

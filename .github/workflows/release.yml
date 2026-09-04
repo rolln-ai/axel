@@ -18,6 +18,7 @@ jobs:
     name: Verify release
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     outputs:
       version: ${{ steps.ver.outputs.ver }}
       sha: ${{ github.sha }}
@@ -69,10 +70,20 @@ jobs:
         # bot-authored commit around branch protection.
         run: node scripts/release-verify.mjs --version "$RELEASE_VERSION" --notes "$RELEASE_NOTES" --out "$RUNNER_TEMP/release-ledger"
 
+      - name: Upload release verification ledger
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-verification-${{ steps.ver.outputs.ver }}
+          path: ${{ runner.temp }}/release-ledger
+          if-no-files-found: warn
+          retention-days: 30
+
   tag:
     name: Tag release
     if: ${{ github.ref == 'refs/heads/main' && needs.verify.result == 'success' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: verify
     environment: Production
     permissions:

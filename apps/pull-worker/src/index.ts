@@ -33,7 +33,6 @@ import { createSafePgStream, safeLookup } from "./safe-dns.js";
 import { safePullHttpFetch } from "./safe-http.js";
 import {
   decryptCredentialV2,
-  extractEventTypeFromBody,
   parseHexMasterKey,
   pullPgSslOption,
   pullSourceCredentialAadString,
@@ -85,8 +84,6 @@ export interface PullWorkerDeps {
 }
 
 export interface PullBatchFailure {
-  sourceId: string;
-  workspaceId: string;
   kind: "pre_run" | "stream";
   error: string;
 }
@@ -98,12 +95,13 @@ export interface PullBatchFailure {
  */
 export class PullBatchError extends Error {
   constructor(
-    readonly summaries: PullRunSummary[],
     readonly failures: PullBatchFailure[],
     readonly attempted: number,
   ) {
-    const sourceIds = [...new Set(failures.map((failure) => failure.sourceId))];
-    super(`pull batch had ${failures.length} failure(s) across ${sourceIds.length} source(s): ${sourceIds.join(", ")}`);
+    // There is at most one aggregate failure entry per attempted source. Keep
+    // identifiers and raw summaries off the Error object so logging or future
+    // telemetry serialization cannot export tenant/customer names.
+    super(`pull batch had ${failures.length} failure(s) across ${failures.length} source(s)`);
     this.name = "PullBatchError";
   }
 }
@@ -341,12 +339,8 @@ export async function runActivePullSources(
       const failedStreams = summary.streams.filter((stream) => stream.status === "failed");
       if (failedStreams.length > 0) {
         failures.push({
-          sourceId: row.id,
-          workspaceId: row.workspace_id,
           kind: "stream",
-          error: failedStreams
-            .map((stream) => `${stream.stream}: ${stream.error ?? "sync failed"}`)
-            .join("; "),
+          error: safePullDiagnostic(failedStreams[0]?.error ?? "pull_sync_failed"),
         });
       }
     } catch (err) {
@@ -360,19 +354,16 @@ export async function runActivePullSources(
       // source's sync. Log and continue so the batch stays healthy; a source
       // whose workspace was deleted simply stops appearing on the next tick.
       console.error(
-        `[pull-worker] skipping source ${row.id} (workspace ${row.workspace_id}): ` +
-          safePullDiagnostic(err),
+        `[pull-worker] skipping source: ${safePullDiagnostic(err)}`,
       );
       failures.push({
-        sourceId: row.id,
-        workspaceId: row.workspace_id,
         kind: "pre_run",
         error: safePullDiagnostic(err),
       });
     }
   }
   if (failures.length > 0) {
-    throw new PullBatchError(summaries, failures, sources.length);
+    throw new PullBatchError(failures, sources.length);
   }
   return summaries;
 }
@@ -393,15 +384,15 @@ export async function runPullSource(
       // Do not turn an otherwise completed extraction into a failed run solely
       // because the explicit unlock could not be acknowledged.
       console.error(
-        `[pull-worker] failed to release source lock ${row.id}: ${safePullDiagnostic(err)}`,
+        `[pull-worker] failed to release source lock: ${safePullDiagnostic(err)}`,
       );
     }
   }
 }
 
 class PullSourceSyncAlreadyRunningError extends Error {
-  constructor(sourceId: string) {
-    super(`pull source sync already running: ${sourceId}`);
+  constructor(_sourceId: string) {
+    super("pull source sync already running");
     this.name = "PullSourceSyncAlreadyRunningError";
   }
 }
@@ -453,7 +444,9 @@ async function runLockedPullSource(
         runStatus,
         now().toISOString(),
         summary.streams.reduce((sum, stream) => sum + stream.records, 0),
-        failedStream?.error ?? partialStream?.error ?? null,
+        failedStream || partialStream
+          ? safePullDiagnostic(failedStream?.error ?? partialStream?.error)
+          : null,
         JSON.stringify(sanitizePullRunSummaryForStorage(summary)),
       ],
     );
@@ -476,7 +469,7 @@ async function runLockedPullSource(
       try {
         await connector.close?.();
       } catch (closeErr) {
-        console.error(`[pull] connector close failed for ${row.id}: ${safePullDiagnostic(closeErr)}`);
+        console.error(`[pull] connector close failed: ${safePullDiagnostic(closeErr)}`);
       }
     }
   }
@@ -585,7 +578,6 @@ export class AxelPipelinePullRecordSink implements PullRecordSink {
       pull_stream: record.stream,
     });
     const shard = shardFor(eventId);
-    const eventType = extractEventTypeFromBody(bytes);
     const message: QueueMessage = {
       event_id: eventId,
       workspace_id: record.workspace_id,
@@ -595,15 +587,13 @@ export class AxelPipelinePullRecordSink implements PullRecordSink {
       content_type: "application/json",
       size_bytes: bytes.byteLength,
       shard,
-      headers: {
-        "x-axel-pull-source-type": record.source_type,
-        "x-axel-pull-stream": record.stream,
-      },
+      // Pull record metadata and inferred body fields may contain customer
+      // identifiers. The raw encrypted object remains the only payload boundary.
+      headers: {},
       query: {},
       // Pull-source records are real production events from the customer's
       // SaaS account, not test traffic.
       is_test: false,
-      ...(eventType ? { event_type: eventType } : {}),
     };
     await this.deps.ingestQueue.enqueue(message);
     if (this.deps.clickhouse) {

@@ -16,6 +16,8 @@
  *   DELIVERY_QUEUE_ID         — native pull-mode queue id
  *   EDGE_DELIVERY_QUEUE_ID    — optional, replay fan-out queue id for edge-capable destinations
  *   DATABASE_URL              — Postgres control plane
+ *   DELIVERY_SHARED_SECRET    — current internal delivery bearer
+ *   DELIVERY_SHARED_SECRET_PREVIOUS — optional rotation-only previous bearer
  *   SOURCE_LOOKUP_SHARED_SECRET — dedicated /internal/source auth (required in production)
  *   SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS — optional rotation-only previous credential
  *   POLL_BATCH_SIZE           — optional, default 25
@@ -56,7 +58,7 @@ import {
   resolveIngestBaseUrl,
   resolveRawPayloadBucket,
   sanitizeConnectorDiagnosticForStorage,
-  sanitizeConnectorResponseForStorage,
+  sanitizeDeliveryAttemptResponseForStorage,
   sleep,
   spillIfOversized,
   type DeliveryAttempt,
@@ -102,10 +104,12 @@ import { createQueueLagMonitor } from "./queue-lag-monitor.js";
 import { createSentryAlertSink } from "./sentry-alert-sink.js";
 import {
   handleInternalSourceRequest,
-  isInternalSecretAuthorized,
+  isRotatingInternalSecretAuthorized,
   loadInternalSource,
+  resolveDeliveryAuthSecrets,
   resolveInternalSourceAuthSecrets,
 } from "./internal-source.js";
+import { handleInternalErasureIndexRequest } from "./internal-erasure-index.js";
 import {
   loadActiveRoutes,
   markRouteErrored,
@@ -303,8 +307,8 @@ pool.on("error", (err) => {
 // AXE-95..113 for the incident pattern.
 
 class CloudflareQueueAuthError extends Error {
-  constructor(status: number, body: string) {
-    super(`[pull] Cloudflare queue auth failed (${status}); check CLOUDFLARE_API_TOKEN permissions: ${body.slice(0, 300)}`);
+  constructor(status: number) {
+    super(`[pull] Cloudflare queue auth failed (${status}); check CLOUDFLARE_API_TOKEN permissions`);
     this.name = "CloudflareQueueAuthError";
   }
 }
@@ -370,8 +374,8 @@ async function fetchAndMergeCredentials(
     // unsigned webhook or a secretless connector and records it as success.
     // Throw so /deliver 503s and the router retries → dead-letters, surfacing
     // the problem instead of silently delivering without credentials.
-    console.error(`[delivery] credential row ${credentialsRef} not found for workspace ${workspaceId}`);
-    throw new Error(`credential_row_missing: ${credentialsRef} for workspace ${workspaceId}`);
+    console.error("[delivery] credential row missing");
+    throw new Error("credential_row_missing");
   }
   const aad = Buffer.from(credentialAadString(row.workspace_id, row.destination_id), "utf8");
   const plaintext = await decryptCredentialBlob(MASTER_KEY, row, aad);
@@ -462,7 +466,7 @@ const idempotency = createPostgresIdempotencyStore({
 const attempts: AttemptLogSink = {
   async recordAttempt(attempt) {
     console.log(
-      `[attempt] event=${attempt.event_id} dest=${attempt.destination_id} status=${attempt.status} latency=${attempt.latency_ms}ms`,
+      `[attempt] status=${attempt.status} latency=${attempt.latency_ms}ms`,
     );
   },
 };
@@ -647,8 +651,8 @@ const retries: RetryQueueSink = {
       // a non-2xx here, the loop would ack a message whose retry never enqueued
       // (silent loss during a Cloudflare Queues API hiccup, exactly the case this
       // re-enqueue exists to survive).
-      const body = await res.text().catch(() => "");
-      throw new Error(`retry re-enqueue failed: HTTP ${res.status} ${body.slice(0, 300)}`);
+      await res.body?.cancel().catch(() => undefined);
+      throw new Error(`retry_reenqueue_http_${res.status}`);
     }
   },
 };
@@ -1067,11 +1071,11 @@ async function pullBatch(queueId: string = QUEUE_ID): Promise<PulledMessage[]> {
     },
   );
   if (!res.ok) {
-    const text = await res.text();
+    await res.body?.cancel().catch(() => undefined);
     if (res.status === 401 || res.status === 403) {
-      throw new CloudflareQueueAuthError(res.status, text);
+      throw new CloudflareQueueAuthError(res.status);
     }
-    throw new Error(`[pull] HTTP ${res.status}: ${text.slice(0, 300)}`);
+    throw new Error(`queue_pull_http_${res.status}`);
   }
   const data: unknown = await res.json();
   return parsePulledBatchResponse(data);
@@ -1120,9 +1124,8 @@ async function ackOrRetry(
   );
   if (!res.ok) {
     queueConsumerMetrics.recordAckApiFailure();
-    throw new Error(
-      `[ack] Cloudflare queue API failed with HTTP ${res.status}: ${safeDeliveryDiagnostic(await res.text())}`,
-    );
+    await res.body?.cancel().catch(() => undefined);
+    throw new Error(`queue_ack_http_${res.status}`);
   }
   const data = (await res.json()) as {
     result?: { ackCount?: number; retryCount?: number };
@@ -1248,15 +1251,11 @@ async function pollLoop(
           try {
             body = await hydrateIfSpilled(body, spillReader);
           } catch (err) {
-            // The hydrate helper throws `spill_r2_key_missing: <key>` so the
-            // key path is already in the error message; no need to duplicate
-            // it as a Sentry tag.
-            console.error(`[loop] spill hydrate failed for ${body.event_id}: ${safeDeliveryDiagnostic(err)}`);
+            console.error(`[loop] spill hydrate failed: ${safeDeliveryDiagnostic(err)}`);
             if (isQueueSpillObjectMissingError(err)) {
-              const errorMessage = err instanceof Error ? err.message : String(err);
+              const errorMessage = "spill_r2_key_missing";
               const response = {
                 error: errorMessage,
-                spill_r2_object: body.spill_r2_key ?? null,
               };
               const attempt: DeliveryAttempt = {
                 attempt_id: buildAttemptId(body),
@@ -1284,7 +1283,7 @@ async function pollLoop(
                 await insertDeliveryDeadLetter(body, "spill_r2_key_missing", errorMessage, attempt.created_at);
               } catch (deadLetterErr) {
                 console.error(
-                  `[loop] dead_letter insert failed for ${body.event_id}: ${safeDeliveryDiagnostic(deadLetterErr)}`,
+                  `[loop] dead_letter insert failed: ${safeDeliveryDiagnostic(deadLetterErr)}`,
                 );
                 // A terminal outcome without its durable dead-letter row is
                 // not ACK-safe. Re-deliver after the database recovers.
@@ -1295,7 +1294,7 @@ async function pollLoop(
                 await markReplayDeliveryOutcome(body, attempt);
               } catch (replayErr) {
                 console.error(
-                  `[loop] replay terminal update failed for ${body.event_id}: ${safeDeliveryDiagnostic(replayErr)}`,
+                  `[loop] replay terminal update failed: ${safeDeliveryDiagnostic(replayErr)}`,
                 );
               }
               acks.push(m.lease_id);
@@ -1317,7 +1316,7 @@ async function pollLoop(
             attempt = await processDeliveryMessage(deps, body);
             await markReplayDeliveryOutcome(body, attempt);
           } catch (err) {
-            console.error(`[loop] processing failed for ${body.event_id}: ${safeDeliveryDiagnostic(err)}`);
+            console.error(`[loop] processing failed: ${safeDeliveryDiagnostic(err)}`);
             if (
               !(err instanceof IdempotencyClaimInFlightError) &&
               !(err instanceof IdempotencyClaimLostError) &&
@@ -1389,7 +1388,7 @@ async function pollLoop(
             } catch (err) {
               deadLetterPersisted = false;
               console.error(
-                `[loop] dead_letter insert failed for ${body.event_id}: ${safeDeliveryDiagnostic(err)}`,
+                `[loop] dead_letter insert failed: ${safeDeliveryDiagnostic(err)}`,
               );
             }
             if (!deadLetterPersisted) {
@@ -1475,8 +1474,8 @@ async function pollLoop(
 // via env (set as a Wrangler secret); the delivery service knows it via
 // DELIVERY_SHARED_SECRET on Render. Mismatched / missing → 401.
 
-const SHARED_SECRET = process.env.DELIVERY_SHARED_SECRET ?? "";
-if (!SHARED_SECRET) {
+const DELIVERY_AUTH = resolveDeliveryAuthSecrets(process.env);
+if (!DELIVERY_AUTH.current) {
   console.warn(
     "[boot] DELIVERY_SHARED_SECRET is not set — the /deliver endpoint will reject every request. " +
     "Generate one with `openssl rand -hex 32` and set it on Render and as a router-edge secret.",
@@ -1567,7 +1566,7 @@ const server = http.createServer((req, res) => {
   // own Prometheus scrape (running with the secret set) can read.
   if (req.method === "GET" && req.url === "/metrics") {
     const provided = req.headers["x-axel-shared-secret"];
-    if (!isInternalSecretAuthorized(provided, SHARED_SECRET)) {
+    if (!isRotatingInternalSecretAuthorized(provided, DELIVERY_AUTH)) {
       res.writeHead(401, { "content-type": "text/plain" });
       res.end("# unauthorized — set x-axel-shared-secret header\n");
       return;
@@ -1623,6 +1622,41 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // The ingest Worker has no production database credential. It sends only
+  // pseudonymous subject locators here; the SQL derives the workspace from the
+  // authenticated source and binds the event to that workspace's R2 prefix.
+  if (req.method === "POST" && req.url === "/internal/erasure-subjects") {
+    void (async () => {
+      const response = await handleInternalErasureIndexRequest(
+        {
+          providedSecret: req.headers["x-axel-shared-secret"],
+          readBody: () => readBody(req),
+        },
+        {
+          sharedSecret: SOURCE_LOOKUP_AUTH.current,
+          previousSharedSecret: SOURCE_LOOKUP_AUTH.previous,
+          pool,
+          onError: (err, sourceId) => {
+            console.error(
+              `[/internal/erasure-subjects] write failed: ${safeDeliveryDiagnostic(err)}`,
+            );
+            if (!isTransientPostgresError(err)) {
+              void captureException(sentry, err, {
+                tags: {
+                  component: "internal_erasure_index",
+                  ...(sourceId ? { source_id: sourceId } : {}),
+                },
+              });
+            }
+          },
+        },
+      );
+      res.writeHead(response.status, response.headers);
+      res.end(JSON.stringify(response.body));
+    })();
+    return;
+  }
+
   // Heartbeat ingress for CF workers (they can't hold a PG
   // connection). Same shared-secret check as /internal/routes;
   // failure to record is best-effort logged but returns 200 so a
@@ -1631,7 +1665,7 @@ const server = http.createServer((req, res) => {
   if (req.method === "POST" && req.url === "/internal/heartbeat") {
     void (async () => {
       const provided = req.headers["x-axel-shared-secret"];
-      if (!isInternalSecretAuthorized(provided, SHARED_SECRET)) {
+      if (!isRotatingInternalSecretAuthorized(provided, DELIVERY_AUTH)) {
         res.writeHead(401, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
         return;
@@ -1676,7 +1710,7 @@ const server = http.createServer((req, res) => {
   if (req.method === "POST" && req.url === "/internal/routes") {
     void (async () => {
       const provided = req.headers["x-axel-shared-secret"];
-      if (!isInternalSecretAuthorized(provided, SHARED_SECRET)) {
+      if (!isRotatingInternalSecretAuthorized(provided, DELIVERY_AUTH)) {
         res.writeHead(401, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
         return;
@@ -1729,7 +1763,7 @@ const server = http.createServer((req, res) => {
   if (req.method === "POST" && req.url === "/internal/routes/errored") {
     void (async () => {
       const provided = req.headers["x-axel-shared-secret"];
-      if (!isInternalSecretAuthorized(provided, SHARED_SECRET)) {
+      if (!isRotatingInternalSecretAuthorized(provided, DELIVERY_AUTH)) {
         res.writeHead(401, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
         return;
@@ -1772,7 +1806,7 @@ const server = http.createServer((req, res) => {
   if (req.method === "POST" && req.url === "/deliver") {
     void (async () => {
       const provided = req.headers["x-axel-shared-secret"];
-      if (!isInternalSecretAuthorized(provided, SHARED_SECRET)) {
+      if (!isRotatingInternalSecretAuthorized(provided, DELIVERY_AUTH)) {
         res.writeHead(401, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: "unauthorized" }));
         return;
@@ -1811,7 +1845,7 @@ const server = http.createServer((req, res) => {
         message = await hydrateIfSpilled(message, spillReader);
       } catch (err) {
         console.error(
-          `[/deliver] spill hydrate failed for ${message.event_id}: ${safeDeliveryDiagnostic(err)}`,
+          `[/deliver] spill hydrate failed: ${safeDeliveryDiagnostic(err)}`,
         );
         if (isQueueSpillObjectMissingError(err)) {
           res.writeHead(200, { "content-type": "application/json" });
@@ -1886,11 +1920,13 @@ const server = http.createServer((req, res) => {
           ok: true,
           status: reportedStatus,
           latency_ms: attempt.latency_ms,
-          response: sanitizeConnectorResponseForStorage(attempt.response ?? null),
+          response: sanitizeDeliveryAttemptResponseForStorage(
+            attempt.response ?? null,
+          ),
         }));
       } catch (err) {
         console.error(
-          `[/deliver] processing failed for ${message.event_id}: ${safeDeliveryDiagnostic(err)}`,
+          `[/deliver] processing failed: ${safeDeliveryDiagnostic(err)}`,
         );
         // Transient platform errors (re-enqueue 504, R2 5xx, fetch blips) are
         // retried via the 503 below — don't open a code-bug Sentry issue for

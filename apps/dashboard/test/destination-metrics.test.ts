@@ -133,7 +133,13 @@ describe("destination-metrics", () => {
       responses: [
         [
           { response_json: JSON.stringify({ http_status: 503 }), status: "retry", c: "4" },
-          { response_json: JSON.stringify({ error: "connection refused" }), status: "dead", c: "2" },
+          {
+            response_json: JSON.stringify({
+              error: "connection refused at marker-private-host: marker-secret",
+            }),
+            status: "dead",
+            c: "2",
+          },
         ],
       ],
     });
@@ -145,8 +151,10 @@ describe("destination-metrics", () => {
 
     expect(buckets).toEqual([
       { bucket: "503", count: 4, tone: "error" },
-      { bucket: "connection refused", count: 2, tone: "error" },
+      { bucket: "delivery failed", count: 2, tone: "error" },
     ]);
+    expect(JSON.stringify(buckets)).not.toContain("marker-private-host");
+    expect(JSON.stringify(buckets)).not.toContain("marker-secret");
     // already_delivered dead-letters and retries-that-recovered are excluded
     // in SQL, matching the workspace failure-type breakdown.
     expect(calls[0]!.sql).toContain(`NOT ${SUCCESS_PREDICATE}`);
@@ -233,14 +241,40 @@ describe("destination-metrics", () => {
   });
 
   it("listRecentDestinationAttempts stays a raw attempts log (no outcome dedup)", async () => {
-    const { client, calls } = fakeClickhouse({ responses: [[]] });
+    const marker = "postgresql://user:marker-secret@private-db.internal/marker_schema";
+    const { client, calls } = fakeClickhouse({
+      responses: [
+        [
+          {
+            attempt_id: "att_test",
+            event_id: "evt_test",
+            route_id: "rt_test",
+            attempt_no: "1",
+            status: "dead",
+            latency_ms: "15",
+            response_json: JSON.stringify({ error: marker }),
+            is_test: "0",
+            created_at: "2026-05-15 12:00:00.000",
+          },
+        ],
+      ],
+    });
 
-    await listRecentDestinationAttempts("ws_test", "dst_test", 25, { clickhouse: client }, true);
+    const rows = await listRecentDestinationAttempts(
+      "ws_test",
+      "dst_test",
+      25,
+      { clickhouse: client },
+      true,
+    );
 
     expect(calls[0]!.sql).toContain("FROM delivery_attempts");
     expect(calls[0]!.sql).not.toContain("GROUP BY base_event_id");
     expect(calls[0]!.sql).not.toContain("argMax");
     expect(calls[0]!.sql).toContain("AND status != 'success'");
+    expect(rows[0]?.error).toBe("delivery_failed");
+    expect(JSON.stringify(rows)).not.toContain(marker);
+    expect(JSON.stringify(rows)).not.toContain("private-db.internal");
   });
 
   it("getDestinationLastDelivery ignores skip rows so a paused destination doesn't look live", async () => {

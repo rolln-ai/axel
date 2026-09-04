@@ -2,6 +2,25 @@ import { sanitizeConnectorDiagnosticForStorage } from "@axel/shared";
 
 const REDACTED = "[REDACTED]";
 
+const SAFE_COMPONENTS = new Set([
+  "billing_checkout",
+  "billing_checkout_return",
+  "billing_portal",
+  "billing_rollup_cron",
+  "data_contracts_auto_draft_cron",
+  "data_contracts_drift_cron",
+  "edge_cache_sync",
+  "notification_scan_cron",
+  "notifications_digest_cron",
+  "nudges_cron",
+  "operational_alert",
+  "ops_sentry_source_map",
+  "ops_sentry_transport",
+  "redact_fixtures_backfill",
+  "stripe_webhook",
+  "workspace_teardown_cron",
+]);
+
 const SENSITIVE_KEYS = new Set([
   "accesstoken",
   "apikey",
@@ -98,6 +117,8 @@ function sanitizeString(value: string, key: string | undefined): string {
     ENCODED_SENSITIVE_QUERY_VALUE,
     "$1%5BREDACTED%5D",
   );
+  if (key === "component" && SAFE_COMPONENTS.has(sanitized)) return sanitized;
+  if (key === "phase" && sanitized === "job") return sanitized;
   return sanitizeConnectorDiagnosticForStorage(sanitized, 4000);
 }
 

@@ -1,15 +1,15 @@
 ---
 title: Sub-processors
 slug: subprocessors
-version: "1.1"
+version: "1.2"
 effectiveDate: "2026-06-04"
-lastUpdated: "2026-07-11"
+lastUpdated: "2026-08-27"
 summary: The list of third-party Sub-processors Axel engages to provide the Service, what they do, and the data they process on your behalf.
 ---
 
 # Sub-processors
 
-**Version 1.1 — Effective 2026-06-04. Last updated 2026-07-11.**
+**Version 1.2. Effective 2026-06-04. Last updated 2026-08-27.**
 
 This page lists the third-party Sub-processors that rolln, Inc. ("rolln", "we", "us", "our") engages to help provide the Axel service ("Axel" or the "Service"). It is referenced by, and forms part of, our [Data Processing Addendum](https://axelapp.ai/dpa) and our [Privacy Policy](https://axelapp.ai/privacy).
 
@@ -44,7 +44,6 @@ The following Sub-processors are engaged across all Workspaces to provide the co
 | Stripe, Inc. | Subscription billing and payment processing. | Billing contact details and payment method information (held by Stripe; Axel does not store payment card numbers). | United States |
 | Resend (Plus Five Five, Inc.) | Transactional email delivery (e.g., invitations, password resets, and Service notifications). | Recipient email address and email content. | United States |
 | Sentry (Functional Software, Inc.) | Application error and performance monitoring. | Error and performance diagnostics, which may incidentally include request metadata. | United States |
-| PostHog (PostHog Inc.) | Product analytics for the customer dashboard (feature-usage measurement and product improvement). | Authorized User account identifiers (email, name), Workspace identifier, dashboard usage/event data, device/analytics identifier, and request metadata. | United States |
 
 ## Optional feature Sub-processors
 
@@ -52,7 +51,7 @@ The following Sub-processor is engaged only for optional, feature-specific funct
 
 | Sub-processor | Purpose / Service | Categories of data processed | Location |
 | --- | --- | --- | --- |
-| OpenRouter (OpenRouter, Inc.) | Optional AI-assisted features only: explaining delivery failures ("Fix with AI") and inferring data-contract schemas. OpenRouter acts as a gateway that routes the request to a third-party large-language-model provider to generate the response. | Bounded excerpts of event payloads and delivery-error details supplied as prompt context. Before transmission, Axel redacts values under secret-bearing and header fields, common credential formats, signed URL values, email addresses, and long digit sequences. Ordinary free text may still contain Personal Data. | United States (OpenRouter routes prompts to model providers that may process in the United States or other regions) |
+| OpenRouter (OpenRouter, Inc.) | Optional AI-assisted features only: explaining delivery failures ("Fix with AI") and inferring data-contract schemas. OpenRouter acts as a gateway that routes the request to a third-party large-language-model provider to generate the response. | Schema field names, object and array shape, primitive type markers, and allowlisted operational context. Axel does not send raw webhook values, destination names, connector or provider response text, event-type filter values, or custom transform separators. | United States (OpenRouter routes prompts to model providers that may process in the United States or other regions) |
 
 ## Infrastructure and CDN providers
 

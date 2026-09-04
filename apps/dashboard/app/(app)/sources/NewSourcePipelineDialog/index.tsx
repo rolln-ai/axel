@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { useActionState, useEffect, useMemo, useRef, useState } from "react";
+import type { SourceProvider } from "@axel/shared";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Plus, TriangleAlert } from "lucide-react";
 import {
@@ -12,6 +13,10 @@ import type { ActionState } from "../../../../lib/action-data";
 import { testNewDestinationConnection } from "../../../../lib/test-destination";
 import { CREATABLE_DESTINATION_SCHEMAS } from "../../../../lib/destination-defaults";
 import { defaultPipelineName } from "../../../../lib/entity-name";
+import {
+  sourceAuthenticationCopy,
+  sourceUsesAxelToken,
+} from "../../../../lib/source-ingest-auth";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -102,6 +107,7 @@ export function NewSourcePipelineDialog({
   // panel's "Use this preset" can replace the input value
   // unconditionally when the user clicks it.
   const [sourceName, setSourceName] = useState("");
+  const [sourceProvider, setSourceProvider] = useState<SourceProvider>("custom");
   // Pipeline (route) name — required whenever a destination is attached. Controlled
   // so it survives the React-19 form reset the wizard fights elsewhere.
   const [pipelineName, setPipelineName] = useState("");
@@ -264,24 +270,29 @@ export function NewSourcePipelineDialog({
   // the user MUST copy before closing the dialog. Only "live" once a source was
   // created this session, so a stale `state` on reopen can't re-trigger the
   // close guard or re-render the secrets.
-  const hasOneShotSecret =
-    created && Boolean(state.data?.plaintextToken || state.data?.webhookSigningSecret);
+  const hasOneShotSecret = created && Boolean(
+    (sourceUsesAxelToken(sourceProvider) && state.data?.plaintextToken)
+      || state.data?.webhookSigningSecret,
+  );
   useEffect(() => {
     if (state.notice && state.data?.sourceId && !pending) {
       setCreatedSourceId(state.data.sourceId);
       // Land the user on the activation step to close the loop (send a test
       // event / view sync status) instead of auto-closing. When the source
-      // minted a one-shot secret (every webhook) we stay put so the user copies
-      // it first, then advances via "Continue to test →"; secret-less pull
-      // sources jump straight to the activation step.
+      // returned a one-shot secret, we stay put so the user copies it first,
+      // then advances via "Continue to test →". Named-provider sources do not
+      // return an Axel token and can jump straight to activation.
       //
       // NOTE: the page-list refresh is DEFERRED to dialog-close (see
       // handleOpenChange) — refreshing here would re-render the server page and
       // unmount this dialog while it's still open inside an empty-state branch.
-      const oneShot = Boolean(state.data.plaintextToken || state.data.webhookSigningSecret);
+      const oneShot = Boolean(
+        (sourceUsesAxelToken(sourceProvider) && state.data.plaintextToken)
+          || state.data.webhookSigningSecret,
+      );
       if (!oneShot) setStep(4);
     }
-  }, [state, pending]);
+  }, [state, pending, sourceProvider]);
 
   // Clear the step-transition error whenever the user changes a relevant
   // selector — otherwise a "Destination name is required" message lingers
@@ -306,6 +317,7 @@ export function NewSourcePipelineDialog({
     // (the persistent instances never unmount, so this won't happen on its own).
     setCreatedSourceId(null);
     setSourceName("");
+    setSourceProvider("custom");
   }
 
   function clearCreateParam() {
@@ -470,37 +482,42 @@ export function NewSourcePipelineDialog({
               <Alert>
                 <AlertDescription>
                   <div>{state.notice}</div>
-                  {state.data?.plaintextToken || state.data?.webhookSigningSecret ? (
+                  {(sourceUsesAxelToken(sourceProvider) && state.data?.plaintextToken)
+                    || state.data?.webhookSigningSecret ? (
                     <div
                       role="alert"
                       className="mt-2 flex items-start gap-1.5 rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs font-medium text-foreground"
                     >
                       <TriangleAlert className="size-3.5 shrink-0 text-amber-600" />
-                      <span>The Webhook URL contains your ingest token — copy it now. The ingest token and signing secret cannot be retrieved after you close this dialog.</span>
+                      <span>
+                        Copy each secret below now. One-shot secrets cannot be retrieved after you
+                        close this dialog.
+                      </span>
                     </div>
                   ) : null}
-                  {state.data?.ingestUrl && state.data?.plaintextToken ? (
+                  {state.data?.ingestUrl ? (
                     <>
                       <SecretRow
                         label="Webhook URL — point your provider here"
-                        value={`${state.data.ingestUrl}?token=${state.data.plaintextToken}`}
+                        value={state.data.ingestUrl}
                       />
                       <p className="mt-1 text-[11px] text-muted-foreground">
-                        Or POST to the Ingest URL with the token as an{" "}
-                        <code className="font-mono">x-axel-token</code> header instead of the{" "}
-                        <code className="font-mono">?token=</code> query.
+                        {sourceAuthenticationCopy(sourceProvider)}
                       </p>
                     </>
                   ) : null}
-                  {state.data?.ingestUrl ? (
-                    <SecretRow label="Ingest URL" value={state.data.ingestUrl} />
-                  ) : null}
-                  {state.data?.plaintextToken ? (
-                    <SecretRow label="Ingest token" value={state.data.plaintextToken} />
+                  {sourceUsesAxelToken(sourceProvider) && state.data?.plaintextToken ? (
+                    <SecretRow
+                      label="Ingest token — send only as x-axel-token"
+                      value={state.data.plaintextToken}
+                    />
                   ) : null}
                   {state.data?.webhookSigningSecret ? (
                     <>
-                      <SecretRow label="Webhook signing secret" value={state.data.webhookSigningSecret} />
+                      <SecretRow
+                        label="Destination signing secret"
+                        value={state.data.webhookSigningSecret}
+                      />
                       <SigningSecretHint />
                     </>
                   ) : null}
@@ -516,7 +533,12 @@ export function NewSourcePipelineDialog({
 
           {/* ---------- STEP 1: SOURCE ---------- */}
           <div className={stepCls(1) + " space-y-4"}>
-            <SourceStep sourceName={sourceName} onSourceNameChange={setSourceName} />
+            <SourceStep
+              sourceName={sourceName}
+              onSourceNameChange={setSourceName}
+              provider={sourceProvider}
+              onProviderChange={setSourceProvider}
+            />
           </div>
 
           {/* ---------- STEP 2: DESTINATION ---------- */}
@@ -598,10 +620,9 @@ export function NewSourcePipelineDialog({
             <div className="flex items-center gap-2">
               {step === 1 ? (
                 created ? (
-                  // Source already created via "Just create source" (a webhook
-                  // mints a one-shot token, so the success handler parked us
-                  // here). Surface a direct path to the activation step instead
-                  // of detouring back through the Destination/Review steps.
+                  // A custom source created via "Just create source" returned a
+                  // one-shot token, so the success handler kept this step open.
+                  // Give it a direct path to activation.
                   <Button type="button" disabled={pending} onClick={() => setStep(4)}>
                     Continue to test →
                   </Button>
@@ -672,6 +693,7 @@ export function NewSourcePipelineDialog({
             // the go-live step (and the close guard below stays honest).
             plaintextToken={state.data?.plaintextToken}
             webhookSigningSecret={state.data?.webhookSigningSecret}
+            sourceProvider={sourceProvider}
             // A route is created iff a destination was attached, and the server
             // only returns destinationId in that case. (Client `destinationMode`
             // is never "skip" — that decision is server-side via action_intent —

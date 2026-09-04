@@ -182,8 +182,11 @@ export function evaluateRouteFanout(
         // receive the operator-contracted fields, while the engine — and the
         // R2-stored raw payload — saw the full event.
         payload: projectPayload(delivery.payload, route.field_selection ?? null),
-        headers: message.headers,
-        query: message.query,
+        // Request metadata values are private ingest material. Backlogged
+        // pre-hardening QueueMessages may still carry them, so the router is a
+        // second mandatory erasure boundary before delivery fan-out.
+        headers: {},
+        query: {},
         is_test: message.is_test,
         binding,
       },

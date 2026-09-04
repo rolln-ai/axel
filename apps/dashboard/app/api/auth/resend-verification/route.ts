@@ -44,8 +44,8 @@ export async function POST(request: Request): Promise<Response> {
     const state = await resendVerificationEmailForUser(auth.user.id);
     if (!wantsJson) return redirectBack(request, !state.error);
     return Response.json(state, { headers: { "Cache-Control": "no-store" } });
-  } catch (err) {
-    console.error("[api/auth/resend-verification] failed:", err);
+  } catch {
+    console.error("[api/auth/resend-verification] failed");
     if (!wantsJson) return redirectBack(request, false);
     return Response.json(
       { error: "Could not send the verification email. Try again." },

@@ -13,6 +13,7 @@ jobs:
   quality:
     name: Quality
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
@@ -30,6 +31,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
@@ -45,6 +47,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
@@ -57,9 +60,31 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
 
+  self-host-images:
+    name: Self-host images
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Validate Dockerfile and build release targets
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: |
+          set -euo pipefail
+          docker build --check .
+          docker build --target migration --tag axel-migration:ci .
+          docker build --target dashboard --tag axel-dashboard:ci \
+            --build-arg NEXT_PUBLIC_AXEL_APP_URL=http://localhost:8080 \
+            --build-arg NEXT_PUBLIC_AXEL_INGEST_URL=https://ingest.example.test \
+            --build-arg NEXT_PUBLIC_AXEL_DELIVERY_URL=http://localhost:10000 .
+          docker build --target delivery --tag axel-delivery:ci .
+
   visual-smoke:
     name: Visual smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
@@ -73,9 +98,10 @@ jobs:
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm visual:smoke
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        if: always()
+        if: failure()
         with:
           name: visual-smoke-artifacts
+          retention-days: 7
           path: |
             artifacts/visual-smoke
             artifacts/playwright-report
@@ -87,11 +113,12 @@ jobs:
     # migrations, but changing the check name would strand every pull request.
     name: Postgres schema
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       postgres:
-        image: postgres:16
+        image: postgres:16@sha256:f1c3376c26f2609ab9f29f71f824103fe2fcd8ee0346485cb6122a4f93df6f94
         env:
-          POSTGRES_USER: axel_test
+          POSTGRES_USER: axel_admin
           POSTGRES_PASSWORD: axel_test
           POSTGRES_DB: axel_test
         ports:
@@ -106,25 +133,28 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version-file: .node-version
+      - name: Install Postgres client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
       - name: Validate migration names and schema parity
         run: node scripts/check-postgres-migrations.mjs
-      - run: >-
-          docker run --rm --network host
-          -v "$PWD:/repo:ro"
-          -w /repo
-          -e DATABASE_URL
-          -e AXEL_MIGRATION_TEST_ALLOW_RESET=1
-          postgres:16
-          bash -lc './scripts/test/run-migrations.test.sh'
+      - run: bash scripts/test/run-migrations.test.sh
         env:
-          DATABASE_URL: postgresql://axel_test:axel_test@localhost:5432/axel_test
+          DATABASE_ADMIN_URL: postgresql://axel_admin:axel_test@localhost:5432/axel_test
+          DATABASE_URL: postgresql://axel_migration:axel_migration_test_password@localhost:5432/axel_test
+          DATABASE_MIGRATION_ROLE: axel_owner
+          DATABASE_MIGRATION_LOGIN_ROLE: axel_migration
+          DATABASE_MIGRATION_OWNER_CAN_CREATE_ROLES: "1"
+          DATABASE_MIGRATION_TEST_PASSWORD: axel_migration_test_password
+          DATABASE_VERIFY_CAPABILITY_ROLE: axel_verify
+          DATABASE_RUNTIME_CAPABILITY_ROLES: axel_runtime
+          AXEL_MIGRATION_TEST_ALLOW_RESET: "1"
 
   security:
     name: Security
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
-      security-events: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -139,7 +169,9 @@ jobs:
       - name: Workflow expression safety
         run: node scripts/check-workflow-shell-interpolation.mjs
       - run: pnpm install --frozen-lockfile
-      - run: pnpm audit --audit-level high
+      # Keep contributor CI available during registry outages. The release
+      # verifier remains strict and rejects a missing audit response.
+      - run: pnpm audit --audit-level low --ignore-registry-errors
       - name: Secret scan
         run: >-
           docker run --pull=always --rm
@@ -154,6 +186,7 @@ jobs:
     # automatically activates when the repository becomes public.
     if: ${{ github.event_name == 'pull_request' && github.event.repository.private == false }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
       pull-requests: write

@@ -30,7 +30,7 @@ import type {
  *
  *   - `nested_records`: the parsed JSON body IS the row and its object
  *     hierarchy is retained as BigQuery RECORD fields while scalar leaves are
- *     normalized to STRING for newsletter-provider type drift. Compatible object
+ *     normalized to STRING when provider field types drift. Compatible object
  *     arrays become REPEATED RECORDs and non-null primitive arrays become
  *     REPEATED STRINGs. Arrays without one safe shape use a lossless sibling
  *     `<field>__json` STRING.
@@ -266,12 +266,9 @@ async function getAccessToken(sa: ServiceAccountKey): Promise<string> {
   let signature: string;
   try {
     signature = createSign("RSA-SHA256").update(signingInput).sign(sa.private_key, "base64url");
-  } catch (err) {
+  } catch {
     // A malformed/unsupported key is a permanent config problem.
-    throw new TokenError(
-      `jwt_sign_failed: ${err instanceof Error ? err.message : String(err)}`,
-      false,
-    );
+    throw new TokenError("jwt_sign_failed", false);
   }
   const assertion = `${signingInput}.${signature}`;
 
@@ -293,18 +290,19 @@ async function getAccessToken(sa: ServiceAccountKey): Promise<string> {
     const message = err instanceof Error ? err.message : String(err);
     const transient = TRANSIENT_ERROR_PATTERNS.some((re) => re.test(message))
       || (err instanceof Error && err.name === "AbortError");
-    throw new TokenError(`token_endpoint_unreachable: ${message}`, transient);
+    throw new TokenError("token_endpoint_unreachable", transient);
   } finally {
     clearTimeout(timer);
   }
 
-  const text = await res.text();
   if (!res.ok) {
     // 400/401 from the token endpoint = bad key/clock/grant → permanent.
     // 429/5xx → transient.
     const retryable = res.status === 429 || res.status >= 500;
-    throw new TokenError(`token_exchange_${res.status}: ${text.slice(0, 300)}`, retryable);
+    await res.body?.cancel().catch(() => undefined);
+    throw new TokenError(`token_exchange_${res.status}`, retryable);
   }
+  const text = await res.text();
   let body: { access_token?: string; expires_in?: number };
   try {
     body = JSON.parse(text) as { access_token?: string; expires_in?: number };
@@ -375,8 +373,8 @@ type NestedFieldResult =
  * nested object onto a non-RECORD column ("field X is not a record"), so we
  * flatten instead. Every leaf is stringified — scalars via String(),
  * arrays / any leftover objects via JSON — so a field that drifts type across
- * events (newsletter provider does exactly this) can never break the insert. Nulls are
- * skipped (the column materializes once a non-null value appears). Keys are
+ * events, as some newsletter providers do, can never break the insert. Nulls
+ * are skipped (the column materializes once a non-null value appears). Keys are
  * sanitized to valid BigQuery column names; a segment starting with a digit is
  * prefixed with "_".
  *
@@ -577,7 +575,7 @@ function shapeNestedField(name: string, value: unknown): NestedFieldResult {
       };
     }
 
-    // Primitive-family drift is common in newsletter provider custom fields. A mixed
+    // Primitive-family drift is common in custom provider fields. A mixed
     // non-null primitive array is still safe once every member is a STRING.
     if (value.every(isJsonPrimitive)) {
       return {
@@ -1197,7 +1195,6 @@ export function createBigQueryConnector(): Connector<BigQueryConfig> {
             "retry",
             {
               status: res.status,
-              body: res.text.slice(0, 2048),
               error: "schema_repair_transient",
             },
             startedAt,
@@ -1213,7 +1210,6 @@ export function createBigQueryConnector(): Connector<BigQueryConfig> {
               "retry",
               {
                 status: res.status,
-                body: res.text.slice(0, 2048),
                 error: "schema_propagation_pending",
               },
               startedAt,
@@ -1227,22 +1223,55 @@ export function createBigQueryConnector(): Connector<BigQueryConfig> {
           // attempt re-mints, then treat as permanent (a valid-but-
           // unauthorized SA won't self-heal by retrying).
           invalidateToken(sa);
-          return attemptOf(context, destination, "dead", { status: 401, body: res.text.slice(0, 2048) }, startedAt);
+          return attemptOf(
+            context,
+            destination,
+            "dead",
+            { status: 401, error: "bigquery_unauthorized" },
+            startedAt,
+          );
         }
         if (res.status === 403) {
           // 403 is overloaded in BigQuery: rate/quota limits are retryable,
           // genuine access-denied is not.
           const retryable = /rateLimitExceeded|quotaExceeded|backendError/i.test(res.text);
-          return attemptOf(context, destination, retryable ? "retry" : "dead", { status: 403, body: res.text.slice(0, 2048) }, startedAt);
+          return attemptOf(
+            context,
+            destination,
+            retryable ? "retry" : "dead",
+            {
+              status: 403,
+              error: retryable ? "bigquery_quota_limited" : "bigquery_forbidden",
+            },
+            startedAt,
+          );
         }
         if (res.status === 404) {
-          return attemptOf(context, destination, "dead", { status: 404, body: res.text.slice(0, 2048) }, startedAt);
+          return attemptOf(
+            context,
+            destination,
+            "dead",
+            { status: 404, error: "bigquery_not_found" },
+            startedAt,
+          );
         }
         if (res.status === 429 || res.status >= 500) {
-          return attemptOf(context, destination, "retry", { status: res.status, body: res.text.slice(0, 2048) }, startedAt);
+          return attemptOf(
+            context,
+            destination,
+            "retry",
+            { status: res.status, error: "bigquery_transient_http" },
+            startedAt,
+          );
         }
         if (res.status >= 400) {
-          return attemptOf(context, destination, "dead", { status: res.status, body: res.text.slice(0, 2048) }, startedAt);
+          return attemptOf(
+            context,
+            destination,
+            "dead",
+            { status: res.status, error: "bigquery_http_error" },
+            startedAt,
+          );
         }
 
         // 2xx: insertAll returns 200 even when rows fail — the row outcome is
@@ -1255,7 +1284,7 @@ export function createBigQueryConnector(): Connector<BigQueryConfig> {
             context,
             destination,
             "retry",
-            { status: res.status, body: res.text.slice(0, 2048), error: "non_json_response" },
+            { status: res.status, error: "non_json_response" },
             startedAt,
           );
         }
@@ -1298,7 +1327,6 @@ export function createBigQueryConnector(): Connector<BigQueryConfig> {
               : {}),
             insertErrors: rowErrors.slice(0, 8).map((e) => ({
               reason: e.reason,
-              message: e.message?.slice(0, 512),
             })),
             ...(schemaMismatches.length > 0
               ? { schemaMismatches: schemaMismatches.slice(0, 8) }
@@ -1314,7 +1342,7 @@ export function createBigQueryConnector(): Connector<BigQueryConfig> {
           context,
           destination,
           transient ? "retry" : "dead",
-          { error: message.slice(0, 500) },
+          { error: transient ? "bigquery_delivery_transient" : "bigquery_delivery_failed" },
           startedAt,
         );
       }

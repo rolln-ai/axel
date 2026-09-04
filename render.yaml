@@ -79,7 +79,7 @@ services:
     healthCheckPath: /
     envVars:
       - key: NODE_VERSION
-        value: "20"
+        value: "22.23.2"
       - key: DELIVERY_ROLE
         value: web
       - key: CLOUDFLARE_ACCOUNT_ID
@@ -106,10 +106,17 @@ services:
         sync: false
       - key: DELIVERY_SHARED_SECRET
         sync: false
+      # Rotation-only overlap. Install the old delivery bearer here before
+      # callers receive the new DELIVERY_SHARED_SECRET, then clear it after
+      # every caller has cut over.
+      - key: DELIVERY_SHARED_SECRET_PREVIOUS
+        sync: false
       # Dedicated bearer for the secret-bearing /internal/source endpoint.
       # SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS may be set temporarily during a
       # rotation, but must be removed after ingest has cut over.
       - key: SOURCE_LOOKUP_SHARED_SECRET
+        sync: false
+      - key: SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS
         sync: false
       - key: CLICKHOUSE_URL
         sync: false
@@ -134,13 +141,15 @@ services:
   # retention loop), moved out of the scaled delivery web service so they run
   # on EXACTLY ONE instance. Do NOT add a `scaling:` block here — duplicate
   # instances would double-run backfill/retention and race replays. Needs the
-  # same delivery-runtime secrets as axel-delivery-native, configured in the
-  # Render dashboard. Do not copy SOURCE_LOOKUP_SHARED_SECRET here: this role
-  # does not expose HTTP and should not be able to read source signing secrets.
+  # delivery secrets configured in the Render dashboard, but it uses its own
+  # delivery-workers database credential. Do not copy
+  # SOURCE_LOOKUP_SHARED_SECRET here: this role does not expose HTTP and should
+  # not be able to read source signing secrets.
   - type: worker
     name: axel-delivery-workers
     env: node
     plan: starter
+    numInstances: 1
     region: oregon
     branch: main
     # The first guarded rollout applies and reads back this desired state.
@@ -151,7 +160,7 @@ services:
     startCommand: pnpm --filter @axel/delivery-service start
     envVars:
       - key: NODE_VERSION
-        value: "20"
+        value: "22.23.2"
       - key: DELIVERY_ROLE
         value: worker
       - key: CLOUDFLARE_ACCOUNT_ID
@@ -209,12 +218,9 @@ services:
         value: "500"
       - key: REPLAY_WORKER_INTERVAL_MS
         value: "1000"
-      # Single-instance Parquet batching. Set to the UUID of the
-      # axel-delivery-parquet queue once provisioned; the worker (singleton)
-      # then drains it so Parquet batches on ONE instance. Unset → no parquet
-      # poll loop (router falls back to the native queue; web role delivers).
-      - key: PARQUET_DELIVERY_QUEUE_ID
-        sync: false
+      # PARQUET_DELIVERY_QUEUE_ID must stay unset for this least-privilege
+      # worker profile. Enabling the native delivery loop requires a separate
+      # reviewed database profile before the environment key can be restored.
       # Parquet compaction safety net (singleton). "1" to enable; merges small
       # Parquet objects into large ones, deleting originals only after a
       # verified PUT. Off by default — enabling mutates customer buckets.
@@ -235,7 +241,7 @@ services:
     startCommand: pnpm --filter @axel/pull-worker start
     envVars:
       - key: NODE_VERSION
-        value: "20"
+        value: "22.23.2"
       - key: DATABASE_URL
         sync: false
       - key: DATABASE_POOL_MAX

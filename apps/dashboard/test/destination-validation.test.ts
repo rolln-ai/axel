@@ -79,6 +79,20 @@ describe("validateDestinationValues", () => {
     expect(error).not.toBeNull();
   });
 
+  it("does not reflect a blocked URL or connection host", () => {
+    const webhookError = validateDestinationValues("webhook", {
+      url: "https://marker-secret.localhost/hook",
+    });
+    const postgresError = validateDestinationValues("postgres", {
+      connection_string: "postgres://u:p@marker-secret.localhost/db",
+    });
+
+    expect(webhookError).toMatch(/outbound network policy/i);
+    expect(postgresError).toMatch(/outbound network policy/i);
+    expect(webhookError).not.toContain("marker-secret");
+    expect(postgresError).not.toContain("marker-secret");
+  });
+
   it("rejects a connection string with no scheme or no @host", () => {
     expect(
       validateDestinationValues("postgres", { connection_string: "db.example.com:5432" }),

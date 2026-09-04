@@ -2,6 +2,7 @@ import "server-only";
 import type { ClickhouseQueryable } from "../clickhouse";
 import { clickhouse } from "../clickhouse";
 import { fetchPayloadForR2Key } from "../sample-payload";
+import type { RawPayloadKeyExpectation } from "@axel/shared";
 
 /**
  * Single sampled raw event ready for downstream inference (AXE-42).
@@ -77,7 +78,10 @@ export interface SamplerOptions {
   /** Inject a ClickHouse client (testing). */
   clickhouseClient?: ClickhouseQueryable;
   /** Inject the R2 payload fetcher (testing). */
-  fetchPayload?: (r2Key: string) => Promise<unknown>;
+  fetchPayload?: (
+    r2Key: string,
+    expected: RawPayloadKeyExpectation,
+  ) => Promise<unknown>;
   /** Reference clock for decay buckets. Defaults to wall clock. */
   now?: () => Date;
   /**
@@ -119,7 +123,6 @@ interface CandidateRow {
   received_at_text: string;
   shard: number;
   size_bytes: number;
-  headers_json: string;
   day_offset: number;
 }
 
@@ -195,16 +198,6 @@ function fnv1a(input: string): string {
     hash = (hash + ((hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24))) >>> 0;
   }
   return hash.toString(16).padStart(8, "0");
-}
-
-function parseHeaders(json: string): Record<string, unknown> {
-  if (!json) return {};
-  try {
-    const parsed = JSON.parse(json);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
 }
 
 /**
@@ -284,8 +277,7 @@ export async function sampleSourceEvents(
        toString(received_at) AS received_at_text,
        dateDiff('day', received_at, now()) AS day_offset,
        shard,
-       size_bytes,
-       headers_json
+       size_bytes
      FROM events
      WHERE workspace_id = {workspace_id:String}
        AND source_id = {source_id:String}
@@ -359,7 +351,11 @@ export async function sampleSourceEvents(
     const wavePayloads = await Promise.all(
       waveRows.map(async (row) => {
         try {
-          return await fetchPayload(row.r2_key);
+          return await fetchPayload(row.r2_key, {
+            workspaceId,
+            eventId: row.event_id,
+            sourceId,
+          });
         } catch {
           return undefined;
         }
@@ -403,7 +399,7 @@ export async function sampleSourceEvents(
         event_id: row.event_id,
         received_at: row.received_at_text,
         shard: Number(row.shard) || 0,
-        headers: parseHeaders(row.headers_json),
+        headers: {},
         payload,
         shape_hash: hash,
       });
@@ -488,7 +484,10 @@ export interface DistinctTypeSamplerOptions {
   /** Parallel R2 fetches per wave. Default 16. */
   fetchConcurrency?: number;
   clickhouseClient?: ClickhouseQueryable;
-  fetchPayload?: (r2Key: string) => Promise<unknown>;
+  fetchPayload?: (
+    r2Key: string,
+    expected: RawPayloadKeyExpectation,
+  ) => Promise<unknown>;
 }
 
 interface TypedCandidateRow {
@@ -498,7 +497,6 @@ interface TypedCandidateRow {
   received_at_text: string;
   shard: number;
   size_bytes: number;
-  headers_json: string;
 }
 
 /**
@@ -552,8 +550,7 @@ export async function sampleByEventTypeIndex(
          r2_key,
          toString(received_at) AS received_at_text,
          shard,
-         size_bytes,
-         headers_json
+         size_bytes
        FROM events
        WHERE workspace_id = {workspace_id:String}
          AND source_id = {source_id:String}
@@ -636,7 +633,7 @@ export async function sampleByEventTypeIndex(
   if (distinctTypes >= maxTypes) {
     console.warn(
       `[data-contracts] event-type index returned ${distinctTypes} distinct types ` +
-        `(>= maxTypes=${maxTypes}) for source=${sourceId} ws=${workspaceId} — ` +
+        `(>= maxTypes=${maxTypes}) — ` +
         `the long tail beyond maxTypes is truncated; raise maxTypes if needed.`,
     );
   }
@@ -647,7 +644,11 @@ export async function sampleByEventTypeIndex(
     const payloads = await Promise.all(
       wave.map(async (row) => {
         try {
-          return await fetchPayload(row.r2_key);
+          return await fetchPayload(row.r2_key, {
+            workspaceId,
+            eventId: row.event_id,
+            sourceId,
+          });
         } catch {
           return undefined;
         }
@@ -661,7 +662,7 @@ export async function sampleByEventTypeIndex(
         event_id: row.event_id,
         received_at: row.received_at_text,
         shard: Number(row.shard) || 0,
-        headers: parseHeaders(row.headers_json),
+        headers: {},
         payload,
         shape_hash: shapeHash(payload),
       });

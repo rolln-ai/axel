@@ -212,8 +212,8 @@ async function inspectPostgresDestination(
       pool.query<{ reltuples: string | number | null }>(
         `SELECT reltuples FROM pg_class WHERE oid = to_regclass($1)`,
         [`${schemaIdent ? `${schemaIdent}.` : ""}${tableIdent}`],
-      ).catch((err: unknown) => {
-        console.warn("[inspect] reltuples lookup failed:", err instanceof Error ? err.message : err);
+      ).catch(() => {
+        console.warn("[inspect] reltuples lookup failed");
         return { rows: [] as Array<{ reltuples: string | number | null }> };
       }),
     ]);
@@ -332,8 +332,8 @@ async function inspectMongoDestination(
     // we still want to render the documents page.
     const [docs, total] = await Promise.all([
       collection.find({}).sort({ _id: -1 }).limit(limit).toArray() as Promise<Array<Record<string, unknown>>>,
-      collection.estimatedDocumentCount().catch((err: unknown) => {
-        console.warn("[inspect] estimatedDocumentCount failed:", err instanceof Error ? err.message : err);
+      collection.estimatedDocumentCount().catch(() => {
+        console.warn("[inspect] estimatedDocumentCount failed");
         return null as number | null;
       }),
     ]);
@@ -650,9 +650,16 @@ async function bigQueryGet<T>(
     headers: { authorization: `Bearer ${token}` },
     signal,
   });
+  if (!res.ok) {
+    await res.body?.cancel().catch(() => undefined);
+    throw new Error(`bigquery_http_${res.status}`);
+  }
   const text = await res.text();
-  if (!res.ok) throw new Error(`bigquery_http_${res.status}: ${text.slice(0, 300)}`);
-  return JSON.parse(text) as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error("bigquery_invalid_json");
+  }
 }
 
 interface BqRawField {
@@ -743,9 +750,17 @@ export async function inspectBigQueryDestination(
       body: JSON.stringify({ query, useLegacySql: false, maxResults: limit, timeoutMs: 25_000 }),
       signal: controller.signal,
     });
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => undefined);
+      throw new Error(`bigquery_http_${res.status}`);
+    }
     const text = await res.text();
-    if (!res.ok) throw new Error(`bigquery_http_${res.status}: ${text.slice(0, 300)}`);
-    const parsed = JSON.parse(text) as BigQueryQueryResponse;
+    let parsed: BigQueryQueryResponse;
+    try {
+      parsed = JSON.parse(text) as BigQueryQueryResponse;
+    } catch {
+      throw new Error("bigquery_invalid_json");
+    }
     if (parsed.jobComplete === false) {
       throw new Error("bigquery_query_incomplete: the query did not finish within 25s");
     }
@@ -843,15 +858,21 @@ async function runDatabricksStatement(
       signal: controller.signal,
       redirect: "manual",
     });
-    const text = await res.text();
     if (!res.ok) {
-      throw new Error(`databricks_http_${res.status}: ${text.slice(0, 300)}`);
+      await res.body?.cancel().catch(() => undefined);
+      throw new Error(`databricks_http_${res.status}`);
     }
-    const parsed = JSON.parse(text) as DatabricksStatementResponse;
+    const text = await res.text();
+    let parsed: DatabricksStatementResponse;
+    try {
+      parsed = JSON.parse(text) as DatabricksStatementResponse;
+    } catch {
+      throw new Error("databricks_invalid_json");
+    }
     const state = parsed.status?.state;
     if (state !== "SUCCEEDED") {
-      const message = parsed.status?.error?.message ?? `state=${state ?? "unknown"}`;
-      throw new Error(`databricks_statement_${state ?? "unknown"}: ${message.slice(0, 300)}`);
+      const safeState = /^[A-Z_]{1,32}$/.test(state ?? "") ? state : "UNKNOWN";
+      throw new Error(`databricks_statement_${safeState}`);
     }
     const columns = (parsed.manifest?.schema?.columns ?? [])
       .map((c, i) => c.name ?? `col${i}`);
@@ -987,9 +1008,8 @@ export async function inspectDestination(
       });
     }
     return { kind: "unsupported", type: lookup.type };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Inspect failed.";
-    return { kind: "error", message };
+  } catch {
+    return { kind: "error", message: "Destination inspection failed." };
   }
 }
 

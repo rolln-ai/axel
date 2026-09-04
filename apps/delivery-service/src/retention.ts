@@ -28,6 +28,7 @@
 
 import type pg from "pg";
 import { recordHeartbeat } from "@axel/observability";
+import { sanitizeConnectorDiagnosticForStorage } from "@axel/shared";
 import type { R2RetentionSummary } from "./r2-retention.js";
 
 export interface RetentionSummary {
@@ -390,8 +391,8 @@ export function startRetentionLoop(
         console.log(`[retention] purged ${total} rows`, summary);
       }
     } catch (err) {
-      lastError = err instanceof Error ? err.message : String(err);
-      console.error("[retention] tick failed:", err);
+      lastError = sanitizeConnectorDiagnosticForStorage(err);
+      console.error(`[retention] tick failed: ${lastError}`);
     }
     // Raw-payload R2 sweep — separate failure domain so a Cloudflare/ClickHouse
     // hiccup doesn't redden the PG retention heartbeat.
@@ -402,7 +403,9 @@ export function startRetentionLoop(
           console.log("[retention] r2 raw-payload sweep", r2Summary);
         }
       } catch (err) {
-        console.error("[retention] r2 raw-payload sweep failed:", err);
+        console.error(
+          `[retention] r2 raw-payload sweep failed: ${sanitizeConnectorDiagnosticForStorage(err)}`,
+        );
       }
     }
     // Snapshot every component's current health status into the
@@ -412,7 +415,9 @@ export function startRetentionLoop(
     try {
       await captureHeartbeatHistory(pool);
     } catch (err) {
-      console.error("[retention] heartbeat history capture failed:", err);
+      console.error(
+        `[retention] heartbeat history capture failed: ${sanitizeConnectorDiagnosticForStorage(err)}`,
+      );
     }
     // Heartbeat after the tick (success or failure). Interval is
     // hourly, so the badge tolerance is 2× the interval to allow a

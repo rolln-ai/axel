@@ -14,8 +14,10 @@ info:
 
     - **Ingest** (`https://ingest.axelapp.ai`) — deliver webhook payloads
       from upstream providers (Stripe, GitHub, Twilio, Slack, anything).
-      Authenticated per-source with `x-axel-token` (the secret shown
-      once when the source is created).
+      Custom sources authenticate with the one-shot `x-axel-token`
+      request header. Stripe, GitHub, Shopify, and Chargebee sources
+      use their native signature or webhook Basic Auth and do not
+      use an Axel source token. URL query credentials are rejected.
 
     ### Scopes
     Workspace API keys carry one or more scopes:
@@ -43,8 +45,8 @@ info:
     name: Axel support
     url: https://app.axelapp.ai
   license:
-    name: MIT
-    identifier: MIT
+    name: Apache License 2.0
+    identifier: Apache-2.0
 
 servers:
   - url: https://app.axelapp.ai
@@ -102,10 +104,11 @@ paths:
       operationId: createSource
       summary: Create a source
       description: |
-        Creates a new source and returns a one-shot `secret_token`. Store
-        the token immediately — it cannot be retrieved later. Use the
+        Creates a custom source and returns a one-shot `secret_token`. Store
+        the token immediately — it cannot be retrieved later. Send the
         returned `ingest_url` and token as the `x-axel-token` header when
-        posting webhooks.
+        posting webhooks. This endpoint does not create a named-provider
+        signature configuration.
       tags: [Sources]
       security:
         - WorkspaceBearer: []
@@ -236,9 +239,11 @@ paths:
         code review, or environment promotion.
 
         Secrets are redacted: `secret_token_hash`, signing-secret
-        ciphertext, and any destination `credentials_ref` are
-        replaced with `[REDACTED]`. Re-applying the config requires
-        re-setting credentials per destination.
+        ciphertext, destination URLs, every configured header value,
+        and any destination `credentials_ref` are replaced with
+        `[REDACTED]`. Header names may remain for structural review.
+        Re-applying the config requires re-setting credentials and URLs
+        per destination.
       tags: [Config]
       security:
         - WorkspaceBearer: []
@@ -335,9 +340,12 @@ paths:
       operationId: ingestEvent
       summary: Ingest a webhook
       description: |
-        The hot path. POST the upstream provider's raw body here with
-        the source's `x-axel-token`. Axel stores the payload to durable
-        object storage, enqueues it for routing, and returns
+        The hot path. Custom sources require the one-shot source token in
+        the `x-axel-token` request header. Stripe, GitHub, Shopify, and
+        Chargebee sources use the provider authentication configured on
+        the source without an Axel token. Any `token` query parameter is
+        rejected. Axel stores the payload to durable object storage,
+        enqueues it for routing, and returns
         `202 Accepted` with an `event_id` you can use to look up the
         delivery on the dashboard or replay it later.
 
@@ -348,16 +356,19 @@ paths:
         body depth, rate) are enforced; over-limit requests get a 413
         or 429 with a `retry-after` header where applicable.
 
-        If the source is configured with a signing secret (Stripe,
-        GitHub, custom HMAC, …), the corresponding provider signature
-        header must verify or the request is rejected with `401
-        invalid_signature`.
+        Named-provider signature verification is mandatory. A custom
+        source configured with optional custom HMAC requires both its
+        `x-axel-token` and valid `X-Axel-Signature` headers.
       tags: [Ingest]
       servers:
         - url: https://ingest.axelapp.ai
           description: Ingest (production)
       security:
         - SourceToken: []
+        - StripeSignature: []
+        - GitHubSignature: []
+        - ShopifySignature: []
+        - ChargebeeBasic: []
       parameters:
         - in: path
           name: sourceId
@@ -394,14 +405,15 @@ paths:
                     type: string
                     format: date-time
         "401":
-          description: Missing token, invalid token, or invalid provider signature.
+          description: Missing or invalid header authentication, an invalid provider signature, or a rejected URL query credential.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/IngestError" }
               examples:
                 missing: { value: { error: missing_token } }
                 invalid: { value: { error: invalid_token } }
-                signature: { value: { error: invalid_signature, reason: bad_hmac } }
+                signature: { value: { error: invalid_signature, reason: invalid_signature } }
+                queryCredential: { value: { error: query_token_not_allowed } }
         "402":
           description: Workspace is billing-suspended.
           content:
@@ -473,9 +485,29 @@ components:
       in: header
       name: x-axel-token
       description: |
-        The plaintext source token returned at source-create time.
+        Custom sources only. The plaintext source token returned at
+        source-create time. URL query credentials are rejected.
         Treat it as a secret: leaked tokens can post arbitrary payloads
-        into your workspace. Rotate by recreating the source.
+        into your workspace. Rotate it from the source settings page.
+    StripeSignature:
+      type: apiKey
+      in: header
+      name: Stripe-Signature
+      description: Stripe-generated signature for a Stripe source.
+    GitHubSignature:
+      type: apiKey
+      in: header
+      name: X-Hub-Signature-256
+      description: GitHub-generated HMAC-SHA256 signature for a GitHub source.
+    ShopifySignature:
+      type: apiKey
+      in: header
+      name: X-Shopify-Hmac-Sha256
+      description: Shopify-generated HMAC-SHA256 signature for a Shopify source.
+    ChargebeeBasic:
+      type: http
+      scheme: basic
+      description: Chargebee webhook Basic Authentication configured on the Chargebee source.
 
   parameters:
     Limit:

@@ -49,6 +49,8 @@ describe("pull worker ClickHouse event logging", () => {
 
     expect(rawWrites[0]?.key).toBe("pull/ws_1/src_cb/customers/pull_chargebee_customers_cus_1_123.json");
     expect(queueMessages).toHaveLength(1);
+    expect(queueMessages[0]).toMatchObject({ headers: {}, query: {} });
+    expect(queueMessages[0]).not.toHaveProperty("event_type");
     expect(fetchSpy).toHaveBeenCalledTimes(1);
 
     const [url, init] = fetchSpy.mock.calls[0]!;
@@ -70,10 +72,7 @@ describe("pull worker ClickHouse event logging", () => {
       received_at: "2026-05-08 12:00:00.000",
       content_type: "application/json",
       size_bytes: expect.any(Number),
-      headers_json: JSON.stringify({
-        "x-axel-pull-source-type": "chargebee",
-        "x-axel-pull-stream": "customers",
-      }),
+      headers_json: "{}",
       query_json: "{}",
     });
   });

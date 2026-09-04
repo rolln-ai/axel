@@ -1,7 +1,7 @@
 {
   "name": "@axel/marketing",
   "version": "0.0.0",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "private": true,
   "packageManager": "pnpm@9.12.0",
   "type": "module",
@@ -13,14 +13,13 @@
     "dev": "next dev"
   },
   "devDependencies": {
-    "@types/node": "^25.9.3",
+    "@types/node": "^22.20.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "typescript": "^6.0.3"
   },
   "dependencies": {
     "next": "^16.2.11",
-    "posthog-js": "^1.386.6",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-markdown": "^10.1.0",

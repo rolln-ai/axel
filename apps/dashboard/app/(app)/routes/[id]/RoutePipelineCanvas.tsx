@@ -154,8 +154,8 @@ function CanvasInner({
         return validatePipelineGraph(parsed, {
           attached_destination_ids: attached,
         });
-      } catch (err) {
-        console.warn("[canvas] saved graph failed validation, falling back to legacy", err);
+      } catch {
+        console.warn("[canvas] saved graph failed validation, falling back to legacy");
       }
     }
     return synthesizeLegacyGraph({
@@ -227,7 +227,9 @@ function CanvasInner({
       return { kind: "ran", carried, deliveries };
     } catch (err) {
       const reason = err instanceof RouteEngineError ? err.reason : "engine_error";
-      const message = err instanceof Error ? err.message : String(err);
+      const message = err instanceof RouteEngineError
+        ? "Route evaluation failed. Check the pipeline configuration."
+        : "Route evaluation failed.";
       return { kind: "error", reason, message };
     }
   }, [graph, sample, destinations]);

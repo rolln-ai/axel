@@ -96,11 +96,12 @@ export default async function DataContractDetailPage({
   const staleSample = shouldCheckStaleness && eventsSinceVersion >= 100;
 
   // Type-coverage staleness: a schema can be a healthy size (past the tiny-
-  // snapshot gate) yet still under-count event TYPES — the newsletter provider case, where a
-  // pre-index proportional snapshot captured only the high-volume types and
-  // missed the long tail. Compare the distinct typed types the source has
-  // actually emitted (the exhaustive index count) against the named clusters
-  // this contract captured. "Event N" clusters are shape-based, not real types,
+  // snapshot gate) yet still under-count event TYPES. For a long-tail
+  // newsletter source, a pre-index proportional snapshot may capture only
+  // the high-volume types and miss the long tail. Compare the distinct event
+  // types the source actually emitted (the exhaustive index count) against
+  // the named clusters this contract captured. "Event N" clusters are
+  // shape-based, not real types,
   // so they don't count toward coverage.
   const storedNamedTypeCount = schema
     ? schema.event_types.filter((c) => !/^Event \d+$/.test(c.name)).length

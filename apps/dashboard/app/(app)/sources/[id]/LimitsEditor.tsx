@@ -65,7 +65,7 @@ export function LimitsEditor({
       <Field
         label="Rate cap"
         unit="events / minute"
-        hint="Per-source token-bucket limit applied at the ingest edge. Up to 1,000,000/min. For high-volume producers (Stripe, Segment) start with 100,000–600,000 — the edge KV cache makes lookups cheap."
+        hint="Per-source token-bucket limit applied at the ingest edge. Up to 1,000,000/min. For high-volume producers such as Stripe or Segment, start with 100,000 to 600,000."
       >
         <Input
           name="max_events_per_minute"

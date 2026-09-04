@@ -2,11 +2,36 @@ name: Feature request
 description: Propose a change or addition
 labels: [enhancement]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        GitHub issues are public. Use synthetic examples and remove customer data, credentials, private endpoints, and internal identifiers. Report suspected vulnerabilities through [SECURITY.md](https://github.com/rolln-ai/axel/blob/main/SECURITY.md) instead.
+  - type: checkboxes
+    id: public-safety
+    attributes:
+      label: Public issue safety
+      options:
+        - label: I used synthetic examples and this is not a suspected security vulnerability.
+          required: true
+  - type: checkboxes
+    id: searched
+    attributes:
+      label: Existing requests
+      options:
+        - label: I searched open and closed issues and did not find the same request.
+          required: true
   - type: textarea
     id: problem
     attributes:
       label: Problem
       description: What you're trying to do and where Axel falls short.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the user-visible result without assuming a particular implementation.
     validations:
       required: true
   - type: textarea
@@ -16,3 +41,21 @@ body:
       description: Rough idea of the change — API, CLI, UI, connector. Large changes should start here before a PR (see CONTRIBUTING.md).
     validations:
       required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Note any workaround or different approach you tried.
+    validations:
+      required: false
+  - type: dropdown
+    id: contribution
+    attributes:
+      label: Contribution
+      description: Would you be interested in working on this after the approach is agreed?
+      options:
+        - "Yes"
+        - "Maybe, with guidance"
+        - "No"
+    validations:
+      required: true

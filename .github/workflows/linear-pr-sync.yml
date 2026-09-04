@@ -21,11 +21,12 @@ concurrency:
 jobs:
   sync:
     name: Linear PR sync
-    # pull_request_target can read repository secrets. Never let a fork PR
-    # cause writes to the private Linear workspace, even though this job checks
-    # out the protected default branch rather than the proposed branch.
-    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    # pull_request_target can read repository secrets. Keep private Linear
+    # writes restricted to the current maintainer even for same-repo branches.
+    # Add future maintainers explicitly after granting repository write access.
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == '10-01' }}
     runs-on: ubuntu-latest
+    environment: Automation
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

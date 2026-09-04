@@ -220,7 +220,10 @@ describe("createR2HttpDeleter", () => {
   it("throws immediately on a non-retriable status", async () => {
     const fetchImpl = vi.fn(async () => new Response("forbidden", { status: 403 })) as unknown as typeof fetch;
     const deleter = createR2HttpDeleter({ ...deps, fetchImpl });
-    await expect(deleter.delete("k")).rejects.toThrow(/r2_delete_403/);
+    const err = await deleter.delete("k").catch((cause: unknown) => cause as Error);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toBe("r2_delete_403");
+    expect(err.message).not.toContain("forbidden");
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });

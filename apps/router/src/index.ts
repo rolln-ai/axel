@@ -42,6 +42,7 @@ export {
   multiAlertSink,
   webhookAlertSink,
   alertSinkFromEnv,
+  externalAlertEvent,
   evaluateDeliveryHealth,
   evaluateDestinationLatency,
   evaluateQueueLag,

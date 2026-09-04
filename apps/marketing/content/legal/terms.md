@@ -1,15 +1,15 @@
 ---
 title: Terms of Service (Master Subscription Agreement)
 slug: terms
-version: "1.0"
-effectiveDate: "2026-06-04"
-lastUpdated: "2026-07-31"
+version: "1.1"
+effectiveDate: "2026-09-03"
+lastUpdated: "2026-09-03"
 summary: The master contract governing your subscription to and use of Axel, the webhook-ingestion and event-delivery service operated by rolln, Inc.
 ---
 
 # Terms of Service (Master Subscription Agreement)
 
-**Version 1.0 — Effective 2026-06-04. Last updated 2026-07-31.**
+**Version 1.1. Effective 2026-09-03.**
 
 These Terms of Service, together with any ordering documents, plan selections, and the policies incorporated by reference below (collectively, this **"Agreement"** or these **"Terms"**), form a binding legal contract between you and **rolln, Inc.** governing your access to and use of Axel. **Please read them carefully.** By clicking to accept, by creating a Workspace, or by accessing or using the Service, you agree to be bound by this Agreement.
 
@@ -67,13 +67,25 @@ Subject to your compliance with this Agreement and payment of applicable fees, r
 
 ### 3.3 rolln Intellectual Property
 
-As between the parties, rolln and its licensors own and retain all right, title, and interest in and to the Service, including all software, technology, the edge ingest, route-evaluation, and delivery engines, the dashboard, APIs, Documentation, and all related intellectual property rights, and including any improvements, modifications, and derivative works. Except for the limited rights expressly granted in Section 3.2, no rights are granted to you by implication, estoppel, or otherwise. The Axel and rolln names, logos, and product names are trademarks of rolln; you may not use them except as expressly permitted in writing.
+As between the parties, and excluding Customer Data and open-source or third-party materials owned by their respective authors or licensors, rolln and its licensors own and retain all right, title, and interest in and to the Service components and materials they own, including the related intellectual property rights and any improvements, modifications, and derivative works they create. Except for the rights expressly granted in Sections 3.2 and 3.5, no rights are granted to you by implication, estoppel, or otherwise. The Axel and rolln names, logos, and product names are trademarks of rolln; you may not use them except as expressly permitted in writing or under the trademark policy included with the open-source software.
 
 ### 3.4 Restrictions
 
-You will not, and will not permit any Authorized User or third party to: (a) copy, modify, or create derivative works of the Service; (b) reverse engineer, decompile, or disassemble the Service, or attempt to discover its source code, except to the extent this restriction is prohibited by applicable law; (c) resell, sublicense, time-share, or provide the Service to third parties as a service bureau except as expressly permitted; (d) circumvent or interfere with the Service's security, tenant-isolation, rate-limiting, body-size, depth, or route-evaluation controls; (e) use the Service to build a competing product or copy its features or interface; (f) access the Service to benchmark it, or publish any benchmark or performance results about the Service, without rolln's prior written consent; or (g) remove or obscure any proprietary notices. The restrictions in this Section 3.4 apply to rolln's Service, software, and technology, and do **not** apply to your own routes, filter and transform configurations, and other Customer Data, which remain yours under Section 5.1. Additional use restrictions appear in the Acceptable Use Policy (see Section 6).
+Except for rights granted under Section 3.5, you will not, and will not permit any Authorized User or third party to: (a) copy, modify, or create derivative works of the hosted Service or proprietary materials; (b) reverse engineer, decompile, or disassemble the hosted Service or proprietary materials, or attempt to discover their source code, except to the extent this restriction is prohibited by applicable law; (c) resell, sublicense, time-share, or provide the Service to third parties as a service bureau except as expressly permitted; (d) circumvent or interfere with the Service's security, tenant-isolation, rate-limiting, body-size, depth, or route-evaluation controls; (e) use the Service to build a competing product or copy its features or interface; (f) access the Service to benchmark it, or publish any benchmark or performance results about the Service, without rolln's prior written consent; or (g) remove or obscure any proprietary notices. The restrictions in this Section 3.4 apply to the hosted Service and proprietary materials, and do **not** apply to rights granted under an open-source license or to your own routes, filter and transform configurations, and other Customer Data, which remain yours under Section 5.1. Additional use restrictions appear in the Acceptable Use Policy (see Section 6).
 
-### 3.5 Feedback
+### 3.5 Open-source software
+
+These Terms govern access to and use of the hosted Axel Cloud Service. Source
+code that rolln distributes under an open-source license is governed by the
+license included with that source code. Nothing in Sections 3.2 through 3.4 or
+the Acceptable Use Policy limits rights granted by that open-source license.
+The restrictions in Section 3.4 apply to the hosted Service and proprietary
+materials, not to exercising rights granted by the applicable open-source
+license included with that code. Open-source licenses do not grant rights to
+the Axel or rolln names, logos, or trademarks except for accurate, nominative
+references.
+
+### 3.6 Feedback
 
 If you or your Authorized Users provide suggestions, ideas, enhancement requests, or other feedback about the Service (**"Feedback"**), you grant rolln a perpetual, irrevocable, worldwide, royalty-free, fully paid-up, transferable, and sublicensable license to use, reproduce, modify, and exploit such Feedback for any purpose, without restriction or obligation to you. Feedback is provided voluntarily and is not Confidential Information of the Customer.
 
@@ -295,7 +307,7 @@ The indemnified party will: (a) promptly notify the indemnifying party of the cl
 
 ## 15. Service Levels and Support
 
-rolln does not commit to any specific uptime, availability, or response time unless expressly agreed in a separate written service-level agreement (an **"SLA"**). Support is provided through the channels and at the levels described for your plan, by email to founders@axelapp.ai and through in-product support, at the level applicable to your plan. General inquiries may be directed to **founders@axelapp.ai**. Free and Beta Offerings are provided without any SLA or support commitment.
+rolln does not commit to any specific uptime, availability, or response time unless expressly agreed in a separate written service-level agreement (an **"SLA"**). Support is provided through the channels displayed in the Service and at the levels described for your plan. General inquiries may be directed to **founders@axelapp.ai**. Free and Beta Offerings are provided without any SLA or support commitment.
 
 ---
 
@@ -399,7 +411,7 @@ Unless you opt out by notifying us at **legal@axelapp.ai**, rolln may identify y
 
 ### 19.14 Survival
 
-The provisions that by their nature should survive termination or expiration will survive, including Sections 3.3–3.5 (IP, Restrictions, Feedback), 5 (Customer Data, including responsibilities and Section 5.6 (Aggregated and De-identified Data)), 6.1–6.2 (Content Removal; DMCA), 8 (accrued Fees), 10.5–10.6 (Effect of Termination; Data Export and Deletion), 11 (Confidentiality), 12 (Warranty Disclaimer), 13 (Limitation of Liability), 14 (Indemnification, including Section 14.1 and, if offered, Section 14.2), 16 (Privacy and Data Protection, to the extent applicable), 18 (Governing Law and Dispute Resolution), and 19 (General). If rolln does not offer the IP indemnity in Section 14.2, the reference to Section 14.2 in this Section and in Section 13.4 has no effect.
+The provisions that by their nature should survive termination or expiration will survive, including Sections 3.3–3.6 (IP, Restrictions, Open-Source Software, Feedback), 5 (Customer Data, including responsibilities and Section 5.6 (Aggregated and De-identified Data)), 6.1–6.2 (Content Removal; DMCA), 8 (accrued Fees), 10.5–10.6 (Effect of Termination; Data Export and Deletion), 11 (Confidentiality), 12 (Warranty Disclaimer), 13 (Limitation of Liability), 14 (Indemnification, including Section 14.1 and, if offered, Section 14.2), 16 (Privacy and Data Protection, to the extent applicable), 18 (Governing Law and Dispute Resolution), and 19 (General). If rolln does not offer the IP indemnity in Section 14.2, the reference to Section 14.2 in this Section and in Section 13.4 has no effect.
 
 ---
 

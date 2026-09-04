@@ -6,6 +6,7 @@ import {
   formatCount,
   getDailyDeliveryStats,
   getDailyUsage,
+  getEventDetail,
   getSourceDailyUsage,
   getWorkspaceUsage,
   listRecentRouteEvents,
@@ -56,6 +57,17 @@ describe("usage", () => {
       rows: [{ n: "1" }],
     });
     expect(globalThis.__axelClickhouseFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not expose ClickHouse response bodies in errors", async () => {
+    process.env.CLICKHOUSE_URL = "https://clickhouse.example";
+    globalThis.__axelClickhouseFetch = vi.fn(async () => (
+      new Response("provider-private-response", { status: 400 })
+    ));
+
+    const query = clickhouse().query("SELECT 1");
+    await expect(query).rejects.toThrow(/^ClickHouse query failed \(400\)$/);
+    await expect(query).rejects.not.toThrow(/provider-private-response/);
   });
 
   it("lets background callers override and retry the interactive query timeout", async () => {
@@ -170,6 +182,13 @@ describe("usage", () => {
           { response_json: JSON.stringify({ error: "already_delivered" }), status: "dead", c: "3" },
           { response_json: JSON.stringify({ error: "already-delivered" }), status: "retry", c: "2" },
           { response_json: JSON.stringify({ http_status: 503 }), status: "retry", c: "4" },
+          {
+            response_json: JSON.stringify({
+              error: "SELECT failed on marker_schema: marker-secret provider body",
+            }),
+            status: "dead",
+            c: "1",
+          },
         ],
       ],
     });
@@ -181,7 +200,10 @@ describe("usage", () => {
 
     expect(rows).toEqual([
       { error_type: "HTTP 503", count: 4 },
+      { error_type: "delivery failed", count: 1 },
     ]);
+    expect(JSON.stringify(rows)).not.toContain("marker_schema");
+    expect(JSON.stringify(rows)).not.toContain("marker-secret");
   });
 
   it("listWorkspaceFailureTypes queries the normalized latest-outcome rollup", async () => {
@@ -397,10 +419,65 @@ describe("usage", () => {
       status: "dead",
       attempt_no: 2,
       latency_ms: 1500,
-      response: { http_status: 500, error: "upstream failed" },
+      response: { http_status: 500, error: "delivery_failed" },
     });
     expect(calls[0]?.params).toMatchObject({ workspace_id: "ws_test", status: "dead", limit: 25 });
     expect(calls[0]?.sql).toContain("d.status = {status:String}");
+  });
+
+  it("returns only bounded delivery response fields and stable error codes", async () => {
+    const marker = "postgresql://user:marker-secret@private-db.internal/marker_schema";
+    const { client } = fakeClickhouse({
+      responses: [
+        [
+          {
+            attempt_id: "att_private",
+            event_id: "evt_private",
+            source_id: "src_private",
+            route_id: "rte_private",
+            destination_id: "dst_private",
+            attempt_no: "1",
+            status: "dead",
+            latency_ms: "20",
+            response_json: JSON.stringify({
+              destination_type: "webhook",
+              http_status: 502,
+              error: marker,
+              customer_id: "cus_marker_private",
+              customer_email: "customer@example.com",
+              endpoint_url: "https://customer.example/hook?token=private",
+              stream: "customer_stream_private",
+              destination_id: "customer_destination_private",
+              component: "customer_component_private",
+              exception: "raw provider exception for customer@example.com",
+              provider_request_id: "provider-marker-id",
+              response_body: "marker webhook payload",
+            }),
+            created_at: "2026-05-15 12:00:00.000",
+          },
+        ],
+      ],
+    });
+
+    const rows = await listWorkspaceDeliveryAttempts("ws_test", "dead", 25, {
+      clickhouse: client,
+    });
+
+    expect(rows[0]?.response).toEqual({
+      destination_type: "webhook",
+      http_status: 502,
+      error: "delivery_failed",
+    });
+    expect(JSON.stringify(rows[0]?.response)).not.toContain(marker);
+    expect(JSON.stringify(rows[0]?.response)).not.toContain("cus_marker_private");
+    expect(JSON.stringify(rows[0]?.response)).not.toContain("customer@example.com");
+    expect(JSON.stringify(rows[0]?.response)).not.toContain("customer.example");
+    expect(JSON.stringify(rows[0]?.response)).not.toContain("customer_stream_private");
+    expect(JSON.stringify(rows[0]?.response)).not.toContain("customer_destination_private");
+    expect(JSON.stringify(rows[0]?.response)).not.toContain("customer_component_private");
+    expect(JSON.stringify(rows[0]?.response)).not.toContain("raw provider exception");
+    expect(JSON.stringify(rows[0]?.response)).not.toContain("provider-marker-id");
+    expect(JSON.stringify(rows[0]?.response)).not.toContain("marker webhook payload");
   });
 
   it("listRecentRouteEvents limits the route scan to the last 24 hours before grouping", async () => {
@@ -487,6 +564,30 @@ describe("usage", () => {
     expect(calls[0]?.sql).not.toContain("content_type = {content_type:String}");
     expect(calls[0]?.sql).not.toContain("positionCaseInsensitive");
     expect(calls[0]?.sql).not.toContain("before_received_at");
+  });
+
+  it("keeps historical request metadata out of event detail", async () => {
+    const { client, calls } = fakeClickhouse({
+      responses: [[{
+        event_id: "evt_1",
+        source_id: "src_1",
+        workspace_id: "ws_test",
+        received_at: "2026-05-15 11:55:00.000",
+        content_type: "application/json",
+        size_bytes: "2048",
+        shard: "3",
+        r2_key: "events/ws_test/2026-05-15/evt_1",
+        headers_json: JSON.stringify({ "x-customer-ref": "historical-secret" }),
+        query_json: JSON.stringify({ campaign: "historical-query-secret" }),
+      }]],
+    });
+
+    const detail = await getEventDetail("ws_test", "evt_1", { clickhouse: client });
+
+    expect(detail?.headers).toEqual({});
+    expect(detail?.query).toEqual({});
+    expect(calls[0]?.sql).not.toContain("headers_json");
+    expect(calls[0]?.sql).not.toContain("query_json");
   });
 
   it("listWorkspaceEvents pushes source/content-type/search filters into the query as bound parameters", async () => {

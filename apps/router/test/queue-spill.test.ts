@@ -81,7 +81,7 @@ describe("queue-spill (producer)", () => {
     const writer = fakeWriter();
     const msg = baseMessage();
     const out = await spillIfOversized(msg, writer);
-    expect(out).toBe(msg);
+    expect(out).toEqual({ ...msg, headers: {}, query: {} });
     expect(writer.calls).toHaveLength(0);
   });
 
@@ -105,7 +105,7 @@ describe("queue-spill (producer)", () => {
     expect(out.idempotency_key).toBe(msg.idempotency_key);
   });
 
-  it("writes payload + headers + query to the spill object", async () => {
+  it("writes payload but erases request metadata values from the spill object", async () => {
     const writer = fakeWriter();
     const huge = "x".repeat(QUEUE_MESSAGE_SPILL_THRESHOLD_BYTES + 1024);
     const msg = baseMessage({
@@ -120,8 +120,10 @@ describe("queue-spill (producer)", () => {
       query: Record<string, string>;
     };
     expect(parsed.payload.blob).toBe(huge);
-    expect(parsed.headers).toEqual({ "x-large": "yes" });
-    expect(parsed.query).toEqual({ q: "search" });
+    expect(parsed.headers).toEqual({});
+    expect(parsed.query).toEqual({});
+    expect(writer.calls[0]!.body).not.toContain("yes");
+    expect(writer.calls[0]!.body).not.toContain("search");
   });
 
   it("uses per-attempt spill keys so replays don't collide", () => {
@@ -164,8 +166,8 @@ describe("queue-spill (producer)", () => {
       key: "queue-spill/ws-1/evt-1/dst-1/2.json",
       body: JSON.stringify({
         payload: { hydrated: true },
-        headers: { "x-retry": "yes" },
-        query: { retry: "2" },
+        headers: {},
+        query: {},
       }),
     }]);
     expect(out.spill_r2_key).toBe("queue-spill/ws-1/evt-1/dst-1/2.json");
@@ -175,15 +177,15 @@ describe("queue-spill (producer)", () => {
 });
 
 describe("queue-spill (consumer)", () => {
-  it("returns the message unchanged when there is no spill key", async () => {
+  it("erases inline request metadata when there is no spill key", async () => {
     const reader = fakeReader();
     const msg = baseMessage();
     const out = await hydrateIfSpilled(msg, reader);
-    expect(out).toBe(msg);
+    expect(out).toEqual({ ...msg, headers: {}, query: {} });
     expect(reader.reads).toHaveLength(0);
   });
 
-  it("hydrates payload/headers/query from R2 when spill_r2_key is set", async () => {
+  it("hydrates payload but discards historical request metadata from R2", async () => {
     const key = "queue-spill/ws-1/evt-1/dst-1/1.json";
     const reader = fakeReader({
       [key]: JSON.stringify({
@@ -200,8 +202,9 @@ describe("queue-spill (consumer)", () => {
     });
     const out = await hydrateIfSpilled(stripped, reader);
     expect(out.payload).toEqual({ full: "data" });
-    expect(out.headers).toEqual({ "x-rebuilt": "yes" });
-    expect(out.query).toEqual({ q: "v" });
+    expect(out.headers).toEqual({});
+    expect(out.query).toEqual({});
+    expect(JSON.stringify(out)).not.toContain("x-rebuilt");
     expect(out.spill_r2_key).toBe(key);
     expect(reader.reads).toEqual([key]);
   });
@@ -224,13 +227,18 @@ describe("queue-spill (consumer)", () => {
 
   it("throws spill_r2_key_missing when the R2 object is gone", async () => {
     const reader = fakeReader();
-    const msg = baseMessage({ spill_r2_key: "queue-spill/ws-1/evt-1/dst-1/1.json" });
+    const key = "queue-spill/ws-1/evt-1/dst-1/1.json";
+    const msg = baseMessage({ spill_r2_key: key });
     await expect(hydrateIfSpilled(msg, reader)).rejects.toThrow(QueueSpillObjectMissingError);
-    await expect(hydrateIfSpilled(msg, reader)).rejects.toThrow(/spill_r2_key_missing/);
+    const err = await hydrateIfSpilled(msg, reader).catch((cause: unknown) => cause);
+    expect(err).toBeInstanceOf(QueueSpillObjectMissingError);
+    expect((err as Error).message).toBe("spill_r2_key_missing");
+    expect(JSON.stringify(err)).not.toContain(key);
   });
 
   it("identifies missing spill object errors by class or legacy message", () => {
     expect(isQueueSpillObjectMissingError(new QueueSpillObjectMissingError("queue-spill/a/b/c/1.json"))).toBe(true);
+    expect(isQueueSpillObjectMissingError(new Error("spill_r2_key_missing"))).toBe(true);
     expect(isQueueSpillObjectMissingError(new Error("spill_r2_key_missing: queue-spill/a/b/c/1.json"))).toBe(true);
     expect(isQueueSpillObjectMissingError(new Error("r2_get_500"))).toBe(false);
   });
@@ -239,7 +247,7 @@ describe("queue-spill (consumer)", () => {
   // "SyntaxError: Unterminated string in JSON at position 65536" — a title
   // that fingerprints on the byte offset and names neither the object nor
   // the cause.
-  it("throws a keyed error, not a raw SyntaxError, when the spill body is unparseable", async () => {
+  it("throws a bounded error, not a raw SyntaxError, when the spill body is unparseable", async () => {
     const key = "queue-spill/ws-1/evt-1/dst-1/1.json";
     const truncated = `{"payload":{"a":"${"x".repeat(64)}`;
     const reader = fakeReader({ [key]: truncated });
@@ -249,18 +257,20 @@ describe("queue-spill (consumer)", () => {
     const err = await hydrateIfSpilled(msg, reader).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(QueueSpillBodyCorruptError);
     const corrupt = err as QueueSpillBodyCorruptError;
-    expect(corrupt.spillKey).toBe(key);
     expect(corrupt.byteLength).toBe(truncated.length);
-    // The message identifies the object and carries no byte offset.
-    expect(corrupt.message).toContain(key);
+    // Keep object identity out of the diagnostic while preserving useful size.
+    expect(corrupt.message).toBe(`spill_r2_body_corrupt (${truncated.length} bytes)`);
+    expect(corrupt.message).not.toContain(key);
     expect(corrupt.message).not.toMatch(/position \d+/);
     // The original SyntaxError can quote malformed webhook bytes, so it must
     // not survive on the error object sent to logs or Sentry.
     expect("cause" in corrupt).toBe(false);
+    expect("spillKey" in corrupt).toBe(false);
   });
 
   it("identifies corrupt spill body errors by class or message", () => {
     expect(isQueueSpillBodyCorruptError(new QueueSpillBodyCorruptError("k", 10))).toBe(true);
+    expect(isQueueSpillBodyCorruptError(new Error("spill_r2_body_corrupt (10 bytes)"))).toBe(true);
     expect(isQueueSpillBodyCorruptError(new Error("spill_r2_body_corrupt: k (10 bytes)"))).toBe(true);
     expect(isQueueSpillBodyCorruptError(new SyntaxError("Unterminated string in JSON at position 65536"))).toBe(false);
     expect(isQueueSpillBodyCorruptError(new QueueSpillObjectMissingError("k"))).toBe(false);
@@ -324,7 +334,7 @@ describe("queue-spill (consumer)", () => {
 });
 
 describe("queue-spill (round-trip)", () => {
-  it("spill → hydrate restores the original payload/headers/query exactly", async () => {
+  it("spill → hydrate restores payload while request metadata remains erased", async () => {
     const writer = fakeWriter();
     const huge = "y".repeat(QUEUE_MESSAGE_SPILL_THRESHOLD_BYTES + 5_000);
     const original = baseMessage({
@@ -343,8 +353,8 @@ describe("queue-spill (round-trip)", () => {
     const hydrated = await hydrateIfSpilled(wire, reader);
 
     expect(hydrated.payload).toEqual(original.payload);
-    expect(hydrated.headers).toEqual(original.headers);
-    expect(hydrated.query).toEqual(original.query);
+    expect(hydrated.headers).toEqual({});
+    expect(hydrated.query).toEqual({});
   });
 
   it("spill → hydrate → retry spill → hydrate preserves data with canonical keys", async () => {
@@ -374,7 +384,7 @@ describe("queue-spill (round-trip)", () => {
     expect(retryWire.spill_r2_key).toBe("queue-spill/ws-1/evt-1/dst-1/2.json");
     expect(retryReader.reads).toEqual(["queue-spill/ws-1/evt-1/dst-1/2.json"]);
     expect(retryHydrated.payload).toEqual(original.payload);
-    expect(retryHydrated.headers).toEqual(original.headers);
-    expect(retryHydrated.query).toEqual(original.query);
+    expect(retryHydrated.headers).toEqual({});
+    expect(retryHydrated.query).toEqual({});
   });
 });

@@ -35,6 +35,6 @@ describe("routerErrorMessage", () => {
     expect(result).not.toContain("hunter2");
     expect(result).not.toContain("victim@example.test");
     expect(result).not.toContain("opaque-secret");
-    expect(result).toContain("[REDACTED]");
+    expect(result).toBe("operation_failed");
   });
 });

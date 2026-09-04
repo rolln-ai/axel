@@ -220,7 +220,8 @@ export function createClickhouseR2KeyLister(deps: ClickhouseHttpDeps): R2KeyList
         headers,
       });
       if (!res.ok) {
-        throw new Error(`r2_retention_ch_${res.status}: ${(await res.text().catch(() => "")).slice(0, 200)}`);
+        await res.body?.cancel().catch(() => undefined);
+        throw new Error(`r2_retention_ch_${res.status}`);
       }
       const text = await res.text();
       if (!text.trim()) return [];
@@ -253,8 +254,10 @@ export function createR2HttpDeleter(deps: R2HttpDeps): R2Deleter {
         if (res.ok || res.status === 404) return;
         const retriable = res.status === 429 || res.status >= 500;
         if (!retriable || attempt === maxAttempts) {
-          throw new Error(`r2_delete_${res.status}: ${(await res.text().catch(() => "")).slice(0, 200)}`);
+          await res.body?.cancel().catch(() => undefined);
+          throw new Error(`r2_delete_${res.status}`);
         }
+        await res.body?.cancel().catch(() => undefined);
         await sleep(Math.min(8_000, 200 * 2 ** (attempt - 1)));
       }
     },

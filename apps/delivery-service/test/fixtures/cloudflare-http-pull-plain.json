@@ -2,7 +2,7 @@
   "result": {
     "messages": [
       {
-        "body": "{\"queue_message_version\":1,\"event_id\":\"evt_contract_1\",\"workspace_id\":\"ws_contract\",\"source_id\":\"src_contract\",\"route_id\":\"route_contract\",\"destination_id\":\"dest_contract\",\"r2_key\":\"events/ws_contract/evt_contract_1.json\",\"received_at\":\"2026-08-26T12:00:00.000Z\",\"enqueued_at\":\"2026-08-26T12:00:01.000Z\",\"attempt_no\":1,\"max_attempts\":12,\"idempotency_key\":\"ws_contract:evt_contract_1:route_contract:dest_contract\",\"content_type\":\"application/json\",\"size_bytes\":17,\"payload\":{\"canary\":true},\"headers\":{\"content-type\":\"application/json\"},\"query\":{},\"is_test\":true}",
+        "body": "{\"queue_message_version\":1,\"event_id\":\"evt_contract_1\",\"workspace_id\":\"ws_contract\",\"source_id\":\"src_contract\",\"route_id\":\"route_contract\",\"destination_id\":\"dest_contract\",\"r2_key\":\"events/ws_contract/2026-08-26/evt_contract_1\",\"received_at\":\"2026-08-26T12:00:00.000Z\",\"enqueued_at\":\"2026-08-26T12:00:01.000Z\",\"attempt_no\":1,\"max_attempts\":12,\"idempotency_key\":\"ws_contract:evt_contract_1:route_contract:dest_contract\",\"content_type\":\"application/json\",\"size_bytes\":17,\"payload\":{\"canary\":true},\"headers\":{\"content-type\":\"application/json\"},\"query\":{},\"is_test\":true}",
         "id": "message_plain_1",
         "timestamp_ms": 1787745601000,
         "attempts": 1,

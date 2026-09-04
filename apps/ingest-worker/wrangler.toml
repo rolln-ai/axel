@@ -84,11 +84,23 @@ queue = "axel-events-14"
 binding = "QUEUE_EVENTS_15"
 queue = "axel-events-15"
 
-# Edge cache for source lookups (5-min positive TTL, 30s negative TTL).
-# Optional — when unbound, lookupSource falls through to the upstream every call.
+# KV now stores workspace plan state only. Old `src:*` entries remain readable
+# for rollback cleanup, but hosted source authorization never trusts them.
 [[kv_namespaces]]
 binding = "SOURCE_CACHE"
 id = "f62a3d017f1246baa648cdc969812b5e"
+
+# Strongly consistent, one-instance-per-source authorization state. Every
+# hosted ingest lookup passes through this SQLite-backed Durable Object. The
+# dashboard fences it before source/workspace mutations and publishes the
+# committed source config before unblocking.
+[[durable_objects.bindings]]
+name = "SOURCE_AUTHORITY"
+class_name = "SourceAuthorityDurableObject"
+
+[[migrations]]
+tag = "v1-source-authority-sqlite"
+new_sqlite_classes = ["SourceAuthorityDurableObject"]
 
 [vars]
 # This is the PRODUCTION [vars] block (SENTRY_ENVIRONMENT below). DEV_MODE must
@@ -97,11 +109,16 @@ id = "f62a3d017f1246baa648cdc969812b5e"
 # (and DEV_SOURCES) in apps/ingest-worker/.dev.vars (auto-loaded by `wrangler dev`,
 # gitignored). The Phase-4 Postgres source lookup will replace dev-mode entirely.
 SENTRY_ENVIRONMENT = "production"
+# Prevent a hosted binding/config regression from silently downgrading to the
+# self-host direct-origin profile.
+SOURCE_AUTHORITY_REQUIRED = "true"
+# Required secret, installed atomically with the hosted Worker version:
+# ORDERING_KEY_HMAC_SECRET (32+ characters).
 # Heartbeat ingress for the operational view. POSTs to
 # `${DELIVERY_SERVICE_URL}/internal/heartbeat` once a minute so
 # /admin/health + /status can see ingest is alive. Auth header is
 # DELIVERY_SHARED_SECRET (set via `wrangler secret put DELIVERY_SHARED_SECRET`)
-# authenticates heartbeats. Production source-cache misses at
+# authenticates heartbeats. Production source-authority cold starts at
 # POST /internal/source use the dedicated SOURCE_LOOKUP_SHARED_SECRET.
 DELIVERY_SERVICE_URL = "https://axel-delivery-native.onrender.com"
 
@@ -113,6 +130,6 @@ DELIVERY_SERVICE_URL = "https://axel-delivery-native.onrender.com"
 # Set with: wrangler secret put DELIVERY_SHARED_SECRET
 # Dedicated source-lookup secret. Keep this off router-edge and delivery-edge.
 # Set with: wrangler secret put SOURCE_LOOKUP_SHARED_SECRET
-# Control-plane Postgres for erasure indexing and local-dev source fallback.
-# Set with: wrangler secret put DATABASE_URL
+# DATABASE_URL is local-development only. Production erasure indexing and
+# source lookup use authenticated delivery-service endpoints.
 # Local-dev direct-PG fallback only: AES-256-GCM source signing-secret key.

@@ -3,6 +3,7 @@ import {
   runNotificationScan,
   buildNewErrorNotification,
   listWorkspacesWithUnresolvedDeadLetters,
+  publicNotificationScanSummary,
   shouldReportNotificationScanError,
   type NotificationScanDeps,
 } from "../lib/notification-scan";
@@ -177,7 +178,28 @@ describe("runNotificationScan", () => {
     expect(h.emitted.every((e) => e.alertedAt === false)).toBe(true); // digest will pick them up
     expect(h.alerted).toHaveLength(0); // no successful email
     expect(summary.alerts_emailed).toBe(0);
-    expect(summary.errors.length).toBe(2); // per-group send failure recorded
+    expect(summary.errors).toEqual([
+      { code: "alert_send_failed" },
+      { code: "alert_send_failed" },
+    ]);
+    expect(JSON.stringify(summary)).not.toContain("listRecipients failed");
+    expect(JSON.stringify(summary)).not.toContain("ws1");
+  });
+
+  it("projects only aggregate error counts and fixed codes for the cron response", async () => {
+    const h = harness({ groups: [group()] });
+    h.deps.loadGroups = async () => {
+      throw new Error("private-workspace-provider-detail");
+    };
+
+    const summary = await runNotificationScan(h.deps);
+    const responseSummary = publicNotificationScanSummary(summary);
+
+    expect(responseSummary.error_count).toBe(1);
+    expect(responseSummary.error_counts.workspace_scan_failed).toBe(1);
+    expect(JSON.stringify(responseSummary)).not.toContain("private-workspace-provider-detail");
+    expect(JSON.stringify(responseSummary)).not.toContain("ws1");
+    expect(responseSummary).not.toHaveProperty("errors");
   });
 });
 
@@ -224,7 +246,7 @@ describe("buildNewErrorNotification", () => {
     expect(n.severity).toBe("high");
     expect(n.title).toContain("timeout");
     expect(n.body_md).toContain("12 deliveries are failing");
-    expect(n.body_md).toContain("upstream timeout");
+    expect(n.body_md).toContain("operation_timeout");
   });
 
   it("escapes the workspace id when building the handoff path", () => {
@@ -244,6 +266,6 @@ describe("buildNewErrorNotification", () => {
     expect(n.body_md).not.toContain("victim@example.test");
     expect(n.body_md).not.toContain("private webhook text");
     expect(n.body_md).not.toContain("hunter2");
-    expect(n.body_md).toContain("payload=[REDACTED]");
+    expect(n.body_md).toContain("operation_failed");
   });
 });

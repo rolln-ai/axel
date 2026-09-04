@@ -38,7 +38,10 @@ import {
   startPeriodicRunner,
   type RunnerHandle,
 } from "@axel/router";
-import { sanitizeConnectorDiagnosticForStorage } from "@axel/shared";
+import {
+  isCanonicalRawPayloadKey,
+  sanitizeConnectorDiagnosticForStorage,
+} from "@axel/shared";
 
 /** Max events pulled from ClickHouse per worker tick per job. */
 const BATCH_LIMIT = 500;
@@ -380,6 +383,15 @@ export async function advanceJob(
   if (rows.length === 0) {
     await markJobDone(deps.pool, job.id);
     return "done";
+  }
+
+  if (rows.some((row) => !isCanonicalRawPayloadKey(row.r2_key, {
+    workspaceId: job.workspace_id,
+    eventId: row.event_id,
+    sourceId: job.source_id,
+  }))) {
+    await markJobFailed(deps.pool, job.id, "raw_payload_key_mismatch");
+    return "failed";
   }
 
   // Single transaction: bulk INSERT + cursor advance. Crash in between

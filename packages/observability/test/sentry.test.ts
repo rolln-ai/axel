@@ -23,7 +23,7 @@ describe("sentry client", () => {
     expect(calls[0]?.url).toBe("https://example.sentry.io/api/12345/envelope/");
     expect((calls[0]?.init.headers as Record<string, string>)["content-type"]).toBe("application/x-sentry-envelope");
     expect(calls[0]?.init.body).toContain("\"service\":\"test-service\"");
-    expect(calls[0]?.init.body).toContain("\"value\":\"boom\"");
+    expect(calls[0]?.init.body).toContain("\"value\":\"application_error\"");
   });
 
   it("sends the exact severity-specific operational alert fingerprint", async () => {
@@ -107,7 +107,47 @@ describe("sentry client", () => {
     expect(envelope).not.toContain("token=value");
     expect(envelope).not.toContain("4111111111111111");
     expect(envelope).not.toContain("webhook-secret");
-    expect(envelope).toContain("[REDACTED]");
+    expect(envelope).toContain("\"value\":\"application_error\"");
+  });
+
+  it("redacts business identifiers in tags and extra and drops user context", async () => {
+    const calls: RequestInit[] = [];
+    const client = createSentryClient({
+      dsn: "https://public@example.sentry.io/12345",
+      service: "delivery-service",
+      fetchImpl: (async (_url, init) => {
+        calls.push(init as RequestInit);
+        return new Response(null, { status: 200 });
+      }) as typeof fetch,
+    });
+
+    await client.captureException(new Error("delivery_failed"), {
+      tags: {
+        component: "queue_dispatch",
+        workspace_id: "ws-private",
+        event_id: "evt-private",
+        destination_id: "dst-private",
+      },
+      extra: {
+        routeId: "route-private",
+        nested: { source_id: "src-private" },
+      },
+      user: {
+        id: "user-private",
+        email: "private@example.test",
+        ip_address: "192.0.2.10",
+      },
+    });
+
+    const payload = JSON.parse(String(calls[0]?.body).trim().split("\n")[2] ?? "{}") as {
+      tags?: Record<string, unknown>;
+      extra?: Record<string, unknown>;
+      user?: unknown;
+    };
+    expect(payload.tags).toEqual({ service: "delivery-service", component: "queue_dispatch" });
+    expect(payload).not.toHaveProperty("extra");
+    expect(payload).not.toHaveProperty("user");
+    expect(JSON.stringify(payload)).not.toContain("private");
   });
 
   it("drops unlabeled receiver response tails and URL credentials", async () => {
@@ -128,10 +168,56 @@ describe("sentry client", () => {
     );
 
     const envelope = String(calls[0]?.body);
-    expect(envelope).toContain("HTTP 400: [REDACTED]");
+    expect(envelope).toContain("\"value\":\"http_error_400\"");
     expect(envelope).not.toContain("hunter2");
     expect(envelope).not.toContain("db-password");
     expect(envelope).not.toContain("private-key");
+  });
+
+  it("drops provider response excerpts and canonical R2 keys", async () => {
+    const calls: RequestInit[] = [];
+    const client = createSentryClient({
+      dsn: "https://public@example.sentry.io/12345",
+      service: "delivery-service",
+      fetchImpl: (async (_url, init) => {
+        calls.push(init as RequestInit);
+        return new Response(null, { status: 200 });
+      }) as typeof fetch,
+    });
+
+    await client.captureException(
+      new Error(
+        "r2_get_503: provider detail for queue-spill/ws-private/evt-private/dst-private/1.json",
+      ),
+    );
+
+    const envelope = String(calls[0]?.body);
+    expect(envelope).toContain("\"value\":\"http_error_503\"");
+    expect(envelope).not.toContain("provider detail");
+    expect(envelope).not.toContain("ws-private");
+  });
+
+  it("drops business and canary identifiers from exception text", async () => {
+    const calls: RequestInit[] = [];
+    const client = createSentryClient({
+      dsn: "https://public@example.sentry.io/12345",
+      service: "delivery-service",
+      fetchImpl: (async (_url, init) => {
+        calls.push(init as RequestInit);
+        return new Response(null, { status: 200 });
+      }) as typeof fetch,
+    });
+
+    await client.captureException(
+      new Error(
+        "workspace ws_private123 event 01935b3e-2c08-7c00-8000-c8a1b1e9d2f7 probe axel_canary_123456789",
+      ),
+    );
+
+    const envelope = String(calls[0]?.body);
+    expect(envelope).toContain("\"value\":\"application_error\"");
+    expect(envelope).not.toContain("ws_private123");
+    expect(envelope).not.toContain("axel_canary_123456789");
   });
 
   it("marks repository stack frames as in-app for Sentry grouping and source links", async () => {
@@ -146,9 +232,10 @@ describe("sentry client", () => {
       fetchImpl,
     });
     const error = new Error("boom");
+    error.name = "WebhookCanaryError";
     error.stack = [
-      "Error: boom",
-      "    at run (/opt/render/project/src/apps/delivery-service/src/server.ts:42:7)",
+      "WebhookCanaryError: secret-canary",
+      "    at secretCanary (/opt/render/project/src/apps/delivery-service/src/server.ts:42:7)",
       "    at processTicksAndRejections (node:internal/process/task_queues:95:5)",
     ].join("\n");
 
@@ -159,8 +246,14 @@ describe("sentry client", () => {
       exception?: { values?: Array<{ stacktrace?: { frames?: Array<Record<string, unknown>> } }> };
     };
     const frames = payload.exception?.values?.[0]?.stacktrace?.frames ?? [];
-    expect(frames.find((frame) => frame.filename === "/opt/render/project/src/apps/delivery-service/src/server.ts")?.in_app).toBe(true);
+    expect(frames.find((frame) => frame.filename === "apps/delivery-service/src/server.ts")?.in_app).toBe(true);
     expect(frames.find((frame) => frame.filename === "node:internal/process/task_queues")?.in_app).toBe(false);
+    expect(payload.exception?.values?.[0]).toMatchObject({
+      type: "Error",
+      value: "application_error",
+    });
+    expect(JSON.stringify(payload)).not.toContain("secretCanary");
+    expect(JSON.stringify(payload)).not.toContain("secret-canary");
   });
 
   it("returns null when SENTRY_DSN is unset", () => {

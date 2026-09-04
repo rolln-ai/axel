@@ -163,14 +163,14 @@ export default async function EventsPage({
               }
               body={
                 eventsError
-                  ? `ClickHouse query failed: ${eventsError}`
+                  ? eventsError
                   : cursor
                     ? "You've reached the end of the retained event stream."
                     : activeFilterCount > 0
                       ? "Adjust or clear filters to see more inbound events."
                       : usageEnabled()
                         ? "Events will appear here within seconds of the first webhook hitting an ingest endpoint."
-                        : "Set CLICKHOUSE_URL on the dashboard to show inbound events across every source."
+                        : "Event analytics are unavailable for this deployment."
               }
               action={
                 cursor ? (
@@ -215,13 +215,13 @@ function settleWithin<T>(
         clearTimeout(timeout);
         resolve({ ok: true, value });
       })
-      .catch((err) => {
+      .catch(() => {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
         resolve({
           ok: false,
-          error: err instanceof Error ? err.message : "Query failed.",
+          error: "Event data is temporarily unavailable.",
         });
       });
   });

@@ -47,6 +47,10 @@ export async function fetchDestinationEdaAction(
   const workspaceId = session.activeWorkspace.workspace_id;
   const timezone = session.activeWorkspace.workspace_timezone;
 
-  const rows = await getDestinationEdaSeries(workspaceId, destinationId, dimension, windowHours, { timezone });
-  return { ok: true, rows, dimension, windowHours };
+  try {
+    const rows = await getDestinationEdaSeries(workspaceId, destinationId, dimension, windowHours, { timezone });
+    return { ok: true, rows, dimension, windowHours };
+  } catch {
+    return { ok: false, message: "Destination analytics are temporarily unavailable." };
+  }
 }

@@ -28,7 +28,7 @@
  */
 
 import { execSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 // Stringifying functions that change a typed column into a String.
 const STRINGIFIERS = ["toString", "formatDateTime", "toJSONString"];
@@ -130,9 +130,12 @@ function runSelfTest() {
 function main() {
   if (process.argv.includes("--self-test")) return runSelfTest();
 
-  const files = execSync("git ls-files '*.ts' '*.tsx'", { encoding: "utf8" })
+  const files = execSync(
+    "git ls-files --cached --others --exclude-standard '*.ts' '*.tsx'",
+    { encoding: "utf8" },
+  )
     .split("\n")
-    .filter(Boolean);
+    .filter((file) => Boolean(file) && existsSync(file));
 
   const findings = [];
   for (const file of files) {

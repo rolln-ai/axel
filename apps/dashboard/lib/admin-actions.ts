@@ -16,8 +16,8 @@ import {
   renderBrandedEmail,
 } from "./email-layout";
 import {
-  invalidateEdgeSourceCache,
-  requireEdgeSourceCacheInvalidations,
+  requireEdgeSourceAuthoritySyncs,
+  requireEdgeSourceFences,
 } from "./edge-invalidation";
 import { teardownSingleWorkspace } from "./workspace-teardown";
 import { issuePasswordResetToken } from "./password-reset";
@@ -52,7 +52,7 @@ export async function suspendWorkspaceAction(
   if (!workspaceId) return { error: "Missing workspace id." };
 
   try {
-    const priorSourceStatuses = await withTransaction(async (client) => {
+    const result = await withTransaction(async (client) => {
       const wsResult = await client.query<{ status: string }>(
         "SELECT COALESCE(status, 'active') AS status FROM workspaces WHERE id = $1 FOR UPDATE",
         [workspaceId],
@@ -63,8 +63,8 @@ export async function suspendWorkspaceAction(
           "SELECT id FROM sources WHERE workspace_id = $1",
           [workspaceId],
         );
-        await requireEdgeSourceCacheInvalidations(sources.rows.map((source) => source.id));
-        throw new Error("already_suspended");
+        const fences = await requireEdgeSourceFences(sources.rows.map((source) => source.id));
+        return { kind: "already_suspended" as const, fences, prior: [] as PriorSourceStatus[] };
       }
 
       const ownsResult = await client.query<{ c: string }>(
@@ -81,7 +81,7 @@ export async function suspendWorkspaceAction(
         [workspaceId],
       );
       const prior: PriorSourceStatus[] = sourcesResult.rows;
-      await requireEdgeSourceCacheInvalidations(prior.map((source) => source.id));
+      const fences = await requireEdgeSourceFences(prior.map((source) => source.id));
 
       await client.query(
         `UPDATE workspaces
@@ -109,17 +109,19 @@ export async function suspendWorkspaceAction(
         metadata: { reason, prior_source_statuses: prior },
       });
 
-      return prior;
+      return { kind: "suspended" as const, fences, prior };
     });
 
-    await requireEdgeSourceCacheInvalidations(priorSourceStatuses.map((source) => source.id));
+    await requireEdgeSourceAuthoritySyncs(result.fences, workspaceId);
+    if (result.kind === "already_suspended") {
+      return { error: "Workspace is already suspended." };
+    }
   } catch (err) {
     if (err instanceof Error && err.message === "not_found") return { error: "Workspace not found." };
-    if (err instanceof Error && err.message === "already_suspended") return { error: "Workspace is already suspended." };
     if (err instanceof Error && err.message === "self_suspend_unconfirmed") {
       return { error: "You belong to this workspace — confirm self-suspension to continue." };
     }
-    console.error("[admin] suspendWorkspaceAction failed:", err);
+    console.error("[admin] suspendWorkspaceAction failed");
     return { error: "Could not suspend workspace." };
   }
 
@@ -127,7 +129,7 @@ export async function suspendWorkspaceAction(
   revalidatePath(`/admin/workspaces/${workspaceId}`);
   revalidatePath("/admin/workspaces");
   return {
-    notice: "Workspace suspended. Edge cache deletion was confirmed; distributed cache propagation or a lookup already in flight can retain old source state for up to five minutes.",
+    notice: "Workspace suspended. The edge authority confirms every source is disabled.",
   };
 }
 
@@ -140,7 +142,7 @@ export async function unsuspendWorkspaceAction(
   if (!workspaceId) return { error: "Missing workspace id." };
 
   try {
-    const restoredSourceIds = await withTransaction(async (client) => {
+    const restored = await withTransaction(async (client) => {
       const wsResult = await client.query<{ status: string }>(
         "SELECT COALESCE(status, 'active') AS status FROM workspaces WHERE id = $1 FOR UPDATE",
         [workspaceId],
@@ -163,6 +165,18 @@ export async function unsuspendWorkspaceAction(
         [workspaceId],
       );
       const priors = auditResult.rows[0]?.metadata?.prior_source_statuses ?? [];
+      const restoredSourceIds = priors
+        .filter((prior) => prior.status !== "disabled")
+        .map((prior) => prior.id);
+      const currentSources = await client.query<{ id: string }>(
+        "SELECT id FROM sources WHERE workspace_id = $1",
+        [workspaceId],
+      );
+      // Sync disabled sources too. This repairs any fence left by a prior
+      // post-commit failure without enabling a source the audit did not list.
+      const fences = await requireEdgeSourceFences(
+        currentSources.rows.map((source) => source.id),
+      );
 
       await client.query(
         `UPDATE workspaces
@@ -174,14 +188,12 @@ export async function unsuspendWorkspaceAction(
         [workspaceId],
       );
 
-      const restored: string[] = [];
       for (const prior of priors) {
         if (prior.status !== "disabled") {
           await client.query(
             "UPDATE sources SET status = $2, updated_at = now() WHERE id = $1 AND workspace_id = $3",
             [prior.id, prior.status, workspaceId],
           );
-          restored.push(prior.id);
         }
       }
 
@@ -191,20 +203,17 @@ export async function unsuspendWorkspaceAction(
         action: "admin.workspace.unsuspended",
         targetType: "workspace",
         targetId: workspaceId,
-        metadata: { restored_source_ids: restored },
+        metadata: { restored_source_ids: restoredSourceIds },
       });
 
-      return restored;
+      return { fences };
     });
 
-    // Re-enabling affects availability, not revocation. Await the best-effort
-    // delete so success is prompt when the edge is configured; the short TTL
-    // remains a safe fallback when it is not.
-    await Promise.all(restoredSourceIds.map((sourceId) => invalidateEdgeSourceCache(sourceId)));
+    await requireEdgeSourceAuthoritySyncs(restored.fences, workspaceId);
   } catch (err) {
     if (err instanceof Error && err.message === "not_found") return { error: "Workspace not found." };
     if (err instanceof Error && err.message === "not_suspended") return { error: "Workspace is not suspended." };
-    console.error("[admin] unsuspendWorkspaceAction failed:", err);
+    console.error("[admin] unsuspendWorkspaceAction failed");
     return { error: "Could not unsuspend workspace." };
   }
 
@@ -263,7 +272,7 @@ export async function setWorkspacePlanAction(
   } catch (err) {
     if (err instanceof Error && err.message === "not_found") return { error: "Workspace not found." };
     if (err instanceof Error && err.message === "noop") return { notice: "Workspace is already on that plan." };
-    console.error("[admin] setWorkspacePlanAction failed:", err);
+    console.error("[admin] setWorkspacePlanAction failed");
     return { error: "Could not change plan." };
   }
 
@@ -272,8 +281,8 @@ export async function setWorkspacePlanAction(
   try {
     const planState = await computePlanState(workspaceId);
     if (planState) await pushPlanStates([planState]);
-  } catch (err) {
-    console.error("[admin] plan-state push failed:", err);
+  } catch {
+    console.error("[admin] plan-state push failed");
   }
 
   bustWorkspaceTags(workspaceId);
@@ -320,7 +329,7 @@ export async function setWorkspaceBillingExemptAction(
     if (err instanceof Error && err.message === "noop") {
       return { notice: exempt ? "Workspace is already billing-exempt." : "Workspace is not billing-exempt." };
     }
-    console.error("[admin] setWorkspaceBillingExemptAction failed:", err);
+    console.error("[admin] setWorkspaceBillingExemptAction failed");
     return { error: "Could not update billing exemption." };
   }
 
@@ -329,8 +338,8 @@ export async function setWorkspaceBillingExemptAction(
   try {
     const planState = await computePlanState(workspaceId);
     if (planState) await pushPlanStates([planState]);
-  } catch (err) {
-    console.error("[admin] plan-state push failed:", err);
+  } catch {
+    console.error("[admin] plan-state push failed");
   }
 
   bustWorkspaceTags(workspaceId);
@@ -362,9 +371,9 @@ export async function deleteWorkspaceAction(
   if (!workspaceId) return { error: "Missing workspace id." };
   if (!typedName) return { error: "Type the workspace name to confirm." };
 
-  let sourceIds: string[] = [];
+  let sourceFences: Awaited<ReturnType<typeof requireEdgeSourceFences>> = [];
   try {
-    sourceIds = await withTransaction(async (client) => {
+    sourceFences = await withTransaction(async (client) => {
       const wsResult = await client.query<{ name: string; status: string }>(
         "SELECT name, COALESCE(status, 'active') AS status FROM workspaces WHERE id = $1 FOR UPDATE",
         [workspaceId],
@@ -380,7 +389,7 @@ export async function deleteWorkspaceAction(
           "SELECT id FROM sources WHERE workspace_id = $1",
           [workspaceId],
         );
-        return sources.rows.map((source) => source.id);
+        return requireEdgeSourceFences(sources.rows.map((source) => source.id));
       }
 
       const sourcesResult = await client.query<{ id: string }>(
@@ -388,7 +397,7 @@ export async function deleteWorkspaceAction(
         [workspaceId],
       );
       const ids = sourcesResult.rows.map((source) => source.id);
-      await requireEdgeSourceCacheInvalidations(ids);
+      const fences = await requireEdgeSourceFences(ids);
 
       // Audit while workspace_id is still a live FK target (FK is ON DELETE SET
       // NULL, so the row survives the eventual hard delete in teardown).
@@ -412,19 +421,19 @@ export async function deleteWorkspaceAction(
         "UPDATE workspaces SET status = 'deleting', deleted_at = now() WHERE id = $1",
         [workspaceId],
       );
-      return ids;
+      return fences;
     });
   } catch (err) {
     if (err instanceof Error && err.message === "not_found") return { error: "Workspace not found." };
     if (err instanceof Error && err.message === "name_mismatch") return { error: "Typed name does not match." };
-    console.error("[admin] deleteWorkspaceAction failed:", err);
+    console.error("[admin] deleteWorkspaceAction failed");
     return { error: "Could not delete workspace." };
   }
 
   try {
-    await requireEdgeSourceCacheInvalidations(sourceIds);
-  } catch (err) {
-    console.error("[admin] deleteWorkspaceAction post-commit invalidation failed:", err);
+    await requireEdgeSourceAuthoritySyncs(sourceFences, workspaceId);
+  } catch {
+    console.error("[admin] deleteWorkspaceAction post-commit authority sync failed");
     return { error: "Workspace deletion was scheduled, but edge revocation could not be confirmed. Retry immediately." };
   }
   bustWorkspaceTags(workspaceId);
@@ -517,11 +526,11 @@ export async function impersonateUserAction(
         expires_at: result.expiresAt.toISOString(),
       },
     });
-  } catch (err) {
+  } catch {
     await db()
       .query("DELETE FROM user_sessions WHERE id = $1", [result.newSessionId])
       .catch(() => {});
-    console.error("[admin] impersonation audit write failed; rolled back session:", err);
+    console.error("[admin] impersonation audit write failed; rolled back session");
     return { error: "Could not start impersonation — the audit record failed to write, so no session was created. Try again." };
   }
 
@@ -621,7 +630,7 @@ export async function sendUserPasswordResetAction(
   });
   const sent = await sendEmail({ to: user.email, subject, html, text });
   if (!sent.ok) {
-    console.error("[admin] sendUserPasswordResetAction email failed:", sent.error);
+    console.error("[admin] sendUserPasswordResetAction email failed");
     return { error: "Could not send the reset email." };
   }
 

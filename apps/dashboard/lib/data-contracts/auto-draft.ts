@@ -37,7 +37,13 @@ const MIN_SAMPLES = 3;
 export type AutoDraftOutcome =
   | { kind: "drafted"; data_contract_id: string; sample_count: number }
   | { kind: "skipped"; reason: "no_samples" | "too_few_samples" }
-  | { kind: "errored"; message: string };
+  | { kind: "errored"; code: AutoDraftErrorCode };
+
+export type AutoDraftErrorCode =
+  | "sample_failed"
+  | "inference_failed"
+  | "create_failed"
+  | "version_append_failed";
 
 export interface AutoDraftDeps {
   sampler?: typeof sampleSourceEvents;
@@ -71,10 +77,10 @@ export async function autoDraftDataContract(
       maxEvents: 50,
       maxBytes: 1 * 1024 * 1024,
     });
-  } catch (err) {
+  } catch {
     return {
       kind: "errored",
-      message: `sampler: ${err instanceof Error ? err.message : String(err)}`,
+      code: "sample_failed",
     };
   }
 
@@ -88,10 +94,10 @@ export async function autoDraftDataContract(
   let inferred: Awaited<ReturnType<typeof inferDataContract>>;
   try {
     inferred = await inferer(samples, { llmDisabled: true });
-  } catch (err) {
+  } catch {
     return {
       kind: "errored",
-      message: `infer: ${err instanceof Error ? err.message : String(err)}`,
+      code: "inference_failed",
     };
   }
 
@@ -103,13 +109,13 @@ export async function autoDraftDataContract(
       name: defaultMapName(source.name, now()),
       createdByUserId: null,
     });
-  } catch (err) {
+  } catch {
     // Most likely a unique-name 23505 collision if the operator named
     // a different map similarly. Skip rather than retry — the next
     // tick will see the existing map and not re-create.
     return {
       kind: "errored",
-      message: `create: ${err instanceof Error ? err.message : String(err)}`,
+      code: "create_failed",
     };
   }
 
@@ -122,10 +128,10 @@ export async function autoDraftDataContract(
       modelMetadata: { ...inferred.model_metadata, auto: true },
       createdByUserId: null,
     });
-  } catch (err) {
+  } catch {
     return {
       kind: "errored",
-      message: `append: ${err instanceof Error ? err.message : String(err)}`,
+      code: "version_append_failed",
     };
   }
 
@@ -174,8 +180,42 @@ export interface AutoDraftCronSummary {
   drafted: number;
   skipped_no_samples: number;
   skipped_too_few: number;
-  errors: Array<{ source_id: string; workspace_id: string; message: string }>;
+  errors: Array<{ code: AutoDraftErrorCode }>;
   duration_ms: number;
+}
+
+export interface PublicAutoDraftCronSummary {
+  total_candidates: number;
+  scanned: number;
+  drafted: number;
+  skipped_no_samples: number;
+  skipped_too_few: number;
+  error_count: number;
+  error_counts: Record<AutoDraftErrorCode, number>;
+  duration_ms: number;
+}
+
+/** Project the cron result to aggregate, identifier-free response data. */
+export function publicAutoDraftCronSummary(
+  summary: AutoDraftCronSummary,
+): PublicAutoDraftCronSummary {
+  const errorCounts: Record<AutoDraftErrorCode, number> = {
+    sample_failed: 0,
+    inference_failed: 0,
+    create_failed: 0,
+    version_append_failed: 0,
+  };
+  for (const error of summary.errors) errorCounts[error.code] += 1;
+  return {
+    total_candidates: summary.total_candidates,
+    scanned: summary.scanned,
+    drafted: summary.drafted,
+    skipped_no_samples: summary.skipped_no_samples,
+    skipped_too_few: summary.skipped_too_few,
+    error_count: summary.errors.length,
+    error_counts: errorCounts,
+    duration_ms: summary.duration_ms,
+  };
 }
 
 export interface AutoDraftCronDeps extends AutoDraftDeps {
@@ -219,9 +259,7 @@ export async function runAutoDraftCronJob(
       else summary.skipped_too_few += 1;
     } else {
       summary.errors.push({
-        source_id: source.source_id,
-        workspace_id: source.workspace_id,
-        message: outcome.message,
+        code: outcome.code,
       });
     }
   }

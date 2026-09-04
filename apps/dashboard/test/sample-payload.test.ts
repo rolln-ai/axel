@@ -4,15 +4,23 @@ import {
   fetchRawPayloadBase64ForR2Key,
 } from "../lib/sample-payload";
 
+const KEY = "events/ws_alpha/2026-08-27/evt_alpha";
+const EXPECTED = {
+  workspaceId: "ws_alpha",
+  eventId: "evt_alpha",
+  sourceId: "src_alpha",
+};
+
 describe("fetchPayloadForR2Key", () => {
   // Locks in the contract that the fetcher returns `null` (not a
   // GENERIC_SAMPLE placeholder) on every failure path. The placeholder
-  // fallback poisoned Data Contracts inference: a newsletter provider source with 800,000
-  // real events ended up clustered as Stripe `payment_intent.succeeded`
+  // fallback poisoned Data Contracts inference: a synthetic newsletter
+  // source with 800,000 events ended up clustered as Stripe
+  // `payment_intent.succeeded`
   // because the empty-CF-creds branch returned a Stripe-shaped sample
   // and the sampler clustered the same shape across every "fetch".
   it("returns null when CLOUDFLARE_R2_API_TOKEN is missing", async () => {
-    const result = await fetchPayloadForR2Key("any/key", {
+    const result = await fetchPayloadForR2Key(KEY, EXPECTED, {
       env: { CLOUDFLARE_ACCOUNT_ID: "acct_x" },
       fetchImpl: () => {
         throw new Error("fetch should not be called when creds are missing");
@@ -24,7 +32,7 @@ describe("fetchPayloadForR2Key", () => {
   it("returns null when CLOUDFLARE_R2_API_TOKEN is the empty string", async () => {
     // The prod misconfig that caused the bug: encrypted env var present
     // in Vercel but with an empty value.
-    const result = await fetchPayloadForR2Key("any/key", {
+    const result = await fetchPayloadForR2Key(KEY, EXPECTED, {
       env: { CLOUDFLARE_R2_API_TOKEN: "", CLOUDFLARE_ACCOUNT_ID: "" },
     });
     expect(result).toBeNull();
@@ -32,15 +40,19 @@ describe("fetchPayloadForR2Key", () => {
 
   it("returns null on non-2xx response", async () => {
     const fetchImpl = vi.fn(async () => new Response("nope", { status: 404 }));
-    const result = await fetchPayloadForR2Key("missing/key", {
+    const result = await fetchPayloadForR2Key(
+      "events/ws_alpha/2026-08-27/evt_missing",
+      { ...EXPECTED, eventId: "evt_missing" },
+      {
       env: { CLOUDFLARE_R2_API_TOKEN: "tok", CLOUDFLARE_ACCOUNT_ID: "acct" },
       fetchImpl: fetchImpl as unknown as typeof fetch,
-    });
+      },
+    );
     expect(result).toBeNull();
   });
 
   it("returns null when fetch throws (network error)", async () => {
-    const result = await fetchPayloadForR2Key("any/key", {
+    const result = await fetchPayloadForR2Key(KEY, EXPECTED, {
       env: { CLOUDFLARE_R2_API_TOKEN: "tok", CLOUDFLARE_ACCOUNT_ID: "acct" },
       fetchImpl: (() => {
         throw new Error("ECONNRESET");
@@ -53,7 +65,7 @@ describe("fetchPayloadForR2Key", () => {
     const fetchImpl = vi.fn(
       async () => new Response('{"hello":"world"}', { status: 200 }),
     );
-    const result = await fetchPayloadForR2Key("ok/key", {
+    const result = await fetchPayloadForR2Key(KEY, EXPECTED, {
       env: { CLOUDFLARE_R2_API_TOKEN: "tok", CLOUDFLARE_ACCOUNT_ID: "acct" },
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
@@ -62,7 +74,7 @@ describe("fetchPayloadForR2Key", () => {
 
   it("uses the deployment's configured raw-payload bucket", async () => {
     const fetchImpl = vi.fn(async () => new Response('{"ok":true}', { status: 200 }));
-    await fetchPayloadForR2Key("events/one.json", {
+    await fetchPayloadForR2Key(KEY, EXPECTED, {
       env: {
         CLOUDFLARE_R2_API_TOKEN: "tok",
         CLOUDFLARE_ACCOUNT_ID: "acct",
@@ -72,13 +84,13 @@ describe("fetchPayloadForR2Key", () => {
     });
 
     expect(fetchImpl).toHaveBeenCalledWith(
-      "https://api.cloudflare.com/client/v4/accounts/acct/r2/buckets/axel-selfhost-raw/objects/events/one.json",
+      "https://api.cloudflare.com/client/v4/accounts/acct/r2/buckets/axel-selfhost-raw/objects/events/ws_alpha/2026-08-27/evt_alpha",
       expect.any(Object),
     );
   });
 
   it("refuses the hosted bucket default in self-hosted mode", async () => {
-    await expect(fetchPayloadForR2Key("events/one.json", {
+    await expect(fetchPayloadForR2Key(KEY, EXPECTED, {
       env: {
         AXEL_DEPLOYMENT_MODE: "self-hosted",
         CLOUDFLARE_R2_API_TOKEN: "tok",
@@ -89,7 +101,7 @@ describe("fetchPayloadForR2Key", () => {
 
   it("uses the configured bucket for binary-safe payload reads too", async () => {
     const fetchImpl = vi.fn(async () => new Response("raw", { status: 200 }));
-    await fetchRawPayloadBase64ForR2Key("events/two.bin", {
+    await fetchRawPayloadBase64ForR2Key(KEY, EXPECTED, {
       env: {
         CLOUDFLARE_R2_API_TOKEN: "tok",
         CLOUDFLARE_ACCOUNT_ID: "acct",
@@ -99,7 +111,7 @@ describe("fetchPayloadForR2Key", () => {
     });
 
     expect(fetchImpl).toHaveBeenCalledWith(
-      "https://api.cloudflare.com/client/v4/accounts/acct/r2/buckets/axel-selfhost-raw/objects/events/two.bin",
+      "https://api.cloudflare.com/client/v4/accounts/acct/r2/buckets/axel-selfhost-raw/objects/events/ws_alpha/2026-08-27/evt_alpha",
       expect.any(Object),
     );
   });
@@ -108,10 +120,64 @@ describe("fetchPayloadForR2Key", () => {
     const fetchImpl = vi.fn(
       async () => new Response("not json at all", { status: 200 }),
     );
-    const result = await fetchPayloadForR2Key("ok/key", {
+    const result = await fetchPayloadForR2Key(KEY, EXPECTED, {
       env: { CLOUDFLARE_R2_API_TOKEN: "tok", CLOUDFLARE_ACCOUNT_ID: "acct" },
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
     expect(result).toEqual({ raw: "not json at all" });
+  });
+
+  it("rejects an oversized R2 response before reading it into memory", async () => {
+    const fetchImpl = vi.fn(async () => new Response("ignored", {
+      status: 200,
+      headers: { "content-length": String(6 * 1024 * 1024) },
+    }));
+
+    await expect(fetchPayloadForR2Key(KEY, EXPECTED, {
+      env: { CLOUDFLARE_R2_API_TOKEN: "tok", CLOUDFLARE_ACCOUNT_ID: "acct" },
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    })).resolves.toBeNull();
+  });
+
+  it("rejects a ClickHouse row pointing at another workspace before R2", async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response('{"private":"victim"}', { status: 200 }));
+    const result = await fetchPayloadForR2Key(
+      "events/ws_victim/2026-08-27/evt_alpha",
+      EXPECTED,
+      {
+        env: {
+          CLOUDFLARE_R2_API_TOKEN: "tok",
+          CLOUDFLARE_ACCOUNT_ID: "acct",
+        },
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      },
+    );
+
+    expect(result).toBeNull();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("rejects a mismatched event and a control-segment key before R2", async () => {
+    const fetchImpl = vi.fn();
+    const options = {
+      env: {
+        CLOUDFLARE_R2_API_TOKEN: "tok",
+        CLOUDFLARE_ACCOUNT_ID: "acct",
+      },
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    };
+
+    await expect(fetchPayloadForR2Key(
+      "events/ws_alpha/2026-08-27/evt_other",
+      EXPECTED,
+      options,
+    )).resolves.toBeNull();
+    await expect(fetchRawPayloadBase64ForR2Key(
+      "events/ws_alpha/2026-08-27/evt_alpha\nshadow",
+      EXPECTED,
+      options,
+    )).resolves.toBeNull();
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });

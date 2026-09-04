@@ -225,9 +225,7 @@ async function advanceWorkspaceClickhouseDelete(
   );
   const failed = pending.rows.find((row) => row.latest_fail_reason);
   if (failed) {
-    throw new Error(
-      `clickhouse_workspace_delete_failed:${failed.table_name}:${failed.latest_fail_reason.slice(0, 300)}`,
-    );
+    throw new Error(`clickhouse_workspace_delete_failed:${failed.table_name}`);
   }
   if (pending.rows.length > 0) {
     return { tables: pending.rows.map((row) => row.table_name), complete: false };
@@ -343,7 +341,7 @@ function workspacePayloadDeleteEndpoint(
   const raw = env.INGEST_ADMIN_URL;
   if (!raw) return null;
   const base = raw
-    .replace(/\/admin\/source-cache\/(invalidate|put)\/?$/, "")
+    .replace(/\/admin\/(?:source-cache\/(?:invalidate|put)|source-authority\/(?:fence|sync))\/?$/, "")
     .replace(/\/$/, "");
   return `${base}/admin/workspace-payloads/delete-batch`;
 }
@@ -420,15 +418,16 @@ async function deleteWorkspaceRawPayloadsViaIngest(
           ...(extraPrefixes.length > 0 ? { extra_prefixes: extraPrefixes } : {}),
         }),
       });
-      const text = await response.text();
       if (!response.ok) {
-        throw new Error(`r2_bulk_purge_${response.status}: ${text.slice(0, 300)}`);
+        await response.body?.cancel().catch(() => undefined);
+        throw new Error(`r2_bulk_purge_${response.status}`);
       }
+      const text = await response.text();
       let result: { workspace_id?: unknown; deleted?: unknown; complete?: unknown };
       try {
         result = JSON.parse(text) as typeof result;
       } catch {
-        throw new Error(`r2_bulk_purge_invalid_json: ${text.slice(0, 300)}`);
+        throw new Error("r2_bulk_purge_invalid_json");
       }
       if (
         result.workspace_id !== workspaceId ||
@@ -509,7 +508,6 @@ async function deleteR2ObjectWithRetry(
 ): Promise<{ deleted: number; throttled: boolean }> {
   const url = cloudflareR2ObjectUrl(accountId, bucket, key);
   let lastStatus = 0;
-  let lastBody = "";
   let sawThrottle = false;
 
   for (let attempt = 1; attempt <= R2_DELETE_MAX_ATTEMPTS; attempt++) {
@@ -523,20 +521,19 @@ async function deleteR2ObjectWithRetry(
       if (res.ok || res.status === 404) return { deleted: 1, throttled: sawThrottle };
 
       lastStatus = res.status;
-      lastBody = await res.text().catch(() => "");
-      throttled = isR2ThrottleResponse(res.status, lastBody);
+      const responseBody = await res.text().catch(() => "");
+      throttled = isR2ThrottleResponse(res.status, responseBody);
       if (throttled) sawThrottle = true;
       if (!isRetriableR2Status(res.status) || attempt === R2_DELETE_MAX_ATTEMPTS) break;
-    } catch (err) {
+    } catch {
       lastStatus = 0;
-      lastBody = err instanceof Error ? err.message : String(err);
       if (attempt === R2_DELETE_MAX_ATTEMPTS) break;
     }
 
     await sleep(r2RetryDelayMs(attempt, throttled));
   }
 
-  throw new Error(`r2_delete_${lastStatus || "network"}:${key}: ${lastBody.slice(0, 300)}`);
+  throw new Error(`r2_delete_${lastStatus || "network"}`);
 }
 
 function isRetriableR2Status(status: number): boolean {
@@ -632,12 +629,12 @@ export async function flushAllDestinationData(workspaceId: string): Promise<Flus
   for (const destination of supported) {
     try {
       flushed.push(await flushDestinationData(workspaceId, destination.id));
-    } catch (err) {
+    } catch {
       failed.push({
         destinationId: destination.id,
         name: destination.name,
         type: destination.type,
-        error: err instanceof Error ? err.message : String(err),
+        error: "destination_flush_failed",
       });
     }
   }
@@ -816,8 +813,8 @@ async function flushDatabricksVolume(row: DestinationRowWithBlob): Promise<Desti
       redirect: "manual",
     });
     if (!res.ok && res.status !== 404) {
-      const text = await res.text().catch(() => "");
-      throw new Error(`databricks_volume_delete_${res.status}: ${text.slice(0, 300)}`);
+      await res.body?.cancel().catch(() => undefined);
+      throw new Error(`databricks_volume_delete_${res.status}`);
     }
   }
   const scope = volumes.length === 1 ? "volume" : `${volumes.length} volumes`;
@@ -858,16 +855,19 @@ async function runDatabricksStatement(row: DestinationRowWithBlob, statement: st
     }),
     redirect: "manual",
   });
+  if (!res.ok) {
+    await res.body?.cancel().catch(() => undefined);
+    throw new Error(`databricks_http_${res.status}`);
+  }
   const text = await res.text();
-  if (!res.ok) throw new Error(`databricks_http_${res.status}: ${text.slice(0, 300)}`);
   if (!text.trim()) throw new Error("databricks_empty_statement_response");
   let parsed: { status?: { state?: string; error?: { message?: string } } };
   try {
     parsed = JSON.parse(text) as { status?: { state?: string; error?: { message?: string } } };
   } catch {
-    throw new Error(`databricks_invalid_json_response: ${text.slice(0, 300)}`);
+    throw new Error("databricks_invalid_json_response");
   }
   if (parsed.status?.state !== "SUCCEEDED") {
-    throw new Error(`databricks_statement_${parsed.status?.state ?? "unknown"}: ${parsed.status?.error?.message ?? ""}`.slice(0, 350));
+    throw new Error("databricks_statement_failed");
   }
 }
