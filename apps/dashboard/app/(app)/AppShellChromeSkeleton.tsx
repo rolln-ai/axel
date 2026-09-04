@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { Activity } from "lucide-react";
 import { AppNav } from "../AppNav";
 import { Logo } from "../_brand/Logo";
 import { MobileSidebar } from "../_components/MobileSidebar";
@@ -7,18 +8,8 @@ import { KpiLoadingSurface } from "./dashboard/KpiLoadingSurface";
 import { PrimaryChartLoadingSurface } from "./dashboard/PrimaryChartLoadingSurface";
 
 /**
- * Static chrome shown while the (app)/layout is resolving `requireSession()`.
- * On a cold Supabase pool that initial DB round-trip can be 10-30s; before
- * this skeleton existed the user stared at the bare root `loading.tsx`
- * ("Axel" wordmark + bar) for the whole wait, which felt like the app
- * had hung. Now they see the eventual AppShell layout outlined with
- * placeholders, which sets the right expectation: "your dashboard is
- * loading," not "the site is down."
- *
- * Dimensions track AppShell.tsx — md:w-64 sidebar, sticky-top, flex layout.
- * The top-level nav is intentionally real and clickable here: it does not
- * require workspace data, and keeping it interactive during a cold session
- * lookup is part of the dashboard's "usable within 2s" contract.
+ * Match AppShell while requireSession() resolves. Navigation stays interactive
+ * because it does not depend on workspace data.
  */
 export function AppShellChromeSkeleton() {
   const sidebar = <FallbackSidebar />;
@@ -100,8 +91,8 @@ function FallbackSidebar() {
             className="flex items-center gap-2 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
             aria-label="View system status (opens in new tab)"
           >
-            <span className="size-1.5 rounded-full bg-emerald-500/80" />
-            All systems operational
+            <Activity className="size-3" aria-hidden="true" />
+            System status
           </a>
           <Skeleton className="size-6 rounded-full" />
         </div>
