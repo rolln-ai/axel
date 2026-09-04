@@ -1,3 +1,13 @@
+// Pure JSON helpers called by the SECURITY INVOKER data-contract triggers.
+// Trigger execution itself needs no runtime EXECUTE grant; nested calls do.
+export const DASHBOARD_DATABASE_ROUTINES = Object.freeze([
+  "public.axel_scrub_data_contract_schema_node(jsonb)",
+  "public.axel_scrub_data_contract_schema(jsonb)",
+  "public.axel_strip_data_contract_previews(jsonb)",
+  "public.axel_generalize_data_contract_fixture(jsonb)",
+  "public.axel_data_contract_json_allowlist(jsonb,text[])",
+]);
+
 const TABLE_PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "DELETE"];
 const SEQUENCE_PRIVILEGES = Object.freeze(["USAGE"]);
 

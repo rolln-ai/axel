@@ -144,104 +144,115 @@ if [[ ! "${DATABASE_MIGRATION_ROLE:-}" =~ ^[a-z][a-z0-9_]{2,62}$ ]]; then
   echo "[run-migrations] DATABASE_MIGRATION_ROLE must name the stable owner role" >&2
   exit 1
 fi
-if [[ ! "${DATABASE_MIGRATION_LOGIN_ROLE:-}" =~ ^[a-z][a-z0-9_]{2,62}$ ]]; then
-  echo "[run-migrations] DATABASE_MIGRATION_LOGIN_ROLE must name the replaceable login role" >&2
-  exit 1
-fi
-if [ "$DATABASE_MIGRATION_ROLE" = "$DATABASE_MIGRATION_LOGIN_ROLE" ]; then
-  echo "[run-migrations] migration owner and login roles must be distinct" >&2
-  exit 1
-fi
-expected_transitional_owner="0"
-if [ -n "${DATABASE_TRANSITIONAL_OWNER_LOGIN_ROLE:-}" ]; then
-  if [ "$DATABASE_TRANSITIONAL_OWNER_LOGIN_ROLE" != "$DATABASE_MIGRATION_ROLE" ]; then
-    echo "[run-migrations] transitional owner must exactly match the stable owner role" >&2
+case "${DATABASE_ACCESS_MODE:-strict}" in
+  strict) ;;
+  render) ;;
+  *) echo "[run-migrations] DATABASE_ACCESS_MODE must be strict or render" >&2; exit 1 ;;
+esac
+if [ "${DATABASE_ACCESS_MODE:-strict}" = "strict" ]; then
+  if [[ ! "${DATABASE_MIGRATION_LOGIN_ROLE:-}" =~ ^[a-z][a-z0-9_]{2,62}$ ]]; then
+    echo "[run-migrations] DATABASE_MIGRATION_LOGIN_ROLE must name the replaceable login role" >&2
     exit 1
   fi
-  expected_transitional_owner="1"
-fi
-expected_canary_role="${DATABASE_CANARY_WRITER_ROLE:-}"
-if [ -n "$expected_canary_role" ] \
-  && [[ ! "$expected_canary_role" =~ ^[a-z][a-z0-9_]{2,62}$ ]]; then
-  echo "[run-migrations] DATABASE_CANARY_WRITER_ROLE is invalid" >&2
-  exit 1
-fi
-if [[ ! "${DATABASE_MIGRATION_OWNER_CAN_CREATE_ROLES:-}" =~ ^[01]$ ]]; then
-  echo "[run-migrations] DATABASE_MIGRATION_OWNER_CAN_CREATE_ROLES must be 0 or 1" >&2
-  exit 1
-fi
-if [[ ! "${DATABASE_VERIFY_CAPABILITY_ROLE:-}" =~ ^[a-z][a-z0-9_]{2,62}$ ]]; then
-  echo "[run-migrations] DATABASE_VERIFY_CAPABILITY_ROLE is invalid" >&2
-  exit 1
-fi
-if [ -z "${DATABASE_RUNTIME_CAPABILITY_ROLES:-}" ] \
-  || [[ "$DATABASE_RUNTIME_CAPABILITY_ROLES" == ,* ]] \
-  || [[ "$DATABASE_RUNTIME_CAPABILITY_ROLES" == *, ]] \
-  || [[ "$DATABASE_RUNTIME_CAPABILITY_ROLES" == *,,* ]]; then
-  echo "[run-migrations] DATABASE_RUNTIME_CAPABILITY_ROLES is invalid" >&2
-  exit 1
-fi
-expected_runtime_capabilities=""
-IFS=',' read -r -a runtime_capability_roles <<< "$DATABASE_RUNTIME_CAPABILITY_ROLES"
-for capability_role in "${runtime_capability_roles[@]}"; do
-  if [[ ! "$capability_role" =~ ^[a-z][a-z0-9_]{2,62}$ ]] \
-    || [ "$capability_role" = "$DATABASE_MIGRATION_ROLE" ] \
-    || [ "$capability_role" = "$DATABASE_MIGRATION_LOGIN_ROLE" ] \
-    || [ "$capability_role" = "$DATABASE_VERIFY_CAPABILITY_ROLE" ] \
-    || [[ ",$expected_runtime_capabilities," == *",$capability_role,"* ]]; then
+  if [ "$DATABASE_MIGRATION_ROLE" = "$DATABASE_MIGRATION_LOGIN_ROLE" ]; then
+    echo "[run-migrations] migration owner and login roles must be distinct" >&2
+    exit 1
+  fi
+  expected_transitional_owner="0"
+  if [ -n "${DATABASE_TRANSITIONAL_OWNER_LOGIN_ROLE:-}" ]; then
+    if [ "$DATABASE_TRANSITIONAL_OWNER_LOGIN_ROLE" != "$DATABASE_MIGRATION_ROLE" ]; then
+      echo "[run-migrations] transitional owner must exactly match the stable owner role" >&2
+      exit 1
+    fi
+    expected_transitional_owner="1"
+  fi
+  expected_canary_role="${DATABASE_CANARY_WRITER_ROLE:-}"
+  if [ -n "$expected_canary_role" ] \
+    && [[ ! "$expected_canary_role" =~ ^[a-z][a-z0-9_]{2,62}$ ]]; then
+    echo "[run-migrations] DATABASE_CANARY_WRITER_ROLE is invalid" >&2
+    exit 1
+  fi
+  if [[ ! "${DATABASE_MIGRATION_OWNER_CAN_CREATE_ROLES:-}" =~ ^[01]$ ]]; then
+    echo "[run-migrations] DATABASE_MIGRATION_OWNER_CAN_CREATE_ROLES must be 0 or 1" >&2
+    exit 1
+  fi
+  if [[ ! "${DATABASE_VERIFY_CAPABILITY_ROLE:-}" =~ ^[a-z][a-z0-9_]{2,62}$ ]]; then
+    echo "[run-migrations] DATABASE_VERIFY_CAPABILITY_ROLE is invalid" >&2
+    exit 1
+  fi
+  if [ -z "${DATABASE_RUNTIME_CAPABILITY_ROLES:-}" ] \
+    || [[ "$DATABASE_RUNTIME_CAPABILITY_ROLES" == ,* ]] \
+    || [[ "$DATABASE_RUNTIME_CAPABILITY_ROLES" == *, ]] \
+    || [[ "$DATABASE_RUNTIME_CAPABILITY_ROLES" == *,,* ]]; then
     echo "[run-migrations] DATABASE_RUNTIME_CAPABILITY_ROLES is invalid" >&2
     exit 1
   fi
-  if [ -z "$expected_runtime_capabilities" ]; then
-    expected_runtime_capabilities="$capability_role"
-  else
-    expected_runtime_capabilities="$expected_runtime_capabilities,$capability_role"
-  fi
-done
-expected_migration_logins="$DATABASE_MIGRATION_LOGIN_ROLE"
-if [ -n "${DATABASE_MIGRATION_EXISTING_LOGIN_ROLES:-}" ]; then
-  IFS=',' read -r -a existing_migration_logins <<< "$DATABASE_MIGRATION_EXISTING_LOGIN_ROLES"
-  for login_role in "${existing_migration_logins[@]}"; do
-    if [[ ! "$login_role" =~ ^[a-z][a-z0-9_]{2,62}$ ]]; then
-      echo "[run-migrations] DATABASE_MIGRATION_EXISTING_LOGIN_ROLES is invalid" >&2
+  expected_runtime_capabilities=""
+  IFS=',' read -r -a runtime_capability_roles <<< "$DATABASE_RUNTIME_CAPABILITY_ROLES"
+  for capability_role in "${runtime_capability_roles[@]}"; do
+    if [[ ! "$capability_role" =~ ^[a-z][a-z0-9_]{2,62}$ ]] \
+      || [ "$capability_role" = "$DATABASE_MIGRATION_ROLE" ] \
+      || [ "$capability_role" = "$DATABASE_MIGRATION_LOGIN_ROLE" ] \
+      || [ "$capability_role" = "$DATABASE_VERIFY_CAPABILITY_ROLE" ] \
+      || [[ ",$expected_runtime_capabilities," == *",$capability_role,"* ]]; then
+      echo "[run-migrations] DATABASE_RUNTIME_CAPABILITY_ROLES is invalid" >&2
       exit 1
     fi
-    if [ "$login_role" = "$DATABASE_MIGRATION_ROLE" ] \
-      || [[ ",$expected_migration_logins," == *",$login_role,"* ]]; then
-      echo "[run-migrations] migration login roles must be distinct" >&2
-      exit 1
+    if [ -z "$expected_runtime_capabilities" ]; then
+      expected_runtime_capabilities="$capability_role"
+    else
+      expected_runtime_capabilities="$expected_runtime_capabilities,$capability_role"
     fi
-    expected_migration_logins="$expected_migration_logins,$login_role"
   done
-fi
-expected_owner_parent_roles=""
-if [ -n "${DATABASE_MIGRATION_OWNER_PARENT_ROLES:-}" ]; then
-  if [[ "$DATABASE_MIGRATION_OWNER_PARENT_ROLES" == ,* ]] \
-    || [[ "$DATABASE_MIGRATION_OWNER_PARENT_ROLES" == *, ]] \
-    || [[ "$DATABASE_MIGRATION_OWNER_PARENT_ROLES" == *,,* ]]; then
-    echo "[run-migrations] DATABASE_MIGRATION_OWNER_PARENT_ROLES is invalid" >&2
-    exit 1
+  expected_migration_logins="$DATABASE_MIGRATION_LOGIN_ROLE"
+  if [ -n "${DATABASE_MIGRATION_EXISTING_LOGIN_ROLES:-}" ]; then
+    IFS=',' read -r -a existing_migration_logins <<< "$DATABASE_MIGRATION_EXISTING_LOGIN_ROLES"
+    for login_role in "${existing_migration_logins[@]}"; do
+      if [[ ! "$login_role" =~ ^[a-z][a-z0-9_]{2,62}$ ]]; then
+        echo "[run-migrations] DATABASE_MIGRATION_EXISTING_LOGIN_ROLES is invalid" >&2
+        exit 1
+      fi
+      if [ "$login_role" = "$DATABASE_MIGRATION_ROLE" ] \
+        || [[ ",$expected_migration_logins," == *",$login_role,"* ]]; then
+        echo "[run-migrations] migration login roles must be distinct" >&2
+        exit 1
+      fi
+      expected_migration_logins="$expected_migration_logins,$login_role"
+    done
   fi
-  IFS=',' read -r -a owner_parent_roles <<< "$DATABASE_MIGRATION_OWNER_PARENT_ROLES"
-  for parent_role in "${owner_parent_roles[@]}"; do
-    if [[ ! "$parent_role" =~ ^[a-z][a-z0-9_]{2,62}$ ]]; then
+  expected_owner_parent_roles=""
+  if [ -n "${DATABASE_MIGRATION_OWNER_PARENT_ROLES:-}" ]; then
+    if [[ "$DATABASE_MIGRATION_OWNER_PARENT_ROLES" == ,* ]] \
+      || [[ "$DATABASE_MIGRATION_OWNER_PARENT_ROLES" == *, ]] \
+      || [[ "$DATABASE_MIGRATION_OWNER_PARENT_ROLES" == *,,* ]]; then
       echo "[run-migrations] DATABASE_MIGRATION_OWNER_PARENT_ROLES is invalid" >&2
       exit 1
     fi
-    if [[ ",$expected_owner_parent_roles," == *",$parent_role,"* ]]; then
-      echo "[run-migrations] DATABASE_MIGRATION_OWNER_PARENT_ROLES contains a duplicate" >&2
-      exit 1
-    fi
-    if [ -z "$expected_owner_parent_roles" ]; then
-      expected_owner_parent_roles="$parent_role"
-    else
-      expected_owner_parent_roles="$expected_owner_parent_roles,$parent_role"
-    fi
-  done
-fi
+    IFS=',' read -r -a owner_parent_roles <<< "$DATABASE_MIGRATION_OWNER_PARENT_ROLES"
+    for parent_role in "${owner_parent_roles[@]}"; do
+      if [[ ! "$parent_role" =~ ^[a-z][a-z0-9_]{2,62}$ ]]; then
+        echo "[run-migrations] DATABASE_MIGRATION_OWNER_PARENT_ROLES is invalid" >&2
+        exit 1
+      fi
+      if [[ ",$expected_owner_parent_roles," == *",$parent_role,"* ]]; then
+        echo "[run-migrations] DATABASE_MIGRATION_OWNER_PARENT_ROLES contains a duplicate" >&2
+        exit 1
+      fi
+      if [ -z "$expected_owner_parent_roles" ]; then
+        expected_owner_parent_roles="$parent_role"
+      else
+        expected_owner_parent_roles="$expected_owner_parent_roles,$parent_role"
+      fi
+    done
+  fi
+fi # strict owner/login configuration; Render uses the checked-in service registry.
 export DATABASE_MIGRATION_ROLE_REQUIRED=1
 
 preflight_migration_role() {
+  if [ "${DATABASE_ACCESS_MODE:-strict}" = "render" ]; then
+    node "$SCRIPT_DIR/render-database-access.mjs" verify-migration
+    return
+  fi
   local verdict
   verdict="$(psql_safe -Atq -v ON_ERROR_STOP=1 \
     -v expected_owner_role="$DATABASE_MIGRATION_ROLE" \

@@ -139,6 +139,15 @@ test("marketing can deploy independently while dashboard deploys remain migratio
   assert.match(workflow, /\|\| secrets\.AXEL_CANARY_RECEIPT_URL/);
 });
 
+test("migration jobs install the locked Postgres verifier dependency in their own job", () => {
+  for (const file of ["deploy-render.yml", "deploy-vercel.yml", "deploy-cloudflare.yml", "migrate-postgres.yml", "migrate-postgres-run.yml"]) {
+    const workflow = read(`.github/workflows/${file}`);
+    const job = workflow.slice(workflow.indexOf("  deploy:") >= 0 ? workflow.indexOf("  deploy:") : workflow.indexOf("jobs:"));
+    const install = job.indexOf("pnpm install --frozen-lockfile");
+    assert.ok(install >= 0 && install < job.indexOf("./scripts/run-migrations.sh"), file);
+  }
+});
+
 test("production mutations are single-target and smoke even after a failed mutation", () => {
   for (const file of [
     ".github/workflows/deploy-cloudflare.yml",

@@ -44,7 +44,7 @@ jobs:
             if (!Array.isArray(databases) || databases.length >= 100) throw new Error('render_inspection_inventory_invalid');
             for (const entry of databases) {
               const db = entry.postgres;
-              if (db?.ownerId !== owner || !/^dpg-[a-z0-9]+$/.test(db.id ?? '')) {
+              if (db?.owner?.id !== owner || !/^dpg-[a-z0-9]+(?:-[a-z0-9]+)?$/.test(db.id ?? '')) {
                 throw new Error('render_inspection_database_mismatch');
               }
               // Only resource IDs are logged. Never print provider bodies or connection details.

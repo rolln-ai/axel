@@ -26,6 +26,9 @@ and public browser suites require no production services.
 - Dashboard logic: `pnpm --filter @axel/dashboard... build`, then
   `pnpm --filter @axel/dashboard exec vitest run test/<name>.test.ts`.
 - Shared code: run the affected package's tests and its runtime consumers.
+- Database permissions or deployment migrations: `pnpm test:database` exercises
+  both role models on disposable Postgres 17, including real writes and migrations.
+  The self-host Postgres 16 test also runs in `pnpm test:deploy-scripts`.
 - Delivery analytics SQL: `pnpm test:analytics`. This starts and removes its
   own loopback-only Docker ClickHouse instance at the production image version.
   It never uses `CLICKHOUSE_URL` from your shell. Optional repeatable benchmark:

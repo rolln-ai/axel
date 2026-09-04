@@ -1,0 +1,11 @@
+{
+  "verifyCapabilityRole": "axel_verify",
+  "verifyLoginRoles": ["axel_verify_v1"],
+  "registry": {
+    "dashboard": { "capabilityRole": "axel_dashboard", "loginRole": "axel_dashboard_v1" },
+    "delivery-native": { "capabilityRole": "axel_delivery_native", "loginRole": "axel_delivery_native_v1" },
+    "delivery-workers": { "capabilityRole": "axel_delivery_workers", "loginRole": "axel_delivery_workers_v1" },
+    "pull-worker": { "capabilityRole": "axel_pull_worker", "loginRole": "axel_pull_worker_v1" },
+    "delivery-edge": { "capabilityRole": "axel_delivery_edge", "loginRole": "axel_delivery_edge_v1" }
+  }
+}
