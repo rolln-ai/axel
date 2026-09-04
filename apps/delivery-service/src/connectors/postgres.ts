@@ -309,7 +309,7 @@ async function insertDottedColumns(
   // side keeps only node-pg execution and the schema cache. jsonb params are
   // "stringified": node-pg needs an explicit JSON string with the $n::jsonb
   // cast (it does not reliably encode a plain object to jsonb otherwise).
-  const plan = planDottedColumnInsert(table, payload, colTypes, { jsonbParams: "stringified" });
+  const plan = planDottedColumnInsert(table, payload, colTypes);
   if (!plan) return; // empty payload — nothing to insert
 
   if (plan.addColumnsSql) {

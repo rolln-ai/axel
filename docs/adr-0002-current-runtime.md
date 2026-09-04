@@ -39,9 +39,9 @@ The singleton `worker` role owns periodic work, including replay, retention,
 and the production delivery canary. Do not scale the singleton with web traffic.
 The source package `apps/router` provides routing, replay, and alert utilities;
 `apps/delivery-worker` provides delivery processing. Neither is a separate
-production deployment. Some edge connector implementations support more types
-than the router selects; `requiresNativeRuntimeDestination` in `packages/shared`
-is the routing policy.
+production deployment. `requiresNativeRuntimeDestination` in `packages/shared`
+is the routing policy. Edge delivery forwards misplaced native jobs to the Node
+queue; it does not keep a second Postgres connector implementation.
 
 ## Data and correctness
 
@@ -85,6 +85,8 @@ remain disabled until their indexes and cleanup paths exist. See
 - Unit tests cover isolated logic. Public browser checks cover layouts and
   redirects. Database integration tests execute SQL. None substitutes for an
   authenticated product walkthrough or the post-deploy delivery canary.
+  `pnpm test:dashboard` signs into a disposable database and checks a persisted
+  workspace edit, source navigation, tenant isolation, and sign-out.
 - Production promotions remain separate from publishing the source. Keep
   history cleanup and public repository release out of application deployments.
 

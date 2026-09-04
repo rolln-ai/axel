@@ -227,7 +227,7 @@ export const getCurrentSession = cache(async (): Promise<CurrentSession | null> 
  * loginPathWithReturnTo re-validates it to a same-origin relative path so the
  * user lands back where they were after signIn instead of on /dashboard.
  */
-async function loginRedirectPath(): Promise<string> {
+export async function loginRedirectPath(): Promise<string> {
   const h = await headers();
   return loginPathWithReturnTo(h.get(RETURN_TO_HEADER));
 }

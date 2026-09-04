@@ -12,6 +12,8 @@ import {
 
 export function MobileSidebar({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = React.useState(false);
+  const [ready, setReady] = React.useState(false);
+  React.useEffect(() => setReady(true), []);
   return (
     <Sheet open={open} onOpenChange={setOpen}>
       <SheetTrigger asChild>
@@ -20,6 +22,7 @@ export function MobileSidebar({ children }: { children: React.ReactNode }) {
           size="icon"
           className="fixed top-3 left-3 z-30 md:hidden"
           aria-label="Open menu"
+          disabled={!ready}
         >
           <Menu />
         </Button>

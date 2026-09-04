@@ -500,6 +500,7 @@ async function TopSourcesSection({
           <li key={source.id} className="border-b border-border last:border-0">
             <Link
               href={`/sources/${source.id}`}
+              prefetch={false}
               className="flex items-center justify-between gap-3 py-2.5 transition-colors hover:bg-accent/30"
             >
               <div className="flex min-w-0 flex-col">
@@ -979,6 +980,7 @@ function TopSourcesTable({ rows, field }: { rows: EnrichedSourceUsage[]; field: 
           <li key={row.source_id} className="border-b border-border last:border-0">
             <Link
               href={`/sources/${row.source_id}`}
+              prefetch={false}
               className="flex items-center justify-between gap-3 py-2 transition-colors hover:bg-accent/30"
             >
               <div className="flex min-w-0 flex-1 flex-col gap-1">

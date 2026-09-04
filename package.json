@@ -19,7 +19,9 @@
     "dashboard:load-budget": "node scripts/dashboard-load-budget.mjs",
     "dev": "turbo run dev",
     "test:analytics": "node --experimental-strip-types --conditions=react-server --test scripts/test/clickhouse-outcomes.integration.mjs",
-    "verify": "pnpm lint && pnpm lint:sql && pnpm typecheck && pnpm test && pnpm test:analytics && pnpm visual:smoke"
+    "verify": "pnpm lint && pnpm lint:sql && pnpm typecheck && pnpm test && pnpm test:analytics && pnpm visual:smoke && pnpm test:dashboard",
+    "test:dashboard": "node --experimental-strip-types scripts/dashboard-qa.mjs --test",
+    "qa:dashboard": "node --experimental-strip-types scripts/dashboard-qa.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.0",

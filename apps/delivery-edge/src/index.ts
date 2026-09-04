@@ -1,19 +1,7 @@
 /**
- * Axel delivery — Cloudflare Worker that consumes axel-delivery in push mode
- * and dispatches each event to its destination via the appropriate connector.
- *
- * Why a CF Worker (vs. a Render Node service):
- *   - We stay 100% on Cloudflare → simpler deploy, no GitHub-App song and dance.
- *   - Edge-runtime connectors we need work in the Workers runtime:
- *       HTTP   — fetch()
- *       R2     — R2 binding
- *       S3     — aws4fetch (signs S3 REST calls with SigV4)
- *   - Native-runtime connectors (Postgres/MongoDB/Databricks) are routed to
- *     apps/delivery-service via the native queue; this worker only keeps a
- *     forwarding fallback for stale or misrouted messages.
- *
- * What this DOESN'T have (yet, by design):
- *   - Sandbox eval (still owned by future Node router).
+ * Cloudflare queue consumer for HTTP, signed webhook, R2, and JSON S3 delivery.
+ * Native destinations use the Node service; stale or misrouted messages are
+ * forwarded there. Postgres here stores control state and delivery claims.
  */
 
 import postgres from "postgres";
@@ -40,23 +28,14 @@ import {
   type Destination,
   type DestinationType,
   type ObjectStoreBinding,
-  type PostgresBinding,
   type QueueSpillReader,
   type RouteDestinationBinding,
   evaluateBreaker,
   type CircuitDecision,
-  mapInfoSchemaType,
   MAX_DELIVERY_CLAIM_LEASE_MS,
-  planColumnRepair,
-  planDottedColumnInsert,
-  type PgLeafType,
-  quotePgIdent,
-  quotePgTable,
-  splitPgTable,
   validateDestinationUrl,
   isNativeRuntimeDestinationType,
   isParquetObjectStoreBinding,
-  postgresJsSslOption,
   readBoundedJsonResponse,
   resolveInternalServiceEndpoint,
   validateInternalServiceEndpoint,
@@ -1283,317 +1262,12 @@ function buildS3CompatibleUrl(
   return url.toString();
 }
 
-// ---- Postgres ----------------------------------------------------------- //
-
-interface PostgresConfig {
-  connection_string: string;
-  /**
-   * Legacy fallback only — `table` lives on `route_destinations.binding`
-   * since migration 0022. Optional here so a destination without the
-   * legacy key still type-checks; the resolver throws if neither source
-   * provides a table.
-   */
-  table?: string;
-  columns?: Record<string, string>;
-  payload_column?: string;
-  idempotency_column?: string;
-}
-
-const pgClients = new Map<string, ReturnType<typeof postgres>>();
-function getDestPg(connectionString: string): ReturnType<typeof postgres> {
-  let client = pgClients.get(connectionString);
-  if (!client) {
-    client = postgres(connectionString, {
-      max: 1,
-      idle_timeout: 20,
-      connect_timeout: 10,
-      // Verify the server certificate by default (was "require", which encrypts
-      // but accepts ANY cert → MITM on customer DB creds + delivered rows). A
-      // customer DB with a self-signed / private-CA cert opts out with
-      // `sslmode=no-verify` in its connection string.
-      ssl: postgresJsSslOption(connectionString),
-    });
-    pgClients.set(connectionString, client);
-  }
-  return client;
-}
-
-/** Richer outcome so the dashboard's Response column shows the real PG error. */
-type PgDelivery = { result: DeliveryResult; extra: Record<string, unknown> };
-
-/**
- * SQLSTATEs that will NEVER succeed on retry — dead-letter them with a readable
- * message instead of looping forever. (Retrying "column does not exist" forever
- * is exactly the bug that hid this destination's failure: 0% success, "no
- * terminal failures", blank Response — because the error was both misclassified
- * as transient AND swallowed.)
- */
-const TERMINAL_PG_SQLSTATES = new Set([
-  "42P01", // undefined_table
-  "42703", // undefined_column
-  "42501", // insufficient_privilege
-  "3D000", // invalid_catalog_name (database missing)
-  "28P01", // invalid_password
-  "28000", // invalid_authorization_specification
-  "23502", // not_null_violation (config/schema mismatch)
-  "23505", // unique_violation (idempotent dup — re-insert won't change it)
-  "23514", // check_violation
-  "22P02", // invalid_text_representation (type mismatch)
-  "22003", // numeric_value_out_of_range
-  "42804", // datatype_mismatch
-  "42601", // syntax_error
-]);
-
-export function classifyPgError(err: unknown): { result: DeliveryResult; message: string } {
-  const message = err instanceof Error ? err.message : String(err);
-  const code = (err as { code?: string } | null)?.code;
-  if (code && TERMINAL_PG_SQLSTATES.has(code)) return { result: "dead", message };
-  // Fall back to wording when the driver didn't surface a SQLSTATE.
-  if (/(does not exist|violates|invalid input|permission denied|datatype mismatch)/i.test(message)) {
-    return { result: "dead", message };
-  }
-  // Connection resets / timeouts / pool churn → transient, keep retrying.
-  return { result: "retry", message };
-}
-
-// In-process schema cache per (connStr, table) — keeps information_schema off
-// the hot path. Edge isolates persist across requests, so this survives like
-// `pgClients`; a stale entry self-corrects on a 42703 (refresh + retry).
-const pgColumnCache = new Map<string, Map<string, PgLeafType>>();
-const pgTableInit = new Set<string>();
-
-async function readPgColumnTypes(
-  client: ReturnType<typeof postgres>,
-  table: string,
-): Promise<Map<string, PgLeafType>> {
-  // Schema-qualified targets must filter on the real (schema, table) pair — the
-  // bare string "app.events" would never match table_name. A bare name keeps the
-  // search_path behaviour so an unqualified target resolves as before.
-  const { schema, table: tableName } = splitPgTable(table);
-  const rows = (await (table.includes(".")
-    ? client.unsafe(
-        `SELECT column_name, data_type FROM information_schema.columns
-          WHERE table_name = $1 AND table_schema = $2`,
-        [tableName, schema],
-      )
-    : client.unsafe(
-        `SELECT column_name, data_type FROM information_schema.columns
-          WHERE table_name = $1 AND table_schema = ANY(current_schemas(false))`,
-        [tableName],
-      ))) as unknown as Array<{ column_name: string; data_type: string }>;
-  const m = new Map<string, PgLeafType>();
-  // mapInfoSchemaType lives in @axel/shared/pg-columns so both drivers
-  // classify live columns identically.
-  for (const r of rows) m.set(r.column_name, mapInfoSchemaType(r.data_type));
-  return m;
-}
-
-async function _deliverPostgres(
-  payload: unknown,
-  config: PostgresConfig,
-  binding: RouteDestinationBinding | null | undefined,
-): Promise<PgDelivery> {
-  // Route-level binding wins; legacy `config.table` / `config.payload_column`
-  // are the fallback for rows that pre-date migration 0022. Without either,
-  // we have no target — dead-letter so the queue stops retrying.
-  const resolved = resolvePostgresBinding(binding, config);
-  if (!resolved) {
-    return { result: "dead", extra: { error: "no table binding configured for this route/destination" } };
-  }
-  if (!isSafeTableIdent(resolved.table)) {
-    return { result: "dead", extra: { error: `unsafe table identifier: ${resolved.table}` } };
-  }
-
-  const client = getDestPg(config.connection_string);
-  const table = resolved.table;
-
-  try {
-    if (resolved.mode === "dotted_columns") {
-      const summary = await insertDottedColumnsEdge(client, config.connection_string, table, payload);
-      return { result: "success", extra: { table, mode: "dotted_columns", ...summary } };
-    }
-
-    if (config.columns && Object.keys(config.columns).length > 0) {
-      // Legacy explicit column-mapping mode (JSONPath → column). Unchanged.
-      const cols = Object.keys(config.columns).filter(isSafeIdent);
-      if (cols.length !== Object.keys(config.columns).length) {
-        return { result: "dead", extra: { table, error: "unsafe column identifier in column mapping" } };
-      }
-      const row: Record<string, unknown> = {};
-      for (const c of cols) {
-        const v = pickJsonPath(payload, config.columns![c]!);
-        row[c] = v && typeof v === "object" ? client.json(v as never) : v;
-      }
-      const conflict = config.idempotency_column && isSafeIdent(config.idempotency_column)
-        ? client`ON CONFLICT (${client(config.idempotency_column)}) DO NOTHING`
-        : client``;
-      await client`INSERT INTO ${client(table)} ${client(row)} ${conflict}`;
-      return { result: "success", extra: { table, mode: "columns" } };
-    }
-
-    // jsonb_blob (default): one row, whole body in a single jsonb column. Now
-    // self-healing — auto-creates the column if the shell table lacks it, so a
-    // freshly-created table can't 100%-fail the way this destination did.
-    const col = resolved.payload_column ?? "payload";
-    if (!isSafeIdent(col)) {
-      return { result: "dead", extra: { table, error: `unsafe payload column: ${col}` } };
-    }
-    const value: Record<string, unknown> = payload !== null && typeof payload === "object"
-      ? (payload as Record<string, unknown>)
-      : { value: payload };
-    await insertJsonbBlobEdge(client, table, col, value);
-    return { result: "success", extra: { table, mode: "jsonb_blob", payload_column: col } };
-  } catch (err) {
-    const { result, message } = classifyPgError(err);
-    return { result, extra: { table, mode: resolved.mode, error: message.slice(0, 500) } };
-  }
-}
-
-/**
- * jsonb_blob insert via the known-correct template form (`client.json` encodes
- * the object exactly once). If the column is missing on a shell table (42703),
- * add it and retry once — so the default mode can't deadlock a fresh table.
- */
-async function insertJsonbBlobEdge(
-  client: ReturnType<typeof postgres>,
-  table: string,
-  col: string,
-  value: Record<string, unknown>,
-): Promise<void> {
-  try {
-    await client`INSERT INTO ${client(table)} (${client(col)}) VALUES (${client.json(value as never)})`;
-  } catch (err) {
-    if ((err as { code?: string })?.code === "42703") {
-      await client.unsafe(`ALTER TABLE ${quotePgTable(table)} ADD COLUMN IF NOT EXISTS ${quotePgIdent(col)} jsonb`);
-      await client`INSERT INTO ${client(table)} (${client(col)}) VALUES (${client.json(value as never)})`;
-    } else {
-      throw err;
-    }
-  }
-}
-
-/**
- * dotted_columns insert (postgres.js port of the Node reference). Flattens the
- * payload to dot-notation leaf columns, auto-adds any missing ones (widening an
- * existing column toward text/jsonb when a later event's type conflicts), then
- * INSERTs. Dotted identifiers carry literal dots, so we build the SQL with our
- * own `quotePgIdent` + `client.unsafe` (postgres.js's `client(name)` would split
- * "a.b" into "a"."b"); values are bound as parameters, jsonb leaves cast ::jsonb.
- */
-async function insertDottedColumnsEdge(
-  client: ReturnType<typeof postgres>,
-  connectionString: string,
-  table: string,
-  payload: unknown,
-): Promise<Record<string, unknown>> {
-  const tableKey = `${connectionString}::${table}`;
-
-  // First-touch: create the minimal shell so chronological ordering works even
-  // if the dashboard's create-table step was skipped (defense in depth).
-  if (!pgTableInit.has(tableKey)) {
-    await client.unsafe(
-      `CREATE TABLE IF NOT EXISTS ${quotePgTable(table)} (
-         id bigserial PRIMARY KEY,
-         received_at timestamptz NOT NULL DEFAULT now()
-       )`,
-    );
-    pgTableInit.add(tableKey);
-  }
-
-  let colTypes = pgColumnCache.get(tableKey);
-  if (!colTypes) {
-    colTypes = await readPgColumnTypes(client, table);
-    pgColumnCache.set(tableKey, colTypes);
-  }
-
-  // The add/widen/ALTER/INSERT planning is the shared pure planner
-  // (@axel/shared pg-columns), identical to the delivery-service connector;
-  // this side keeps only postgres.js execution and the schema cache. jsonb
-  // params are "raw": postgres.js serialises the object/array behind the
-  // `$n::jsonb` cast exactly once — JSON.stringify-ing first would re-encode
-  // the string into a quoted jsonb string (verified empirically). Dotted
-  // identifiers carry literal dots, so the planner builds the SQL with
-  // quotePgIdent and we execute via `client.unsafe` (postgres.js's
-  // `client(name)` would split "a.b" into "a"."b").
-  const plan = planDottedColumnInsert(table, payload, colTypes, { jsonbParams: "raw" });
-  if (!plan) return { rows: 0, skipped: "empty_payload" };
-
-  if (plan.addColumnsSql) {
-    // One statement so concurrent edge workers don't serialize on N ALTERs;
-    // ADD COLUMN IF NOT EXISTS (nullable, no default) is metadata-only.
-    await client.unsafe(plan.addColumnsSql);
-    for (const a of plan.adds) colTypes.set(a.name, a.type);
-  }
-  for (let i = 0; i < plan.widens.length; i++) {
-    await client.unsafe(plan.widenColumnSql[i]!);
-    const w = plan.widens[i]!;
-    colTypes.set(w.name, w.type);
-  }
-
-  try {
-    await client.unsafe(plan.insertSql, plan.insertParams as never[]);
-  } catch (err) {
-    // Stale cache (column dropped/renamed externally) → refresh once and retry.
-    if ((err as { code?: string })?.code === "42703") {
-      pgColumnCache.delete(tableKey);
-      const fresh = await readPgColumnTypes(client, table);
-      pgColumnCache.set(tableKey, fresh);
-      const repair = planColumnRepair(table, plan, fresh);
-      if (repair.addColumnsSql) {
-        await client.unsafe(repair.addColumnsSql);
-        for (const a of repair.added) fresh.set(a.name, a.type);
-      }
-      await client.unsafe(plan.insertSql, plan.insertParams as never[]);
-    } else {
-      throw err;
-    }
-  }
-
-  return {
-    rows: 1,
-    columns: plan.columns.length,
-    columns_added: plan.adds.length,
-    columns_widened: plan.widens.length,
-  };
-}
-
-/**
- * Pull the effective `{ table, mode, payload_column? }` from either the route-
- * level binding (`route_destinations.binding`, migration 0022) or the legacy
- * destination config (which only ever meant jsonb_blob).
- */
-function resolvePostgresBinding(
-  binding: RouteDestinationBinding | null | undefined,
-  config: PostgresConfig,
-): { table: string; mode: PostgresBinding["mode"]; payload_column?: string } | null {
-  if (binding && typeof binding === "object" && "table" in binding && typeof binding.table === "string") {
-    const b = binding as PostgresBinding;
-    return {
-      table: b.table,
-      mode: b.mode === "dotted_columns" ? "dotted_columns" : "jsonb_blob",
-      ...(b.payload_column !== undefined ? { payload_column: b.payload_column } : {}),
-    };
-  }
-  if (typeof config.table === "string" && config.table.length > 0) {
-    return {
-      table: config.table,
-      mode: "jsonb_blob",
-      ...(config.payload_column !== undefined ? { payload_column: config.payload_column } : {}),
-    };
-  }
-  return null;
-}
-
 function pickObjectStoreBinding(
   binding: RouteDestinationBinding | null | undefined,
 ): ObjectStoreBinding | null {
   if (!binding || typeof binding !== "object") return null;
   if ("table" in binding || "collection" in binding || "volume" in binding) return null;
   return binding as ObjectStoreBinding;
-}
-
-function isSafeIdent(s: string): boolean {
-  return /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(s);
 }
 
 // Strip trailing "/" without a backtracking regex. `/\/+$/` is flagged
@@ -1603,31 +1277,6 @@ function stripTrailingSlashes(s: string): string {
   let end = s.length;
   while (end > 0 && s.charCodeAt(end - 1) === 47 /* "/" */) end -= 1;
   return s.slice(0, end);
-}
-
-// A table reference may be `table` or `schema.table` (the dashboard picker emits
-// the qualified form for non-public schemas). Allow exactly one optional dot,
-// each side a plain identifier — quotePgTable then quotes the two parts
-// separately. Columns must NOT use this (they keep literal dots via isSafeIdent).
-function isSafeTableIdent(s: string): boolean {
-  const parts = s.split(".");
-  if (parts.length > 2) return false;
-  return parts.every((p) => /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(p));
-}
-
-function pickJsonPath(payload: unknown, path: string): unknown {
-  if (path === "$") return payload;
-  if (!path.startsWith("$.")) return path;
-  const segments = path.slice(2).split(".");
-  let current: unknown = payload;
-  for (const seg of segments) {
-    if (current && typeof current === "object" && seg in (current as Record<string, unknown>)) {
-      current = (current as Record<string, unknown>)[seg];
-    } else {
-      return null;
-    }
-  }
-  return current;
 }
 
 // =========================================================================

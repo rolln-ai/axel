@@ -2,10 +2,9 @@ import { Suspense } from "react";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { notFound } from "next/navigation";
-import { EmptyState } from "../../../EmptyState";
 import { LocalTime } from "../../../_components/LocalTime";
 import { Section } from "../../../_components/Section";
-import { StatCard } from "../../../_components/StatCard";
+import { SourceOverview } from "./SourceOverview";
 import { EntityStatusBadge } from "../../../_components/StatusBadges";
 import { DriftPanel } from "./DriftPanel";
 import { DataContractsSection } from "./DataContractsSection";
@@ -35,16 +34,10 @@ import {
 } from "../../../../lib/data-contracts/repository";
 import { requireSession } from "../../../../lib/session";
 import {
-  formatBytes,
   formatCount,
-  densifyDailySeries,
-  getSourceEventStats,
-  getSourceDailyUsage,
   listSourceEvents,
   usageEnabled,
-  type DailyUsageRow,
   type SourceEventRow,
-  type SourceEventStats,
 } from "../../../../lib/usage";
 import { fetchPayloadForR2Key, GENERIC_SAMPLE } from "../../../../lib/sample-payload";
 import { deploymentCapabilities } from "../../../../lib/deployment-capabilities";
@@ -184,7 +177,7 @@ export default async function SourceDetailPage({
 
 
       {resolvedTab === "overview" ? (
-        <OverviewTab
+        <SourceOverview
           source={source}
           workspaceId={workspaceId}
           timezone={timezone}
@@ -263,135 +256,6 @@ function SourceHeader({
         ) : null}
       </div>
     </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Overview tab — volume, stats, recent events
-// ---------------------------------------------------------------------------
-
-async function OverviewTab({
-  source,
-  workspaceId,
-  timezone,
-}: {
-  source: SourceRow;
-  workspaceId: string;
-  timezone: string;
-}) {
-  let events: SourceEventRow[] = [];
-  let stats: SourceEventStats | null = null;
-  let dailyEvents: DailyUsageRow[] = [];
-  let clickhouseError: string | null = null;
-  if (usageEnabled()) {
-    try {
-      [events, stats, dailyEvents] = await Promise.all([
-        listSourceEvents(workspaceId, source.id, 50),
-        getSourceEventStats(workspaceId, source.id),
-        getSourceDailyUsage(workspaceId, source.id, 14, { timezone }),
-      ]);
-    } catch {
-      clickhouseError = "Source analytics are temporarily unavailable.";
-    }
-  }
-
-  return (
-    <>
-      <EventStreamChart
-        rows={densifyDailySeries(
-          dailyEvents,
-          14,
-          (day) => ({ day, events: 0, bytes: 0 }),
-          timezone,
-        )}
-      />
-
-      <section className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-4" aria-label="Source events stats">
-        <StatCard
-          label="Events received (all time)"
-          value={stats ? formatCount(stats.total_events) : "—"}
-          sub={stats?.first_seen ? `since ${stats.first_seen.slice(0, 10)}` : usageEnabled() ? "no events yet" : "analytics unavailable"}
-        />
-        <StatCard
-          label="Last 24h"
-          value={stats ? formatCount(stats.events_24h) : "—"}
-          sub="rolling window"
-        />
-        <StatCard
-          label="Total bytes ingested"
-          value={stats ? formatBytes(stats.bytes_total) : "—"}
-          sub="raw payloads in R2"
-        />
-        <StatCard
-          label="Routes attached"
-          value={String(source.routes_attached)}
-          sub="active"
-        />
-      </section>
-
-      <Section
-        id="recent-events"
-        title="Recent events"
-        pill={`last ${events.length} of ${stats ? formatCount(stats.total_events) : "?"}`}
-        className="first:mt-0"
-      >
-        {clickhouseError ? (
-          <EmptyState
-            title="Couldn't load events"
-            body={clickhouseError}
-          />
-        ) : !usageEnabled() ? (
-          <EmptyState
-            title="Source analytics unavailable"
-            body="Per-source event search is unavailable for this deployment."
-          />
-        ) : events.length === 0 ? (
-          <EmptyState
-            title="No events yet"
-            body={
-              source.status === "disabled"
-                ? "This source is disabled. Enable it to start collecting."
-                : "Events will appear here within seconds of the first webhook hitting the ingest endpoint."
-            }
-          />
-        ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Event id</TableHead>
-                <TableHead>Received at</TableHead>
-                <TableHead>Content type</TableHead>
-                <TableHead>Size</TableHead>
-                <TableHead>Shard</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {events.map((event) => (
-                <TableRow key={event.event_id}>
-                  <TableCell>
-                    <Link
-                      href={`/sources/${source.id}/events/${event.event_id}`}
-                      prefetch={false}
-                      className="font-mono text-xs text-foreground hover:underline"
-                    >
-                      {event.event_id}
-                    </Link>
-                  </TableCell>
-                  <TableCell className="text-sm text-muted-foreground">
-                    <LocalTime value={clickhouseToIso(event.received_at)} />
-                  </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{event.content_type}</TableCell>
-                  <TableCell className="text-sm">{formatBytes(event.size_bytes)}</TableCell>
-                  <TableCell className="font-mono text-xs text-muted-foreground">
-                    shard {event.shard.toString().padStart(2, "0")}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        )}
-      </Section>
-    </>
   );
 }
 
@@ -731,56 +595,6 @@ function flattenContractFields(schema: InferredDataContract): ContractField[] {
     .sort((a, b) => a.path.localeCompare(b.path));
 }
 
-function EventStreamChart({ rows }: { rows: DailyUsageRow[] }) {
-  const max = rows.reduce((acc, row) => Math.max(acc, row.events), 0);
-  const totalEvents = rows.reduce((acc, row) => acc + row.events, 0);
-  const totalBytes = rows.reduce((acc, row) => acc + row.bytes, 0);
-
-  return (
-    <section className="mb-6 rounded-lg border border-border bg-card p-5" aria-labelledby="event-stream-title">
-      <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
-        <div>
-          <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-            Event stream
-          </p>
-          <h2 id="event-stream-title" className="font-mono text-2xl font-semibold text-foreground">
-            {formatCount(totalEvents)} events
-          </h2>
-          <small className="text-xs text-muted-foreground">
-            Last {rows.length} days · {formatBytes(totalBytes)}
-          </small>
-        </div>
-        <Badge variant="outline">daily volume</Badge>
-      </div>
-      <div
-        className="flex h-48 items-end gap-1"
-        role="img"
-        aria-label={`Daily event stream for the last ${rows.length} days`}
-      >
-        {rows.map((row) => {
-          const heightPct = max > 0 ? Math.max(3, (row.events / max) * 100) : 3;
-          return (
-            <span
-              key={row.day}
-              className="group relative flex-1 rounded-sm bg-primary/70 transition-colors hover:bg-primary"
-              style={{ height: `${heightPct}%` }}
-              title={`${row.day}: ${formatCount(row.events)} events · ${formatBytes(row.bytes)}`}
-            >
-              <span className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-1 -translate-x-1/2 whitespace-nowrap rounded-sm border border-border bg-popover px-1.5 py-0.5 font-mono text-[10px] font-semibold text-popover-foreground opacity-0 shadow-sm transition-opacity group-hover:opacity-100">
-                {formatCount(row.events)}
-              </span>
-            </span>
-          );
-        })}
-      </div>
-      <div className="mt-2 flex justify-between font-mono text-[11px] text-muted-foreground">
-        <span>{rows[0]?.day ?? ""}</span>
-        <span>{rows[rows.length - 1]?.day ?? ""}</span>
-      </div>
-    </section>
-  );
-}
-
 function SyncMeta({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-md border border-border bg-muted/30 px-3 py-2">
@@ -846,8 +660,4 @@ function FieldSelectionSkeleton() {
       <Skeleton className="h-56" />
     </div>
   );
-}
-
-function clickhouseToIso(raw: string): string {
-  return raw.replace(" ", "T") + "Z";
 }

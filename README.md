@@ -78,8 +78,15 @@ pnpm exec playwright install chromium
 pnpm verify
 ```
 
-The full verification command also requires Docker. See [AGENTS.md](AGENTS.md)
+The full verification command also requires Docker and jq. See [AGENTS.md](AGENTS.md)
 for focused checks, isolated worktrees, and separate browser-test ports.
+
+For a signed-in dashboard with synthetic data, run `pnpm qa:dashboard` in a clean
+worktree without local environment files. It builds the app, starts a disposable
+Postgres database, and prints the local URL and test credentials. Ctrl-C removes
+the database. `pnpm test:dashboard` runs the same setup with browser checks for
+login, a persisted workspace edit, source navigation, tenant isolation, and logout
+at desktop and mobile sizes in both themes. No hosted credentials are needed.
 
 Raw local backing stores for database-specific development:
 
