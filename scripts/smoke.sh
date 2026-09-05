@@ -75,17 +75,26 @@ elif [[ "${AXEL_REQUIRE_SENTRY_TEST:-0}" == "1" ]]; then
 fi
 
 ingest_status="$(curl "${curl_network_args[@]}" -sS -o "$smoke_tmp_dir/ingest-response" -w "%{http_code}" -X POST "${ingest_url%/}/in/__smoke__")"
-if [[ "$ingest_status" != "401" ]]; then
-  echo "Smoke check failed for ingest auth gate: expected 401, got ${ingest_status}" >&2
+if [[ "$ingest_status" != "401" && "$ingest_status" != "404" ]]; then
+  echo "Smoke check failed for unknown source: expected 401 or 404, got ${ingest_status}" >&2
   exit 1
 fi
-echo "ok ingest-auth-gate: ${ingest_status}"
+echo "ok ingest-unknown-source: ${ingest_status}"
 
 if [[ -n "${AXEL_CANARY_INGEST_URL:-}" || -n "${AXEL_CANARY_RECEIPT_URL:-}" ]]; then
   if [[ -z "${AXEL_CANARY_INGEST_URL:-}" || -z "${AXEL_CANARY_RECEIPT_URL:-}" ]]; then
     echo "Smoke check failed: both AXEL_CANARY_INGEST_URL and AXEL_CANARY_RECEIPT_URL are required" >&2
     exit 1
   fi
+  # A missing source cannot prove authentication works. Use the provisioned
+  # canary source without its credential, then prove authenticated delivery.
+  canary_auth_status="$(curl "${curl_network_args[@]}" -sS -o "$smoke_tmp_dir/canary-auth-response" -w "%{http_code}" \
+    -X POST -H "content-type: application/json" --data '{}' "$AXEL_CANARY_INGEST_URL")"
+  if [[ "$canary_auth_status" != "401" ]]; then
+    echo "Smoke check failed for canary auth gate: expected 401, got ${canary_auth_status}" >&2
+    exit 1
+  fi
+  echo "ok ingest-auth-gate: ${canary_auth_status}"
   node scripts/delivery-canary.mjs
   echo "ok production-delivery-canary"
 elif [[ "${AXEL_REQUIRE_DELIVERY_CANARY:-0}" == "1" ]]; then
