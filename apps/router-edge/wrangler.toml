@@ -8,6 +8,10 @@ workers_dev = false
 [version_metadata]
 binding = "CF_VERSION_METADATA"
 
+[triggers]
+# Keep the heartbeat fresh when no source events arrive.
+crons = ["*/2 * * * *"]
+
 # Inbound: consume the 16 sharded ingest queues. Cloudflare delivers each
 # message exactly once per dead-letter setting and retries on msg.retry().
 [[queues.consumers]]
