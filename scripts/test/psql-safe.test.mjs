@@ -138,6 +138,22 @@ test("explicit certificate roots and unverified local connections are preserved"
   }
 });
 
+test("Render SCRAM uses verified TLS without overriding explicit channel binding", () => {
+  const bin = fakePsql(`process.stdout.write(JSON.stringify(process.env.PGCHANNELBINDING ?? null));`);
+  for (const [mode, query, explicit, expected] of [
+    ["render", "sslmode=verify-full", "", "disable"],
+    ["render", "sslmode=verify-full", "require", "require"],
+    ["render", "sslmode=verify-full&channel_binding=require", "", ""],
+    ["render", "sslmode=require", "", ""],
+    ["strict", "sslmode=verify-full", "", ""],
+  ]) {
+    const result = runWrapper({ bin, databaseUrl: `postgres://runtime:password@db.example.test/axel?${query}`,
+      env: { DATABASE_ACCESS_MODE: mode, PGCHANNELBINDING: explicit } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout), expected);
+  }
+});
+
 test("collapses command failures without forwarding query output or detail", () => {
   const bin = fakePsql(`
     const password = process.env.PGPASSWORD ?? "";

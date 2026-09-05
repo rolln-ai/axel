@@ -244,6 +244,10 @@ test("Vercel and Render provider-side git auto-deploys are disabled", () => {
     const config = JSON.parse(read(file));
     assert.equal(config.git?.deploymentEnabled, false, file);
     assert.match(config.installCommand, /corepack@0\.35\.0/);
+    assert.match(config.installCommand, /corepack pnpm install --frozen-lockfile/);
+    assert.match(config.buildCommand, /corepack pnpm build/);
+    assert.deepEqual(JSON.parse(read(file.replace("vercel.json", "package.json"))).engines,
+      { node: "22.x", pnpm: "9.12.0" });
     assert.doesNotMatch(config.installCommand, /@latest/);
   }
   const render = read("render.yaml");
