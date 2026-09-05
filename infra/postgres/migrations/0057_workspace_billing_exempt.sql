@@ -6,9 +6,8 @@
 -- deriveGate) short-circuits to 'accept' when this is set, so enforcement is
 -- lifted regardless of plan / billing_status / usage.
 --
--- Used for internal and test spaces (for example, demo-sandbox) that should
--- be usable without a card. Toggled from the super-admin console
--- (/admin/workspaces).
+-- Used for internal + test spaces (e.g. unfiltered-dev) that should be usable
+-- without a card. Toggled from the super-admin console (/admin/workspaces).
 --
 -- Matching declarative definition lives in infra/postgres/schema.sql.
 
