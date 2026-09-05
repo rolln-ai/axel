@@ -82,6 +82,9 @@ remain disabled until their indexes and cleanup paths exist. See
 - A successful build, healthy HTTP endpoint, worker heartbeat, and delivered
   canary prove different things. Keep each check and report unavailable data
   honestly. An unset release-observation pin must not prevent routine canaries.
+  Router and delivery-edge send scheduled heartbeats every two minutes so an
+  idle queue does not look stalled. Router heartbeat metadata identifies
+  scheduled ticks; these prove worker liveness, while canaries prove delivery.
 - Unit tests cover isolated logic. Public browser checks cover layouts and
   redirects. Database integration tests execute SQL. None substitutes for an
   authenticated product walkthrough or the post-deploy delivery canary.
