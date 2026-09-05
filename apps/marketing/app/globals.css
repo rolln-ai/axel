@@ -353,6 +353,8 @@ section.hero::after {
 .heroBadge strong {
   display: inline-flex;
   align-items: center;
+  flex-shrink: 0;
+  white-space: nowrap;
   height: 22px;
   padding: 0 8px;
   border-radius: 999px;
