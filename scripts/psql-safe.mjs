@@ -234,6 +234,12 @@ else delete childEnv.PGPASSWORD;
 // verifies the same public certificate. Keep explicit/private CA configuration
 // intact; supply Node's trusted roots only when none was configured.
 const sslMode = url.searchParams.get("sslmode") || childEnv.PGSSLMODE;
+// Render's TLS endpoint rejects SCRAM channel binding. Match the Node client
+// only with full certificate/hostname verification; honor explicit settings.
+if (process.env.DATABASE_ACCESS_MODE === "render" && sslMode === "verify-full"
+  && !url.searchParams.has("channel_binding") && !childEnv.PGCHANNELBINDING) {
+  childEnv.PGCHANNELBINDING = "disable";
+}
 const defaultRoot = process.platform === "win32"
   ? path.join(process.env.APPDATA || homedir(), "postgresql", "root.crt")
   : path.join(homedir(), ".postgresql", "root.crt");

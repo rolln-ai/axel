@@ -13,6 +13,10 @@ wrapper supplies Node's trusted CA certificates to `psql` when no libpq root
 certificate is configured. Explicit `sslrootcert`, `PGSSLROOTCERT`, and the
 standard `~/.postgresql/root.crt` take precedence. The temporary public CA bundle
 is removed when the wrapper exits; certificate and hostname checks remain enabled.
+With Render and `verify-full`, the wrapper also disables libpq's default SCRAM
+channel binding, which the provider's TLS endpoint rejects. Explicit
+`channel_binding` or `PGCHANNELBINDING` settings still take precedence. This does
+not disable TLS, certificate validation, or hostname verification.
 
 The checked-in `infra/postgres/hosted-access.json` names the five runtime
 capabilities, their replaceable logins, and the metadata verifier. Set
