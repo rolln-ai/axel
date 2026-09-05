@@ -146,7 +146,7 @@ const ROUTER_HEARTBEAT_THROTTLE_MS = 60 * 1000;
 const ROUTE_CACHE_TTL_MS = 30_000;
 const routeCache = createTtlCache<RouteWithTypes[]>({ ttlMs: ROUTE_CACHE_TTL_MS });
 
-function maybeBeatRouter(env: Env, ctx: ExecutionContext, error?: string, force = false): void {
+function maybeBeatRouter(env: Env, ctx: ExecutionContext, error?: string, scheduled = false): void {
   let url: string | null = null;
   try {
     url = env.DELIVERY_HEARTBEAT_URL
@@ -160,13 +160,14 @@ function maybeBeatRouter(env: Env, ctx: ExecutionContext, error?: string, force 
   const secret = env.DELIVERY_SHARED_SECRET;
   if (!url || !secret) return;
   const now = Date.now();
-  if (!force && now - lastRouterHeartbeatAt < ROUTER_HEARTBEAT_THROTTLE_MS && !error) return;
+  if (!scheduled && now - lastRouterHeartbeatAt < ROUTER_HEARTBEAT_THROTTLE_MS && !error) return;
   lastRouterHeartbeatAt = now;
   routerHeartbeatTickCount += 1;
   ctx.waitUntil(
     recordHeartbeatHttp(url, secret, {
       component: "router-edge",
       tickCount: routerHeartbeatTickCount,
+      metadata: { scheduled },
       ...(error ? { error } : {}),
       expectedIntervalSeconds: 180,
       environment: env.SENTRY_ENVIRONMENT ?? env.VERCEL_ENV ?? "production",

@@ -46,5 +46,6 @@ it("reports idle router liveness even when a recent batch used the heartbeat thr
     environment: "test",
     expectedIntervalSeconds: 180,
     tickCount: 3,
+    metadata: { scheduled: true },
   });
 });
