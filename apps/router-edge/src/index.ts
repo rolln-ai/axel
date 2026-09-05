@@ -146,7 +146,7 @@ const ROUTER_HEARTBEAT_THROTTLE_MS = 60 * 1000;
 const ROUTE_CACHE_TTL_MS = 30_000;
 const routeCache = createTtlCache<RouteWithTypes[]>({ ttlMs: ROUTE_CACHE_TTL_MS });
 
-function maybeBeatRouter(env: Env, ctx: ExecutionContext, error?: string): void {
+function maybeBeatRouter(env: Env, ctx: ExecutionContext, error?: string, force = false): void {
   let url: string | null = null;
   try {
     url = env.DELIVERY_HEARTBEAT_URL
@@ -160,7 +160,7 @@ function maybeBeatRouter(env: Env, ctx: ExecutionContext, error?: string): void 
   const secret = env.DELIVERY_SHARED_SECRET;
   if (!url || !secret) return;
   const now = Date.now();
-  if (now - lastRouterHeartbeatAt < ROUTER_HEARTBEAT_THROTTLE_MS && !error) return;
+  if (!force && now - lastRouterHeartbeatAt < ROUTER_HEARTBEAT_THROTTLE_MS && !error) return;
   lastRouterHeartbeatAt = now;
   routerHeartbeatTickCount += 1;
   ctx.waitUntil(
@@ -175,6 +175,16 @@ function maybeBeatRouter(env: Env, ctx: ExecutionContext, error?: string): void 
 }
 
 export default {
+  async scheduled(
+    _controller: ScheduledController,
+    env: Env,
+    ctx: ExecutionContext,
+  ): Promise<void> {
+    // Empty queues do not invoke queue(). Report idle worker liveness on the
+    // same schedule as delivery-edge; delivery canaries verify the work path.
+    maybeBeatRouter(env, ctx, undefined, true);
+  },
+
   async queue(batch: MessageBatch<QueueMessage>, env: Env, ctx: ExecutionContext): Promise<void> {
     const sentry = sentryClientFromEnv(env, "router-edge");
     maybeBeatRouter(env, ctx);
