@@ -11,6 +11,7 @@ import { lookupSourceFromDeliveryService } from "./source-lookup-http.js";
 import { SourceLookupUnavailableError } from "./source-lookup-error.js";
 import { logEventToClickhouse } from "./clickhouse-log.js";
 import { beginSourceAuthorizationWithAuthority, confirmSourceAuthorizationWithAuthority, sourceAuthorityAdminClient, type SourceAuthorityNamespaceLike } from "./source-authority.js";
+import { allowsLegacyQueryToken } from "./legacy-query-token.js";
 
 export { SourceAuthorityDurableObject } from "./source-authority.js";
 
@@ -58,6 +59,8 @@ export interface Env extends SentryEnv {
    * deployments must set this and front the worker with Cloudflare Access.
    */
   ADMIN_TOKEN?: string;
+  /** Operator-only, per-source migration windows (at most 72 hours). Disabled by default. */
+  LEGACY_QUERY_TOKEN_SOURCES?: string;
   /**
    * Optional ClickHouse Cloud HTTPS endpoint for analytics-row logging.
    * When set, every accepted webhook also produces an `events` row that
@@ -315,13 +318,18 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
 
     const sourceId = match[1]!;
     // URL credentials are visible to platform, proxy, browser-history, and
-    // provider access logs before application code can redact them. Reject the
-    // legacy query form outright. Custom sources authenticate only with the
-    // x-axel-token header; signed named providers authenticate by signature.
-    if (url.searchParams.has("token")) {
+    // provider access logs before application code can redact them. Keep the
+    // default rejection. A bounded, per-source window lets existing senders
+    // migrate without silently losing their feed during a security rollout.
+    const queryTokens = url.searchParams.getAll("token");
+    const headerToken = request.headers.get("x-axel-token");
+    const legacyQuery = queryTokens.length === 1 && Boolean(queryTokens[0])
+      && !request.headers.has("x-axel-token")
+      && allowsLegacyQueryToken(env.LEGACY_QUERY_TOKEN_SOURCES, sourceId);
+    if (queryTokens.length > 0 && !legacyQuery) {
       return json({ error: "query_token_not_allowed" }, 401);
     }
-    const headerToken = request.headers.get("x-axel-token");
+    const presentedToken = legacyQuery ? queryTokens[0] : headerToken;
 
     const authorization = await beginSourceAuthorizationWithAuthority(
       env,
@@ -332,6 +340,8 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     if (!source) return json({ error: "unknown_source" }, 404);
     if (source.status !== "active") return json({ error: "source_disabled" }, 403);
     const provider = source.provider ?? "custom";
+    // The compatibility window cannot substitute token auth for a provider's signature.
+    if (legacyQuery && provider !== "custom") return json({ error: "query_token_not_allowed" }, 401);
     // AXE-34 — inbound IP allowlist. When set, reject any IP outside
     // the union (cheaper than running token verify on forged traffic;
     // 403 is non-billable). `cf-connecting-ip` is the canonical
@@ -343,10 +353,10 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       }
     }
     if (provider === "custom") {
-      if (!headerToken) return json({ error: "missing_token" }, 401);
+      if (!presentedToken) return json({ error: "missing_token" }, 401);
       // The stored token is a SHA-256 hex hash. Compare hashes in constant time
       // and keep plaintext confined to this request's memory.
-      const presentedHash = await sha256Hex(headerToken);
+      const presentedHash = await sha256Hex(presentedToken);
       if (!safeEqual(source.secret_token, presentedHash)) {
         return json({ error: "invalid_token" }, 401);
       }

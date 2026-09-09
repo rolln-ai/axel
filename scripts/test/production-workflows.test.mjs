@@ -408,7 +408,9 @@ test("hosted source authorization uses a SQLite Durable Object fence", () => {
   const confirm = ingest.indexOf("confirmSourceAuthorizationWithAuthority(");
   const persist = ingest.indexOf("env.EVENTS_RAW.put(");
   assert.ok(confirm >= 0 && persist > confirm, "authority is confirmed before the first durable write");
-  assert.match(ingest, /url\.searchParams\.has\("token"\)/);
+  assert.match(ingest, /url\.searchParams\.getAll\("token"\)/);
+  assert.match(ingest, /allowsLegacyQueryToken\(env\.LEGACY_QUERY_TOKEN_SOURCES, sourceId\)/);
+  assert.match(ingest, /queryTokens\.length > 0 && !legacyQuery/);
   assert.doesNotMatch(ingest, /url\.searchParams\.get\("token"\)/);
 
   const authority = read("apps/ingest-worker/src/source-authority.ts");
