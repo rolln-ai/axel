@@ -38,7 +38,7 @@ export const metadata: Metadata = pageMetadata({
 const promises: Array<{ title: string; body: string; stat: string }> = [
   {
     title: "Source tokens hashed at rest",
-    body: "Axel stores custom-source ingest tokens as SHA-256 hashes and validates them with constant-time comparison. Custom sources require the x-axel-token request header, and Axel rejects source credentials in URL query parameters. Named-provider sources use the provider's signature or webhook Basic Auth instead of an Axel token.",
+    body: "Axel stores custom-source ingest tokens as SHA-256 hashes and validates them with constant-time comparison. Custom sources use the x-axel-token header by default. Senders without custom headers can use a separately generated URL credential, enabled per source and rotated independently. Treat authenticated URLs as secrets; sender and proxy logs may record them. Named-provider sources use the provider's signature or webhook Basic Auth instead of an Axel token.",
     stat: "SHA-256",
   },
   {

@@ -1,5 +1,7 @@
 "use client";
 
+import { WebhookSetupDetails } from "../../../_components/WebhookSetupDetails";
+
 import * as React from "react";
 import { useActionState, useEffect, useMemo, useRef, useState } from "react";
 import type { SourceProvider } from "@axel/shared";
@@ -14,7 +16,6 @@ import { testNewDestinationConnection } from "../../../../lib/test-destination";
 import { CREATABLE_DESTINATION_SCHEMAS } from "../../../../lib/destination-defaults";
 import { defaultPipelineName } from "../../../../lib/entity-name";
 import {
-  sourceAuthenticationCopy,
   sourceUsesAxelToken,
 } from "../../../../lib/source-ingest-auth";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -496,21 +497,7 @@ export function NewSourcePipelineDialog({
                     </div>
                   ) : null}
                   {state.data?.ingestUrl ? (
-                    <>
-                      <SecretRow
-                        label="Webhook URL — point your provider here"
-                        value={state.data.ingestUrl}
-                      />
-                      <p className="mt-1 text-[11px] text-muted-foreground">
-                        {sourceAuthenticationCopy(sourceProvider)}
-                      </p>
-                    </>
-                  ) : null}
-                  {sourceUsesAxelToken(sourceProvider) && state.data?.plaintextToken ? (
-                    <SecretRow
-                      label="Ingest token — send only as x-axel-token"
-                      value={state.data.plaintextToken}
-                    />
+                    <WebhookSetupDetails ingestUrl={state.data.ingestUrl} provider={sourceProvider} token={state.data.plaintextToken} sourceId={state.data.sourceId} />
                   ) : null}
                   {state.data?.webhookSigningSecret ? (
                     <>

@@ -101,6 +101,8 @@ function isSource(value: unknown): value is Source {
     && typeof source.workspace_id === "string"
     && typeof source.name === "string"
     && typeof source.secret_token === "string"
+    && (source.url_token_hash === undefined
+      || (typeof source.url_token_hash === "string" && /^[0-9a-f]{64}$/.test(source.url_token_hash)))
     && (source.status === "active" || source.status === "disabled")
     && optionalNumber(source.max_body_bytes)
     && optionalNumber(source.max_body_depth)

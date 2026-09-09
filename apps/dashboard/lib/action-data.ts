@@ -10,6 +10,9 @@ import type { ActionState as ActionStateBase } from "./action-state";
 export interface ActionData {
   sourceId?: string;
   plaintextToken?: string;
+  /** One-shot URL credential. Never persisted in plaintext or returned on reads. */
+  plaintextUrlToken?: string;
+  urlTokenEnabled?: boolean;
   ingestUrl?: string;
   /** Set on webhook-destination creation when Axel generated the secret. Shown once. */
   webhookSigningSecret?: string;

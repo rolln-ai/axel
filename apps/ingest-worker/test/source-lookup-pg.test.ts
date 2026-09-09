@@ -40,6 +40,7 @@ function row(overrides: Record<string, unknown> = {}) {
     workspace_id: "ws_1",
     name: "My Source",
     secret_token_hash: "hash_abc",
+    url_token_hash: null,
     status: "active" as const,
     max_body_bytes: null,
     max_body_depth: null,
@@ -175,4 +176,13 @@ describe("source-lookup-pg — mapSourceRow (matches dashboard rowToEdgePayload)
     expect(src.field_selection).toEqual(["customer.id"]);
     expect(src.inbound_ip_allowlist).toEqual(["10.0.0.0/8"]);
   });
+});
+
+
+it("maps an optional URL credential independently of the header credential", async () => {
+  const hash = "a".repeat(64);
+  expect(await mapSourceRow(row({ url_token_hash: hash }), undefined)).toMatchObject({
+    secret_token: "hash_abc", url_token_hash: hash,
+  });
+  expect(await mapSourceRow(row(), undefined)).not.toHaveProperty("url_token_hash");
 });

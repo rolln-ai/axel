@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { dashboardFixture, qaPassword } from "./fixtures.mjs";
 
-test("sign-in, workspace changes, source isolation, and sign-out", async ({ page }, testInfo) => {
+test("sign-in, workspace changes, source isolation, and sign-out", async ({ page, request }, testInfo) => {
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
   const fixture = dashboardFixture(testInfo.project.name);
@@ -42,6 +42,70 @@ test("sign-in, workspace changes, source isolation, and sign-out", async ({ page
   await page.getByRole("link", { name: "Skip to content", exact: true }).focus();
   await page.keyboard.press("Enter");
   await expect(page.getByRole("main")).toBeFocused();
+
+  // Synthetic fixtures only. Capture writes without changing the user's clipboard.
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+      writeText: async (value: string) => { (window as unknown as { qaClipboard: string }).qaClipboard = value; },
+    } });
+  });
+  await page.goto(`/sources/${fixture.sourceId}?tab=settings`);
+  const clipboard = () => page.evaluate(() => (window as unknown as { qaClipboard: string }).qaClipboard);
+  await page.getByRole("button", { name: "Copy URL", exact: true }).click();
+  const cleanUrl = await clipboard();
+  expect(new URL(cleanUrl).pathname).toBe(`/in/${fixture.sourceId}`);
+  expect(new URL(cleanUrl).search).toBe("");
+  await page.getByRole("button", { name: "Rotate token", exact: true }).click();
+  await page.getByRole("alertdialog").getByRole("button", { name: "Rotate", exact: true }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Token rotated." })).toBeVisible();
+  await page.getByRole("button", { name: "Copy header value", exact: true }).click();
+  const headerToken = await clipboard();
+  expect(headerToken).toMatch(/^axt_/);
+  await page.getByRole("button", { name: "Copy header name", exact: true }).click();
+  expect(await clipboard()).toBe("x-axel-token");
+
+  await page.getByRole("button", { name: "Generate webhook URL", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Copy authenticated URL", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Copy authenticated URL", exact: true }).click();
+  const authenticatedUrl = await clipboard();
+  expect(authenticatedUrl).toContain(cleanUrl);
+  expect(new URL(authenticatedUrl).searchParams.get("url_token")).toMatch(/^axu_[A-Za-z0-9_-]{43}$/);
+  expect(authenticatedUrl).not.toContain(headerToken);
+  expect((await request.post(authenticatedUrl, { data: { synthetic: "headerless QA" } })).status()).toBe(202);
+  expect((await request.post(cleanUrl, { data: {}, headers: { "x-axel-token": headerToken } })).status()).toBe(202);
+  expect((await request.post(cleanUrl, { data: {} })).status()).toBe(401);
+  // Creating URL auth leaves the current header token visible and unchanged.
+  await page.getByRole("button", { name: "Copy header value", exact: true }).click();
+  expect(await clipboard()).toBe(headerToken);
+  const setupWidths = await page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, viewport: innerWidth }));
+  expect(setupWidths.scroll).toBeLessThanOrEqual(setupWidths.viewport + 2);
+  const setupScreenshot = testInfo.outputPath("webhook-setup.png");
+  await page.screenshot({ path: setupScreenshot, fullPage: true });
+  await testInfo.attach("webhook-setup", { path: setupScreenshot, contentType: "image/png" });
+
+  await page.reload();
+  await expect(page.getByText(/URL authentication is enabled/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Copy authenticated URL", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Copy header value", exact: true })).toHaveCount(0);
+  expect(await page.locator("body").innerText()).not.toContain(headerToken);
+  expect(await page.locator("body").innerText()).not.toContain(authenticatedUrl);
+
+  await page.getByRole("button", { name: "Replace webhook URL", exact: true }).click();
+  await page.getByRole("alertdialog").getByRole("button", { name: "Replace URL", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Copy authenticated URL", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Copy authenticated URL", exact: true }).click();
+  const replacementUrl = await clipboard();
+  expect(replacementUrl).not.toBe(authenticatedUrl);
+  expect((await request.post(authenticatedUrl, { data: {} })).status()).toBe(401);
+  expect((await request.post(replacementUrl, { data: {} })).status()).toBe(202);
+  await page.getByRole("button", { name: "Disable URL", exact: true }).click();
+  await page.getByRole("alertdialog").getByRole("button", { name: "Disable URL", exact: true }).click();
+  await expect(page.getByRole("status").filter({ hasText: "URL authentication disabled." })).toBeVisible();
+  expect((await request.post(replacementUrl, { data: {} })).status()).toBe(401);
+  expect((await request.post(cleanUrl, { data: {}, headers: { "x-axel-token": headerToken } })).status()).toBe(202);
+  await expect(page.getByRole("button", { name: "Copy authenticated URL", exact: true })).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Generate webhook URL", exact: true })).toBeVisible();
 
   await page.goto("/sources/src_qa_foreign");
   await expect(page.getByRole("heading", { name: "Not found", exact: true })).toBeVisible();

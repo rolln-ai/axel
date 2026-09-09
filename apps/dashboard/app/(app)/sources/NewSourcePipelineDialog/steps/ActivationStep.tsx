@@ -9,8 +9,8 @@ import { Button } from "@/components/ui/button";
 import { IngestActivityMonitor } from "../../[id]/IngestActivityMonitor";
 import { TestEventRunner } from "../../[id]/TestEventRunner";
 import { SecretRow, SigningSecretHint } from "./shared";
+import { WebhookSetupDetails } from "../../../../_components/WebhookSetupDetails";
 import {
-  sourceAuthenticationCopy,
   sourceUsesAxelToken,
 } from "../../../../../lib/source-ingest-auth";
 
@@ -80,15 +80,7 @@ export function ActivationStep({
               </div>
             ) : null}
             {ingestUrl ? (
-              <>
-                <SecretRow label="Webhook URL — point your provider here" value={ingestUrl} />
-                <p className="text-[11px] text-muted-foreground">
-                  {sourceAuthenticationCopy(sourceProvider)}
-                </p>
-              </>
-            ) : null}
-            {usesAxelToken && plaintextToken ? (
-              <SecretRow label="Ingest token — send only as x-axel-token" value={plaintextToken} />
+              <WebhookSetupDetails ingestUrl={ingestUrl} provider={sourceProvider} token={plaintextToken} sourceId={sourceId} />
             ) : null}
             {webhookSigningSecret ? (
               <>

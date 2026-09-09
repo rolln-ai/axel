@@ -1,7 +1,11 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { WebhookSetupDetails } from "../app/_components/WebhookSetupDetails";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  sourceAuthenticatedUrl,
   sourceAuthenticationCopy,
   sourceAuthHeaderExample,
   sourceUsesAxelToken,
@@ -15,9 +19,10 @@ function read(relativePath: string): string {
 }
 
 describe("source ingest authentication UX", () => {
-  it("keeps source credentials out of copyable URLs and public guidance", () => {
+  it("keeps header tokens out of legacy query URLs and public guidance", () => {
     const boundaryFiles = [
       "apps/dashboard/app/(app)/_components/FirstRunSetupFlow.tsx",
+      "apps/dashboard/app/_components/WebhookSetupDetails.tsx",
       "apps/dashboard/app/(app)/sources/NewSourcePipelineDialog/index.tsx",
       "apps/dashboard/app/(app)/sources/NewSourcePipelineDialog/steps/ActivationStep.tsx",
       "apps/dashboard/app/(app)/sources/NewSourcePipelineDialog/steps/shared.tsx",
@@ -71,4 +76,36 @@ describe("source ingest authentication UX", () => {
     expect(spec).toContain("ChargebeeBasic: []");
     expect(spec).toContain("query_token_not_allowed");
   });
+  it("builds a full URL only from a dedicated URL credential", () => {
+    const token = `axu_${"u".repeat(43)}`;
+    const endpoint = "https://ingest.example.test/in/src_test";
+    const url = new URL(sourceAuthenticatedUrl(endpoint, token));
+    expect(url.origin + url.pathname).toBe(endpoint);
+    expect([...url.searchParams]).toEqual([["url_token", token]]);
+    expect(() => sourceAuthenticatedUrl(endpoint, "axt_header-token")).toThrow();
+    expect(() => sourceAuthenticatedUrl(endpoint + "?token=old", token)).toThrow();
+  });
+
+  it("renders the current header value with its complete endpoint and named copy controls", () => {
+    const html = renderToStaticMarkup(createElement(WebhookSetupDetails, {
+      ingestUrl: "https://ingest.example.test/in/src_test", provider: "custom", token: "synthetic-new-token",
+    }));
+    expect(html).toContain("synthetic-new-token");
+    expect(html).toContain('aria-label="Copy URL"');
+    expect(html).toContain('aria-label="Copy header name"');
+    expect(html).toContain('aria-label="Copy header value"');
+    expect(html).not.toContain("YOUR_SOURCE_TOKEN");
+  });
+
+  it("does not copy a placeholder or request a custom header for a named provider", () => {
+    for (const provider of ["custom", "stripe", "github", "shopify", "chargebee"] as const) {
+      const html = renderToStaticMarkup(createElement(WebhookSetupDetails, {
+        ingestUrl: "https://ingest.example.test/in/src_test", provider,
+      }));
+      expect(html).not.toContain('aria-label="Copy header value"');
+      expect(html).not.toContain("YOUR_SOURCE_TOKEN");
+      if (provider !== "custom") expect(html).not.toContain("x-axel-token");
+    }
+  });
+
 });

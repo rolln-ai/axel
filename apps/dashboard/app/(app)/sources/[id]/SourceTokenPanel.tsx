@@ -2,17 +2,15 @@
 
 import { useActionState } from "react";
 import type { SourceProvider } from "@axel/shared";
-import { rotateSourceToken } from "../../../../lib/source-actions";
+import { rotateSourceToken, updateSourceUrlToken } from "../../../../lib/source-actions";
 import type { ActionState } from "../../../../lib/action-data";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import { CopyButton } from "../../_components/CopyButton";
 import { ConfirmAction } from "../../../_components/ConfirmAction";
-import { useToast } from "../../../_components/Toast";
+import { CopyableWebhookValue, WebhookSetupDetails } from "../../../_components/WebhookSetupDetails";
 import {
-  sourceAuthenticationCopy,
-  sourceAuthHeaderExample,
+  sourceAuthenticatedUrl,
   sourceProviderLabel,
   sourceUsesAxelToken,
 } from "../../../../lib/source-ingest-auth";
@@ -21,6 +19,7 @@ interface Props {
   sourceId: string;
   ingestUrl: string;
   canRotate: boolean;
+  urlTokenEnabled?: boolean;
   /** AXE-23 — provider preset configured on the source. */
   provider?: SourceProvider;
   /** Short hex digest of the provider signing secret, if configured. */
@@ -31,31 +30,22 @@ export function SourceTokenPanel({
   sourceId,
   ingestUrl,
   canRotate,
+  urlTokenEnabled = false,
   provider = "custom",
   signingSecretFingerprint = null,
 }: Props) {
   const [state, action, pending] = useActionState<ActionState, FormData>(rotateSourceToken, {});
+  const [urlState, urlAction, urlPending] = useActionState<ActionState, FormData>(updateSourceUrlToken, {});
   const usesAxelToken = sourceUsesAxelToken(provider);
+  const urlEnabled = urlState.data?.urlTokenEnabled ?? urlTokenEnabled;
 
   return (
     <div className="space-y-4">
       <div className="grid gap-2 md:grid-cols-[200px_1fr] md:items-start md:gap-6">
-        <Label className="pt-2 text-sm font-medium">Ingest URL</Label>
-        <CopyableValue value={ingestUrl} />
-      </div>
-
-      <div className="grid gap-2 md:grid-cols-[200px_1fr] md:items-start md:gap-6">
-        <Label className="pt-2 text-sm font-medium">Webhook request</Label>
-        <div className="space-y-2">
-          <pre className="overflow-x-auto rounded-md border border-border bg-muted/40 px-3 py-2 font-mono text-xs leading-relaxed select-all">
-            {`POST ${ingestUrl}\n${sourceAuthHeaderExample(provider)}`}
-          </pre>
-          <p className="text-xs text-muted-foreground">
-            {sourceAuthenticationCopy(provider)}
-            {usesAxelToken
-              ? " The plaintext token is shown once on creation. Rotate below to issue a new one."
-              : " Axel verifies that authentication before storing or queueing the payload."}
-          </p>
+        <Label className="pt-2 text-sm font-medium">{usesAxelToken ? "With a custom header" : "Webhook setup"}</Label>
+        <div className="min-w-0 space-y-3">
+          {state.notice ? <p role="status" className="text-sm">{state.notice}</p> : null}
+          <WebhookSetupDetails ingestUrl={ingestUrl} provider={provider} token={state.data?.plaintextToken} />
         </div>
       </div>
 
@@ -72,15 +62,12 @@ export function SourceTokenPanel({
             </p>
           ) : provider === "custom" ? (
             <p className="text-xs text-muted-foreground">
-              No provider signing secret configured — the ingest worker accepts any payload that
-              presents the source token. Configure a custom HMAC secret to verify signatures before
-              R2 / queue writes.
+              A valid source credential is required. No additional provider signature is configured.
             </p>
           ) : (
             <p className="text-xs text-destructive">
-              {sourceProviderLabel(provider)} authentication is misconfigured. The ingest worker
-              rejects requests before R2 / queue writes until an owner or admin repairs the signing
-              secret.
+              {sourceProviderLabel(provider)} authentication is misconfigured. Requests are rejected
+              until an owner or admin repairs the provider credential.
             </p>
           )}
         </div>
@@ -88,12 +75,11 @@ export function SourceTokenPanel({
 
       {usesAxelToken ? (
         <div className="grid gap-2 md:grid-cols-[200px_1fr] md:items-start md:gap-6">
-          <Label className="pt-2 text-sm font-medium">Source token</Label>
+          <Label className="pt-2 text-sm font-medium">Header token</Label>
           <div className="space-y-3">
             <p className="text-xs text-muted-foreground">
-              Tokens are stored hashed and can&apos;t be recovered. Rotate to issue a new token; the
-              edge blocks this source before the database change and resumes only after it receives
-              the committed new token hash.
+              Rotating replaces the header token immediately. Copy the new value and update each
+              sender that uses this header.
             </p>
 
             {state.error ? (
@@ -101,20 +87,11 @@ export function SourceTokenPanel({
                 <AlertDescription>{state.error}</AlertDescription>
               </Alert>
             ) : null}
-            {state.data?.plaintextToken ? (
-              <Alert>
-                <AlertDescription className="space-y-2">
-                  <span className="block">{state.notice ?? "Source token rotated."}</span>
-                  <CopyableValue value={state.data.plaintextToken} />
-                </AlertDescription>
-              </Alert>
-            ) : null}
-
             <form action={action}>
               <input type="hidden" name="source_id" value={sourceId} />
               <ConfirmAction
                 title="Rotate source token"
-                body="Rotate this source token? The edge will block this source before the token changes and resume with the committed new hash."
+                body="The previous header token will stop working immediately. Update every sender that uses it with the new value."
                 confirmLabel="Rotate"
                 destructive
               >
@@ -131,28 +108,58 @@ export function SourceTokenPanel({
           </div>
         </div>
       ) : null}
-    </div>
-  );
-}
-
-function CopyableValue({ value }: { value: string }) {
-  const toast = useToast();
-
-  return (
-    <div className="flex min-w-0 items-center gap-2 rounded-md border border-border bg-muted/40 px-3 py-2">
-      <code className="min-w-0 flex-1 truncate font-mono text-xs">
-        {value}
-      </code>
-      <CopyButton
-        value={value}
-        variant="ghost"
-        size="icon"
-        className="size-7 shrink-0"
-        resetAfterMs={1200}
-        onCopyError={() =>
-          toast.error("Couldn't copy to the clipboard. Select the text and copy it manually.")
-        }
-      />
+      {usesAxelToken ? (
+        <div className="grid gap-2 border-t border-border pt-4 md:grid-cols-[200px_1fr] md:items-start md:gap-6">
+          <Label className="pt-2 text-sm font-medium">Without custom headers</Label>
+          <div className="min-w-0 space-y-3">
+            <p className="text-sm">Generate a complete webhook URL for a sender that cannot set headers.</p>
+            <p className="text-xs text-muted-foreground">
+              Keep this URL private. Anyone with it can send events to this source, and your sender
+              may record it in its logs. Header authentication stays unchanged.
+              {signingSecretFingerprint ? " Your configured provider signature is still required." : ""}
+            </p>
+            {urlState.error ? <Alert variant="destructive"><AlertDescription>{urlState.error}</AlertDescription></Alert> : null}
+            {urlState.notice ? <p role="status" className="text-sm">{urlState.notice}</p> : null}
+            {urlState.data?.plaintextUrlToken ? (
+              <CopyableWebhookValue
+                label="Authenticated webhook URL"
+                value={sourceAuthenticatedUrl(ingestUrl, urlState.data.plaintextUrlToken)}
+                copyLabel="Copy authenticated URL"
+              />
+            ) : urlEnabled ? (
+              <p className="text-xs text-muted-foreground">
+                URL authentication is enabled. Keep using the URL saved in your sender, or generate
+                a replacement if you no longer have it.
+              </p>
+            ) : null}
+            <div className="flex flex-wrap gap-2">
+              <form action={urlAction}>
+                <input type="hidden" name="source_id" value={sourceId} />
+                <input type="hidden" name="operation" value="generate" />
+                {urlEnabled ? (
+                  <ConfirmAction title="Replace webhook URL" body="The previous authenticated URL will stop working immediately. Copy the replacement URL into your sender. Header tokens are unchanged." confirmLabel="Replace URL" destructive>
+                    <Button type="button" variant="secondary" disabled={!canRotate || urlPending}>Replace webhook URL</Button>
+                  </ConfirmAction>
+                ) : (
+                  <Button type="submit" variant="secondary" disabled={!canRotate || urlPending}>
+                    {urlPending ? "Generating…" : "Generate webhook URL"}
+                  </Button>
+                )}
+              </form>
+              {urlEnabled ? (
+                <form action={urlAction}>
+                  <input type="hidden" name="source_id" value={sourceId} />
+                  <input type="hidden" name="operation" value="disable" />
+                  <ConfirmAction title="Disable URL authentication" body="Senders using the authenticated URL will stop sending events to this source. Header tokens are unchanged." confirmLabel="Disable URL" destructive>
+                    <Button type="button" variant="outline" disabled={!canRotate || urlPending}>Disable URL</Button>
+                  </ConfirmAction>
+                </form>
+              ) : null}
+            </div>
+            {!canRotate ? <p className="text-xs text-muted-foreground">Only owners and admins can manage webhook URLs.</p> : null}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -1,5 +1,7 @@
 name = "axel-ingest"
 main = "src/index.ts"
+# Authenticated webhook URLs are secrets. Do not export raw invocation URLs.
+logpush = false
 compatibility_date = "2026-04-01"
 compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
 
@@ -133,3 +135,15 @@ DELIVERY_SERVICE_URL = "https://axel-delivery-native.onrender.com"
 # DATABASE_URL is local-development only. Production erasure indexing and
 # source lookup use authenticated delivery-service endpoints.
 # Local-dev direct-PG fallback only: AES-256-GCM source signing-secret key.
+
+# Request URLs may contain opt-in URL credentials. Keep persistence disabled
+# until upstream query redaction is configured. See docs/webhook-authentication.md.
+[observability]
+enabled = false
+
+[observability.logs]
+enabled = false
+invocation_logs = false
+
+[observability.traces]
+enabled = false

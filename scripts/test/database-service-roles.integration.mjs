@@ -322,6 +322,21 @@ test("service profiles provision, rotate, and fail closed on PostgreSQL 17", {
       INSERT INTO public.sources (id, workspace_id, name, secret_token_hash, status)
       VALUES ('source-test', 'workspace-test', 'Source test', 'not-a-token', 'active');
     `);
+    phase = "source_url_credential_migration";
+    await owner.query("ALTER TABLE public.sources DROP COLUMN url_token_hash");
+    const urlMigration = readFileSync(path.join(ROOT, "infra/postgres/migrations/0075_source_url_tokens.sql"), "utf8");
+    await owner.query(urlMigration);
+    await owner.query(urlMigration);
+    assert.deepEqual((await native.query("SELECT secret_token_hash, url_token_hash FROM public.sources WHERE id = 'source-test'")).rows[0], {
+      secret_token_hash: "not-a-token", url_token_hash: null,
+    });
+    await assert.rejects(dashboard.query("UPDATE public.sources SET url_token_hash = 'plaintext' WHERE id = 'source-test'"), /sources_url_token_hash_format/);
+    await dashboard.query("UPDATE public.sources SET url_token_hash = $1 WHERE id = 'source-test'", ["a".repeat(64)]);
+    assert.deepEqual((await native.query("SELECT secret_token_hash, url_token_hash FROM public.sources WHERE id = 'source-test'")).rows[0], {
+      secret_token_hash: "not-a-token", url_token_hash: "a".repeat(64),
+    });
+    await dashboard.query("UPDATE public.sources SET url_token_hash = NULL WHERE id = 'source-test'");
+    phase = "erasure_index_insert";
     assert.equal(typeof ERASURE_INDEX_SQL, "string");
     assert.match(ERASURE_INDEX_SQL, /ON CONFLICT DO NOTHING/);
     assert.doesNotMatch(ERASURE_INDEX_SQL, /ON CONFLICT\s*\(/);

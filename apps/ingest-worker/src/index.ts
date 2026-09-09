@@ -314,14 +314,16 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     if (!match) return json({ error: "not_found" }, 404);
 
     const sourceId = match[1]!;
-    // URL credentials are visible to platform, proxy, browser-history, and
-    // provider access logs before application code can redact them. Reject the
-    // legacy query form outright. Custom sources authenticate only with the
-    // x-axel-token header; signed named providers authenticate by signature.
+    // Header credentials must never work in URLs. Headerless senders use a
+    // separately generated, source-specific URL credential, disabled by default.
     if (url.searchParams.has("token")) {
       return json({ error: "query_token_not_allowed" }, 401);
     }
     const headerToken = request.headers.get("x-axel-token");
+    const urlTokens = url.searchParams.getAll("url_token");
+    if (urlTokens.length > 1 || (urlTokens.length > 0 && headerToken !== null)) {
+      return json({ error: "ambiguous_authentication" }, 401);
+    }
 
     const authorization = await beginSourceAuthorizationWithAuthority(
       env,
@@ -342,12 +344,17 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
         return json({ error: "ip_not_allowlisted" }, 403);
       }
     }
+    if (urlTokens.length > 0 && (provider !== "custom" || !source.url_token_hash)) {
+      return json({ error: "url_authentication_disabled" }, 401);
+    }
     if (provider === "custom") {
-      if (!headerToken) return json({ error: "missing_token" }, 401);
+      const presentedToken = urlTokens.length > 0 ? urlTokens[0] : headerToken;
+      if (!presentedToken) return json({ error: "missing_token" }, 401);
       // The stored token is a SHA-256 hex hash. Compare hashes in constant time
       // and keep plaintext confined to this request's memory.
-      const presentedHash = await sha256Hex(headerToken);
-      if (!safeEqual(source.secret_token, presentedHash)) {
+      const presentedHash = await sha256Hex(presentedToken);
+      const expectedHash = urlTokens.length > 0 ? source.url_token_hash! : source.secret_token;
+      if (!safeEqual(expectedHash, presentedHash)) {
         return json({ error: "invalid_token" }, 401);
       }
     }
@@ -401,7 +408,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     }
 
     // Billing and source rate gates run only after the request is authenticated
-    // by a custom-source header token or a named-provider signature.
+    // by a custom-source credential or a named-provider signature.
     const planCache = planCacheFor(env);
     if (planCache) {
       const planState = await planCache.get(source.workspace_id);
