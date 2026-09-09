@@ -40,6 +40,9 @@ export interface Source {
   workspace_id: string;
   name: string;
   secret_token: string;
+  /** SHA-256 hash of a separate URL credential. Missing means URL auth is disabled.
+   * Only custom sources may use it; provider/HMAC verification is never bypassed. */
+  url_token_hash?: string;
   status: "active" | "disabled";
   // Optional per-source overrides for the ingest input-shape caps. When unset,
   // the ingest worker falls back to the global defaults from its Env. Set on

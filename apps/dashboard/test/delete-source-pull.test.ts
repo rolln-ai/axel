@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fakeSession } from "@axel/test-utils";
 
@@ -47,7 +48,7 @@ vi.mock("next/cache", () => ({
 vi.mock("next/headers", () => ({ headers: vi.fn() }));
 vi.mock("next/navigation", () => ({ redirect: vi.fn() }));
 
-import { deleteSource, rotateSourceToken, setSourceStatus } from "../lib/source-actions";
+import { deleteSource, rotateSourceToken, updateSourceUrlToken, setSourceStatus } from "../lib/source-actions";
 
 function ownerSession() {
   return fakeSession("owner", { user: { id: "usr_owner" } });
@@ -208,4 +209,65 @@ describe("source revocation authority sequencing", () => {
     expect(fenceEdgeMock.mock.invocationCallOrder[0]).toBeLessThan(updateOrder);
     expect(syncEdgeMock.mock.invocationCallOrder[0]).toBeGreaterThan(updateOrder);
   });
+  it("generates a separate URL credential after fencing and returns it only after sync", async () => {
+    sessionMock.mockResolvedValue(ownerSession());
+    const result = await updateSourceUrlToken({}, fd({ source_id: "src_1", operation: "generate" }));
+    const token = result.data?.plaintextUrlToken;
+    expect(token).toMatch(/^axu_[A-Za-z0-9_-]{43}$/);
+    expect(result.data?.urlTokenEnabled).toBe(true);
+    const index = dbQueryMock.mock.calls.findIndex(([sql]) => /UPDATE sources/.test(String(sql)));
+    const [sql, values] = dbQueryMock.mock.calls[index]!;
+    expect(sql).not.toContain("secret_token_hash");
+    expect(values).toEqual([createHash("sha256").update(token!).digest("hex"), "src_1", "ws_1"]);
+    expect(JSON.stringify(dbQueryMock.mock.calls)).not.toContain(token);
+    expect(fenceEdgeMock.mock.invocationCallOrder[0]).toBeLessThan(dbQueryMock.mock.invocationCallOrder[index]!);
+    expect(syncEdgeMock.mock.invocationCallOrder[0]).toBeGreaterThan(dbQueryMock.mock.invocationCallOrder[index]!);
+    expect(withTransactionMock).toHaveBeenCalledOnce();
+  });
+
+  it("disables the URL credential without returning an old secret", async () => {
+    sessionMock.mockResolvedValue(ownerSession());
+    const result = await updateSourceUrlToken({}, fd({ source_id: "src_1", operation: "disable" }));
+    expect(result.data).toEqual({ sourceId: "src_1", urlTokenEnabled: false });
+    const [sql, values] = dbQueryMock.mock.calls.find(([sql]) => /UPDATE sources/.test(String(sql)))!;
+    expect(sql).not.toContain("secret_token_hash");
+    expect(values).toEqual([null, "src_1", "ws_1"]);
+    expect(fenceEdgeMock).toHaveBeenCalledOnce();
+    expect(syncEdgeMock).toHaveBeenCalledOnce();
+  });
+
+  it("denies URL credential changes by members", async () => {
+    sessionMock.mockResolvedValue(fakeSession("member"));
+    const result = await updateSourceUrlToken({}, fd({ source_id: "src_1", operation: "generate" }));
+    expect(result.error).toBeTruthy();
+    expect(dbQueryMock).not.toHaveBeenCalled();
+    expect(fenceEdgeMock).not.toHaveBeenCalled();
+  });
+
+  it("does not fence a foreign, named-provider, or pull source", async () => {
+    sessionMock.mockResolvedValue(ownerSession());
+    dbQueryMock.mockResolvedValueOnce({ rowCount: 0, rows: [] });
+    const result = await updateSourceUrlToken({}, fd({ source_id: "src_foreign", operation: "generate" }));
+    expect(result.error).toMatch(/not found/);
+    expect(dbQueryMock.mock.calls[0]?.[1]).toEqual(["src_foreign", "ws_1"]);
+    expect(fenceEdgeMock).not.toHaveBeenCalled();
+  });
+
+  it("cannot add a URL credential when suspension wins the workspace lock", async () => {
+    sessionMock.mockResolvedValue(ownerSession());
+    dbQueryMock.mockImplementation(async (sql: string) => ({ rowCount: 1, rows: /FROM workspaces/.test(sql) ? [{ status: "suspended" }] : [] }));
+    const result = await updateSourceUrlToken({}, fd({ source_id: "src_1", operation: "generate" }));
+    expect(result.error).toBeTruthy();
+    expect(dbQueryMock.mock.calls.some(([sql]) => /UPDATE sources/.test(String(sql)))).toBe(false);
+  });
+
+  it("does not mutate when fencing fails or report success when sync fails", async () => {
+    sessionMock.mockResolvedValue(ownerSession());
+    fenceEdgeMock.mockRejectedValueOnce(new Error("fence unavailable"));
+    await expect(updateSourceUrlToken({}, fd({ source_id: "src_1", operation: "generate" }))).rejects.toThrow("fence unavailable");
+    expect(withTransactionMock).not.toHaveBeenCalled();
+    syncEdgeMock.mockRejectedValueOnce(new Error("sync unavailable"));
+    await expect(updateSourceUrlToken({}, fd({ source_id: "src_1", operation: "generate" }))).rejects.toThrow("sync unavailable");
+  });
+
 });

@@ -46,6 +46,7 @@ function sourceRow(overrides: Partial<InternalSourceRow> = {}): InternalSourceRo
     workspace_id: "ws_1",
     name: "Billing webhooks",
     secret_token_hash: "sha256-token-hash",
+    url_token_hash: null,
     status: "active",
     max_body_bytes: 2048,
     max_body_depth: 12,
@@ -283,4 +284,14 @@ describe("internal shared-secret comparison", () => {
     expect(isRotatingInternalSecretAuthorized("unreviewed-secret", secrets)).toBe(false);
     expect(isRotatingInternalSecretAuthorized([DELIVERY_SHARED_SECRET], secrets)).toBe(false);
   });
+});
+
+
+it("loads an optional URL credential independently of the header credential", async () => {
+  const hash = "a".repeat(64);
+  const pool = fakePool([sourceRow({ url_token_hash: hash })]);
+  expect(await loadInternalSource(pool, "src_1", MASTER_KEY)).toMatchObject({
+    secret_token: "sha256-token-hash", url_token_hash: hash,
+  });
+  expect(await loadInternalSource(fakePool([sourceRow()]), "src_1", MASTER_KEY)).not.toHaveProperty("url_token_hash");
 });

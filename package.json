@@ -21,13 +21,14 @@
     "test:database": "AXEL_RUN_POSTGRES_INTEGRATION=1 node --test scripts/test/database-service-roles.integration.mjs scripts/test/render-database-access.integration.mjs",
     "test:analytics": "node --experimental-strip-types --conditions=react-server --test scripts/test/clickhouse-outcomes.integration.mjs",
     "verify": "pnpm lint && pnpm lint:sql && pnpm typecheck && pnpm test && pnpm test:database && pnpm test:analytics && pnpm visual:smoke && pnpm test:dashboard",
-    "test:dashboard": "node --experimental-strip-types scripts/dashboard-qa.mjs --test",
-    "qa:dashboard": "node --experimental-strip-types scripts/dashboard-qa.mjs"
+    "test:dashboard": "tsx scripts/dashboard-qa.mjs --test",
+    "qa:dashboard": "tsx scripts/dashboard-qa.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.0",
     "@playwright/test": "^1.51.1",
     "pg": "8.21.0",
+    "tsx": "4.22.4",
     "turbo": "^2.9.18",
     "typescript": "^6.0.3",
     "vercel": "58.4.0",

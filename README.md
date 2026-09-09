@@ -37,7 +37,9 @@ Pull sources:   pull-worker polls APIs (e.g. Stripe) and feeds the same pipeline
 ```
 
 Custom webhook sources send their one-time token only in the `x-axel-token`
-request header. Ingest rejects source credentials in URL query parameters.
+request header. Senders that cannot set headers can use a separate, opt-in
+[authenticated webhook URL](docs/webhook-authentication.md). The header token
+cannot be used in a URL.
 Stripe, GitHub, Shopify, and Chargebee sources use their provider-native
 authentication without an Axel source token.
 

@@ -20,6 +20,7 @@ function sourceRow(overrides: Partial<SourceDbRow> = {}): SourceDbRow {
     workspace_id: "ws_1",
     name: "Webhook source",
     secret_token_hash: "token-hash",
+    url_token_hash: null,
     status: "active",
     max_body_bytes: null,
     max_body_depth: null,
@@ -263,5 +264,16 @@ describe("rowToEdgePayload signing-secret fail-closed behavior", () => {
       signing_secret_previous_ciphertext: Buffer.alloc(8),
     }))).rejects.toThrow(/previous_signing_secret_decrypt_failed/);
     errorSpy.mockRestore();
+  });
+});
+
+
+describe("URL authentication authority payload", () => {
+  it("publishes the dedicated hash and omits it when disabled", async () => {
+    const hash = "a".repeat(64);
+    expect(await rowToEdgePayload(sourceRow({ url_token_hash: hash }))).toMatchObject({
+      secret_token: "token-hash", url_token_hash: hash,
+    });
+    expect(await rowToEdgePayload(sourceRow())).not.toHaveProperty("url_token_hash");
   });
 });

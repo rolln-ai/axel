@@ -3,7 +3,7 @@
 // Source lifecycle server actions (control-plane API surfaced through the dashboard).
 
 import { db, withTransaction, type Queryable } from "./db";
-import { generateSourceToken } from "./source-tokens";
+import { generateSourceToken, generateSourceUrlToken } from "./source-tokens";
 import { RETENTION_BOUNDS } from "./retention-bounds";
 import { deploymentCapabilities } from "./deployment-capabilities";
 import {
@@ -289,10 +289,66 @@ export async function rotateSourceToken(_state: ActionState, formData: FormData)
     tags("sources");
 
     return {
-      notice: "Token rotated. Copy the new token now. It won't be shown again, and the old token is blocked at the edge.",
+      notice: "Token rotated. Copy the new header value now and update your sender. The previous header token no longer works.",
       data: {
         sourceId,
         plaintextToken: token.plaintext,
+      },
+    };
+  });
+}
+
+/** URL-only senders get a separate credential; header tokens remain unchanged. */
+export async function updateSourceUrlToken(_state: ActionState, formData: FormData): Promise<ActionState> {
+  return withWorkspaceMutation({}, async ({ workspaceId, audit, tags }) => {
+    const sourceId = formValue(formData, "source_id");
+    const operation = formValue(formData, "operation");
+    if (!sourceId || (operation !== "generate" && operation !== "disable")) {
+      return { error: "Choose a source and a URL authentication action." };
+    }
+    const eligible = await db().query(
+      `SELECT 1 FROM sources s
+        WHERE s.id = $1 AND s.workspace_id = $2 AND s.provider = 'custom'
+          AND NOT EXISTS (SELECT 1 FROM pull_sources p WHERE p.id = s.id)
+        LIMIT 1`,
+      [sourceId, workspaceId],
+    );
+    if (!eligible.rowCount) return { error: "Custom webhook source not found in this workspace." };
+
+    const token = operation === "generate" ? generateSourceUrlToken() : null;
+    const updated = await withRequiredSourceAuthorityFence(sourceId, workspaceId, () =>
+      withTransaction(async (client) => {
+        const workspace = await client.query<{ status: string }>(
+          "SELECT status FROM workspaces WHERE id = $1 FOR UPDATE",
+          [workspaceId],
+        );
+        if (workspace.rows[0]?.status !== "active") return false;
+        const result = await client.query(
+          `UPDATE sources s SET url_token_hash = $1, updated_at = now()
+            WHERE s.id = $2 AND s.workspace_id = $3 AND s.provider = 'custom'
+              AND NOT EXISTS (SELECT 1 FROM pull_sources p WHERE p.id = s.id)`,
+          [token?.hash ?? null, sourceId, workspaceId],
+        );
+        if (!result.rowCount) return false;
+        await audit({
+          action: token ? "source.url_token_rotated" : "source.url_token_disabled",
+          targetType: "source",
+          targetId: sourceId,
+          metadata: {},
+        }, client);
+        return true;
+      }),
+    );
+    if (!updated) return { error: "The source or workspace changed. Reload before trying again." };
+    tags("sources");
+    return {
+      notice: token
+        ? "Webhook URL generated. Copy it now; it cannot be shown again after you leave this page."
+        : "URL authentication disabled. Header authentication is unchanged.",
+      data: {
+        sourceId,
+        urlTokenEnabled: Boolean(token),
+        ...(token ? { plaintextUrlToken: token.plaintext } : {}),
       },
     };
   });

@@ -17,7 +17,8 @@ info:
       Custom sources authenticate with the one-shot `x-axel-token`
       request header. Stripe, GitHub, Shopify, and Chargebee sources
       use their native signature or webhook Basic Auth and do not
-      use an Axel source token. URL query credentials are rejected.
+      use an Axel source token. Custom sources can opt into a separate
+      URL credential for senders that cannot set headers.
 
     ### Scopes
     Workspace API keys carry one or more scopes:
@@ -349,6 +350,14 @@ paths:
         `202 Accepted` with an `event_id` you can use to look up the
         delivery on the dashboard or replay it later.
 
+        Custom sources may also use an opt-in `url_token` query credential.
+        Generate the full authenticated URL from the source Settings tab.
+        This credential is independent of `x-axel-token`; header tokens do not
+        work in URLs. URL auth is disabled until an owner/admin enables it.
+        Duplicate `url_token` parameters or combining one with `x-axel-token`
+        returns `401 ambiguous_authentication`. Keep the URL private; upstream
+        senders and proxies may log it. Named providers cannot use URL auth.
+
         **Hosted at a different origin** from the workspace API:
         `https://ingest.axelapp.ai`.
 
@@ -358,13 +367,14 @@ paths:
 
         Named-provider signature verification is mandatory. A custom
         source configured with optional custom HMAC requires both its
-        `x-axel-token` and valid `X-Axel-Signature` headers.
+        header or URL credential and a valid `X-Axel-Signature` header.
       tags: [Ingest]
       servers:
         - url: https://ingest.axelapp.ai
           description: Ingest (production)
       security:
         - SourceToken: []
+        - SourceUrlToken: []
         - StripeSignature: []
         - GitHubSignature: []
         - ShopifySignature: []
@@ -414,6 +424,8 @@ paths:
                 invalid: { value: { error: invalid_token } }
                 signature: { value: { error: invalid_signature, reason: invalid_signature } }
                 queryCredential: { value: { error: query_token_not_allowed } }
+                urlDisabled: { value: { error: url_authentication_disabled } }
+                ambiguous: { value: { error: ambiguous_authentication } }
         "402":
           description: Workspace is billing-suspended.
           content:
@@ -486,9 +498,19 @@ components:
       name: x-axel-token
       description: |
         Custom sources only. The plaintext source token returned at
-        source-create time. URL query credentials are rejected.
+        source-create time. This token is never accepted in a URL.
         Treat it as a secret: leaked tokens can post arbitrary payloads
         into your workspace. Rotate it from the source settings page.
+    SourceUrlToken:
+      type: apiKey
+      in: query
+      name: url_token
+      description: |
+        Custom sources only. Separate credential generated from source Settings
+        for a sender that cannot set headers. Disabled by default. Only a hash
+        is stored; the authenticated URL is shown once. Rotate or disable it
+        independently of the header token. Do not combine with x-axel-token.
+        Named providers and optional custom HMAC retain signature requirements.
     StripeSignature:
       type: apiKey
       in: header
