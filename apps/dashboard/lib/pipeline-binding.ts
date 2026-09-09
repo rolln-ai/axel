@@ -181,29 +181,31 @@ export function prepareBigQueryBindingForEdit(
  *
  * Postgres defaults to `dotted_columns`: the wizard creates a minimal table
  * shell (id + received_at) and the connector auto-creates one dot-notation
- * column per leaf key on first delivery — so events land as queryable columns,
+ * column per leaf key when additions are explicitly enabled — so events land as queryable columns,
  * not one opaque JSONB blob. (The old jsonb_blob default wrote into a "payload"
  * column the shell never had, which 100%-failed every fresh destination.)
  *
  * BigQuery and Databricks SQL default to typed shapes (`typed_records` /
  * `typed_columns`): new tables get warehouse-native, type-preserving columns
- * (numbers → INT64/BIGINT, booleans → BOOL/BOOLEAN) that grow additively as new
- * payload keys arrive, rather than STRING-normalizing every value.
+ * (numbers → FLOAT64/DOUBLE, booleans → BOOL/BOOLEAN). Existing tables require
+ * an explicit schema policy before new payload keys can add columns.
  */
 export function pipelineBindingForNewDestination(
   type: string,
   target: string,
+  schemaEvolution?: unknown,
 ): Record<string, unknown> | null {
   const t = target.trim();
   if (!t) return null;
+  const policy = schemaEvolution === "add_columns" ? { schema_evolution: "add_columns" } : {};
   switch (type) {
     case "postgres":
-      return { table: t, mode: "dotted_columns" };
+      return { table: t, mode: "dotted_columns", ...policy };
     case "databricks_sql":
-      return { table: t, mode: "typed_columns" };
+      return { table: t, mode: "typed_columns", ...policy };
     case "bigquery": {
       const target = normalizeBigQueryTarget(t);
-      return target ? { ...target, mode: "typed_records" } : { table: t, mode: "typed_records" };
+      return target ? { ...target, mode: "typed_records", ...policy } : { table: t, mode: "typed_records", ...policy };
     }
     case "mongodb":
       return { collection: t };

@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ConditionalDestField } from "../destinations/ConditionalDestField";
+import { NewDestinationSchemaPolicy } from "../routes/DestinationBindingPicker/SchemaEvolutionPicker";
 import {
   FIRST_RUN_DESTINATIONS,
   FIRST_RUN_TLS_NO_VERIFY_DEFAULT,
@@ -748,6 +749,7 @@ function DestinationForm({
         )
       ) : null}
 
+      {["postgres", "bigquery", "databricks_sql"].includes(type) ? <NewDestinationSchemaPolicy key={type} /> : null}
       {state.error ? (
         <Alert variant="destructive">
           <AlertDescription>{state.error}</AlertDescription>

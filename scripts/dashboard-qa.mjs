@@ -96,6 +96,20 @@ try {
       [fixture.workspaceId, fixture.userId]);
     await client.query("INSERT INTO sources (id,workspace_id,name,secret_token_hash,status) VALUES ($1,$2,'Synthetic webhook',$3,'active')",
       [fixture.sourceId, fixture.workspaceId, randomBytes(32).toString("hex")]);
+    const routeId = `${fixture.sourceId}_schema`;
+    await client.query("INSERT INTO routes (id,workspace_id,source_id,name,status) VALUES ($1,$2,$3,'Synthetic schema policy','active')",
+      [routeId, fixture.workspaceId, fixture.sourceId]);
+    for (const [type, binding] of Object.entries({
+      bigquery: { dataset: "synthetic", table: "events", mode: "typed_records" },
+      postgres: { table: "events", mode: "dotted_columns" },
+      databricks_sql: { table: "events", mode: "typed_columns" },
+    })) {
+      const destinationId = `${routeId}_${type}`;
+      await client.query("INSERT INTO destinations (id,workspace_id,name,type,config) VALUES ($1,$2,$3,$4,'{}'::jsonb)",
+        [destinationId, fixture.workspaceId, `Synthetic ${type}`, type]);
+      await client.query("INSERT INTO route_destinations (route_id,destination_id,binding) VALUES ($1,$2,$3::jsonb)",
+        [routeId, destinationId, JSON.stringify(binding)]);
+    }
   }
   await client.query("INSERT INTO workspaces (id,name,slug) VALUES ('ws_qa_foreign','Foreign workspace','foreign-workspace')");
   await client.query("INSERT INTO sources (id,workspace_id,name,secret_token_hash,status) VALUES ('src_qa_foreign','ws_qa_foreign','Foreign source',$1,'active')",

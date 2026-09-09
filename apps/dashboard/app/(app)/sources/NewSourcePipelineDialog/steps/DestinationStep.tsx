@@ -34,6 +34,7 @@ import {
   type ExistingDestination,
 } from "../helpers";
 import { ModeRadio } from "./shared";
+import { NewDestinationSchemaPolicy } from "../../../routes/DestinationBindingPicker/SchemaEvolutionPicker";
 
 /**
  * Step 2 — where events land: an existing destination (with inline binding
@@ -296,6 +297,7 @@ export function DestinationStep({
               </div>
             )
           ) : null}
+          {["postgres", "bigquery", "databricks_sql"].includes(newDestinationType) ? <NewDestinationSchemaPolicy key={newDestinationType} /> : null}
           {destConnState.error ? (
             <Alert variant="destructive">
               <AlertTitle>Connection failed</AlertTitle>

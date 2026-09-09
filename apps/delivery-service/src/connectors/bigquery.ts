@@ -36,11 +36,12 @@ import type {
  *     `<field>__json` STRING.
  *     This mirrors Stitch's nested-table shape without brittle scalar types.
  *
- * Schema management (best-effort, mirrors the Postgres dotted_columns
- * connector's auto-DDL): if the target table is missing we create it, and in
- * schema-managed mode we add any missing fields before retrying the insert —
- * including fields nested inside RECORDs — so a freshly-named table "just
- * works" on first delivery. This needs the service
+ * Missing tables are created from the first event. Existing schemas stay
+ * fixed unless the binding explicitly sets schema_evolution: add_columns.
+ * Even adding a nullable nested field can break downstream STRUCT/UNION
+ * queries. With the default manual policy, incompatible events dead-letter
+ * for schema review and replay; unknown fields are never discarded.
+ * Table creation and opted-in additions need the service
  * account to hold table create/update (BigQuery Data Editor), which is why we
  * request the broad `bigquery` scope. If those permissions are absent, the
  * DDL attempt fails and we fall back to reporting the original insert error —
@@ -762,7 +763,7 @@ interface BqApiResponse {
   text: string;
 }
 
-type SchemaRepairOutcome = "ready" | "retry" | "failed";
+type SchemaRepairOutcome = "ready" | "retry" | "failed" | "blocked";
 type CreateTableOutcome = "created" | "exists" | "retry" | "failed";
 
 function isRetryableDdlResponse(response: BqApiResponse): boolean {
@@ -870,6 +871,7 @@ async function patchTableAddColumns(
   dataset: string,
   table: string,
   desiredFields: BqField[],
+  allowAdditions: boolean,
 ): Promise<SchemaRepairOutcome> {
   const url =
     `${BIGQUERY_API_ROOT}/projects/${encodeURIComponent(projectId)}` +
@@ -886,6 +888,7 @@ async function patchTableAddColumns(
     };
     const merged = mergeSchemaFieldsForPatch(current.schema?.fields ?? [], desiredFields);
     if (!merged.changed) return "ready";
+    if (!allowAdditions) return "blocked";
     if (!current.etag) return "retry";
 
     const patched = await bqApi(
@@ -1167,6 +1170,7 @@ export function createBigQueryConnector(): Connector<BigQueryConfig> {
                 dataset,
                 binding.table,
                 managedSchemaFields,
+                binding.schema_evolution === "add_columns",
               );
             } catch {
               repairOutcome = "retry";
@@ -1174,7 +1178,7 @@ export function createBigQueryConnector(): Connector<BigQueryConfig> {
           } else {
             repairOutcome = created;
           }
-        } else if (MISSING_SCHEMA_PATTERN.test(res.text)) {
+        } else if ((res.status === 200 || res.status === 400) && MISSING_SCHEMA_PATTERN.test(res.text)) {
           try {
             repairOutcome = await patchTableAddColumns(
               accessToken,
@@ -1182,12 +1186,20 @@ export function createBigQueryConnector(): Connector<BigQueryConfig> {
               dataset,
               binding.table,
               managedSchemaFields,
+              binding.schema_evolution === "add_columns",
             );
           } catch {
             repairOutcome = "retry";
           }
         }
 
+        if (repairOutcome === "blocked") {
+          return attemptOf(context, destination, "dead", {
+            status: res.status,
+            code: "bigquery_schema_change_required",
+            error: "Incoming fields are missing from the BigQuery table. The table was left unchanged. Review downstream views, update the schema and replay, or explicitly enable add_columns on this route. No fields were discarded.",
+          }, startedAt);
+        }
         if (repairOutcome === "retry") {
           return attemptOf(
             context,

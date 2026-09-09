@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useTransition } from "react";
+import type { SchemaEvolution } from "@axel/shared";
 import { Loader2, ShieldCheck, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -22,7 +23,7 @@ import {
 } from "../../../../lib/pipeline-binding";
 import { str } from "./helpers";
 
-function BigQueryCompatResult({ check }: { check: BigQueryCompatCheck }) {
+function BigQueryCompatResult({ check, schemaEvolution }: { check: BigQueryCompatCheck; schemaEvolution: SchemaEvolution }) {
   if (!check.ok) {
     return <p className="text-xs text-destructive">{check.error}</p>;
   }
@@ -52,8 +53,8 @@ function BigQueryCompatResult({ check }: { check: BigQueryCompatCheck }) {
       return (
         <p className="flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">
           <ShieldCheck className="size-3 shrink-0" />
-          Table has {check.fieldCount} column{check.fieldCount === 1 ? "" : "s"}, all STRING/RECORD — Axel&apos;s
-          output fits. Re-check once events are flowing to compare the actual event shape.
+          Table has {check.fieldCount} column{check.fieldCount === 1 ? "" : "s"}, all STRING/RECORD.
+          A sample is still needed to check field names, objects, and arrays.
         </p>
       );
     }
@@ -79,12 +80,21 @@ function BigQueryCompatResult({ check }: { check: BigQueryCompatCheck }) {
     );
   }
   const { result, sampled } = check;
+  if (result.compatible && result.additions.length > 0 && schemaEvolution !== "add_columns") {
+    return (
+      <p className="text-xs text-amber-600 dark:text-amber-400">
+        Schema update required: {cols(result.additions.length)} in {events(sampled)} sampled.
+        Axel will leave the table unchanged and send these events to failed deliveries.
+        Review downstream views, add the fields and replay, or explicitly allow new fields.
+      </p>
+    );
+  }
   if (result.compatible) {
     return (
       <p className="flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">
         <ShieldCheck className="size-3 shrink-0" />
         Compatible — sampled {events(sampled)}; every field fits
-        {result.additions.length > 0 ? ` (${cols(result.additions.length)} will be added)` : ""}.
+        {result.additions.length > 0 ? ` (${cols(result.additions.length)} will be added; review downstream views first)` : ""}.
       </p>
     );
   }
@@ -104,7 +114,7 @@ function BigQueryCompatResult({ check }: { check: BigQueryCompatCheck }) {
         <p className="text-muted-foreground">…and {result.conflicts.length - 12} more.</p>
       ) : null}
       {result.additions.length > 0 ? (
-        <p className="text-muted-foreground">{cols(result.additions.length)} would be added automatically.</p>
+        <p className="text-muted-foreground">{cols(result.additions.length)} also need a schema update. Review downstream views before allowing additions.</p>
       ) : null}
     </div>
   );
@@ -139,6 +149,7 @@ export function BigQueryCompatPanel({
   table,
   mode,
   payloadColumn,
+  schemaEvolution = "manual",
 }: {
   destinationId: string;
   defaultSourceId?: string;
@@ -146,6 +157,7 @@ export function BigQueryCompatPanel({
   table: string;
   mode: BigQueryWriteMode;
   payloadColumn?: string;
+  schemaEvolution?: SchemaEvolution;
 }) {
   const [streams, setStreams] = useState<Array<{ id: string; name: string }>>([]);
   const [streamId, setStreamId] = useState(defaultSourceId ?? "");
@@ -229,7 +241,7 @@ export function BigQueryCompatPanel({
           </div>
         ) : null}
       </div>
-      {compat ? <BigQueryCompatResult check={compat} /> : null}
+      {compat ? <BigQueryCompatResult check={compat} schemaEvolution={schemaEvolution} /> : null}
       {preview ? (
         <DeliveredRowPreview preview={preview} target={targetLabel} streamName={streamName} />
       ) : null}
@@ -306,6 +318,7 @@ export function BigQueryNodeCompat({
       {...(dataset ? { dataset } : {})}
       table={table}
       mode={mode}
+      schemaEvolution={binding?.schema_evolution === "add_columns" ? "add_columns" : "manual"}
       {...(payloadColumn ? { payloadColumn } : {})}
     />
   );

@@ -39,10 +39,10 @@ import { createSafePgStream } from "../safe-dns.js";
  *      table once; Axel never alters it. This is the original behavior.
  *
  *   - `dotted_columns` — flatten the payload with dot-notation keys
- *      and auto-create columns. Nested `{user: {email: ...}}` becomes
+ *      and infer columns. Nested `{user: {email: ...}}` becomes
  *      column `"user.email"`. Each delivery checks the live column set
- *      and runs `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for any new
- *      leaves. Type inference: number → numeric, boolean → boolean,
+ *      and adds new leaves only with schema_evolution: add_columns.
+ *      Existing types are never widened automatically. Type inference: number → numeric, boolean → boolean,
  *      string → text, nested object/array → jsonb. Null leaves are
  *      skipped (column stays nullable / unwritten).
  *
@@ -192,9 +192,9 @@ export function createPostgresConnector(): Connector<PostgresDestinationConfig> 
         if (binding.mode === "dotted_columns") {
           // flattenPayloadToColumns wraps non-object payloads as { value: … },
           // sanitizes keys, remaps reserved id/received_at, spills overflow to
-          // _extra, and widens types — so any JSON value lands rather than
-          // dead-lettering. (Shared with the edge connector for parity.)
-          await insertDottedColumns(pool, binding.table, payload);
+          // _extra. Schema additions need explicit permission; type changes
+          // are rejected before ALTER or INSERT.
+          await insertDottedColumns(pool, binding.table, payload, binding.schema_evolution === "add_columns");
           return;
         }
         // jsonb_blob mode (default) — or legacy column-mapping if config.columns is set.
@@ -248,7 +248,8 @@ export function createPostgresConnector(): Connector<PostgresDestinationConfig> 
         // can't fix bad credentials, a missing table, or a constraint violation),
         // so dead-letter immediately instead of burning the whole retry budget.
         const code = (err as { code?: unknown }).code;
-        const permanentCode = typeof code === "string" && /^(22|23|28|42|3D|3F)/.test(code);
+        const permanentCode = code === "AXEL_SCHEMA_CHANGE_REQUIRED"
+          || (typeof code === "string" && /^(22|23|28|42|3D|3F)/.test(code));
         const retryable =
           !permanentCode &&
           !/(violates|duplicate key|undefined column|invalid input|requires a JSON object|unsafe.{0,12}identifier)/i.test(message);
@@ -266,7 +267,7 @@ export function createPostgresConnector(): Connector<PostgresDestinationConfig> 
 
 /**
  * Dotted-columns insert: flatten nested keys with dot-notation,
- * auto-add any missing columns to the table, then INSERT.
+ * add missing columns only when explicitly allowed, then INSERT.
  *
  * Two round trips per insert under steady state:
  *   1. SELECT existing columns from information_schema
@@ -279,20 +280,30 @@ export function createPostgresConnector(): Connector<PostgresDestinationConfig> 
 const columnCache = new Map<string, Map<string, PgLeafType>>();
 const tableInitCache = new Set<string>();
 
+function requireSchemaReview(): never {
+  throw Object.assign(new Error("Incoming fields require a Postgres schema change. The table was left unchanged. Review downstream queries, update the schema and replay. Enable add_columns only for reviewed additions; existing column types are never changed automatically."), {
+    code: "AXEL_SCHEMA_CHANGE_REQUIRED",
+  });
+}
+
 async function insertDottedColumns(
   pool: pg.Pool,
   table: string,
   payload: unknown,
+  allowAdditions: boolean,
 ): Promise<void> {
   const tableKey = `${pool.options.connectionString ?? ""}::${table}`;
 
-  // First-touch: create the minimal shell (id PK + received_at) so chronological
-  // ordering works even if the dashboard's create-table step was skipped.
+  // Create missing tables with the first row's complete schema. IF NOT EXISTS
+  // leaves pre-existing or concurrently created tables unchanged.
   if (!tableInitCache.has(tableKey)) {
+    const initial = planDottedColumnInsert(table, payload, new Map());
+    const columns = initial?.adds.map((field) => `${quotePgIdent(field.name)} ${field.type}`) ?? [];
     await pool.query(
       `CREATE TABLE IF NOT EXISTS ${quotePgTable(table)} (
          id bigserial PRIMARY KEY,
          received_at timestamptz NOT NULL DEFAULT now()
+         ${columns.length ? `, ${columns.join(", ")}` : ""}
        )`,
     );
     tableInitCache.add(tableKey);
@@ -312,14 +323,13 @@ async function insertDottedColumns(
   const plan = planDottedColumnInsert(table, payload, colTypes);
   if (!plan) return; // empty payload — nothing to insert
 
+  // Check the entire plan before any ALTER. A field addition cannot authorize
+  // changing a different field's type, which could rewrite data or break views.
+  if (plan.widens.length > 0 || (plan.adds.length > 0 && !allowAdditions)) requireSchemaReview();
+
   if (plan.addColumnsSql) {
     await pool.query(plan.addColumnsSql);
     for (const a of plan.adds) colTypes.set(a.name, a.type);
-  }
-  for (let i = 0; i < plan.widens.length; i++) {
-    await pool.query(plan.widenColumnSql[i]!);
-    const w = plan.widens[i]!;
-    colTypes.set(w.name, w.type);
   }
 
   try {
@@ -331,6 +341,7 @@ async function insertDottedColumns(
       const fresh = await readColumnTypes(pool, table);
       columnCache.set(tableKey, fresh);
       const repair = planColumnRepair(table, plan, fresh);
+      if (repair.added.length > 0 && !allowAdditions) requireSchemaReview();
       if (repair.addColumnsSql) {
         await pool.query(repair.addColumnsSql);
         for (const a of repair.added) fresh.set(a.name, a.type);

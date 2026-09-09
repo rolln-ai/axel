@@ -13,6 +13,20 @@ import {
 } from "../lib/pipeline-binding";
 
 describe("pipelineBindingForNewDestination", () => {
+  it.each(["postgres", "bigquery", "databricks_sql"])("requires explicit permission for %s schema additions", (type) => {
+    expect(pipelineBindingForNewDestination(type, "events")?.schema_evolution).toBeUndefined();
+    expect(pipelineBindingForNewDestination(type, "events", "unknown")?.schema_evolution).toBeUndefined();
+    expect(pipelineBindingForNewDestination(type, "events", true)?.schema_evolution).toBeUndefined();
+    expect(pipelineBindingForNewDestination(type, "events", "add_columns")?.schema_evolution).toBe("add_columns");
+  });
+
+  it("preserves the explicit BigQuery schema policy through create and edit normalization", () => {
+    const binding = { dataset: "analytics", table: "events", mode: "typed_records", schema_evolution: "add_columns" };
+    expect(prepareBigQueryBindingForCreate(binding)).toEqual({ binding });
+    expect(prepareBigQueryBindingForEdit(binding, binding)).toEqual({ binding });
+    expect(prepareBigQueryBindingForEdit({ ...binding, schema_evolution: "manual" }, binding))
+      .toEqual({ binding: { ...binding, schema_evolution: "manual" } });
+  });
   it("shapes a Postgres binding the connector can read (binding.table), defaulting to dotted_columns", () => {
     // delivery-edge resolvePostgresBinding reads binding.table + binding.mode.
     // New PG tables default to dotted_columns (auto-expand dot-notation columns).

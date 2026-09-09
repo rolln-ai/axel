@@ -106,6 +106,34 @@ describe("postgres connector — dotted_columns mode", () => {
     await closeAllPostgresPools();
   });
 
+  it("blocks new fields by default without altering or inserting into an existing table", async () => {
+    queryMock.mockResolvedValue({ rows: [{ column_name: "existing", data_type: "text" }], rowCount: 1 });
+    const out = await createPostgresConnector().deliver(encode({ extra: "value" }), destination(), {
+      binding: { table: "existing_events", mode: "dotted_columns" },
+    });
+    expect(out.status).toBe("dead");
+    expect(queryMock.mock.calls.some(c => /^(ALTER|INSERT)/.test(String(c[0])))).toBe(false);
+  });
+
+  it("inserts a compatible event under the default policy without altering the table", async () => {
+    queryMock.mockResolvedValue({ rows: [{ column_name: "existing", data_type: "text" }], rowCount: 1 });
+    const out = await createPostgresConnector().deliver(encode({ existing: "value" }), destination(), {
+      binding: { table: "existing_events", mode: "dotted_columns" },
+    });
+    expect(out.status).toBe("success");
+    expect(queryMock.mock.calls.some(c => /^ALTER/.test(String(c[0])))).toBe(false);
+    expect(queryMock.mock.calls.at(-1)?.[1]).toEqual(["value"]);
+  });
+
+  it("blocks all changes when an event needs both an addition and a type change", async () => {
+    queryMock.mockResolvedValue({ rows: [{ column_name: "score", data_type: "bigint" }], rowCount: 1 });
+    const out = await createPostgresConnector().deliver(encode({ score: "high", extra: "value" }), destination(), {
+      binding: { table: "existing_events", mode: "dotted_columns", schema_evolution: "add_columns" },
+    });
+    expect(out.status).toBe("dead");
+    expect(queryMock.mock.calls.some(c => /^(ALTER|INSERT)/.test(String(c[0])))).toBe(false);
+  });
+
   it("creates table, adds columns for new leaf keys, then INSERTs with quoted dot names", async () => {
     // First call: CREATE TABLE IF NOT EXISTS
     // Second call: SELECT information_schema (returns no columns initially)
@@ -127,7 +155,7 @@ describe("postgres connector — dotted_columns mode", () => {
       destination(),
       {
         eventId: "evt-dotted-1",
-        binding: { table: "events_flat", mode: "dotted_columns" },
+        binding: { table: "events_flat", mode: "dotted_columns", schema_evolution: "add_columns" },
       },
     );
 
@@ -162,7 +190,7 @@ describe("postgres connector — dotted_columns mode", () => {
     const out = await connector.deliver(
       encode("just a string"),
       destination(),
-      { eventId: "evt-1", binding: { table: "t", mode: "dotted_columns" } },
+      { eventId: "evt-1", binding: { table: "t", mode: "dotted_columns", schema_evolution: "add_columns" } },
     );
     expect(out.status).toBe("success");
     const sqls = queryMock.mock.calls.map((c) => String(c[0]));
@@ -188,17 +216,15 @@ describe("postgres connector — dotted_columns mode", () => {
     const out = await connector.deliver(
       encode({ id: "evt_abc", kind: "signup" }),
       destination(),
-      { eventId: "evt-1", binding: { table: "t", mode: "dotted_columns" } },
+      { eventId: "evt-1", binding: { table: "t", mode: "dotted_columns", schema_evolution: "add_columns" } },
     );
     expect(out.status).toBe("success");
     const sqls = queryMock.mock.calls.map((c) => String(c[0]));
     expect(sqls.some((s) => s.includes('"id__field"'))).toBe(true);
   });
 
-  it("widens an existing column when a later event's value type conflicts", async () => {
-    // Audit fix: a cross-event type conflict (stored bigint, incoming text) used
-    // to throw 22P02 and dead-letter. widenPgType now ALTERs the column to the
-    // wider type so both events land.
+  it("leaves an existing column type unchanged even when additions are allowed", async () => {
+    // Adding fields must never authorize rewriting existing values or types.
     queryMock
       .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // CREATE TABLE
       .mockResolvedValueOnce({ rows: [{ column_name: "score", data_type: "bigint" }], rowCount: 1 }) // schema read
@@ -208,11 +234,11 @@ describe("postgres connector — dotted_columns mode", () => {
     const out = await connector.deliver(
       encode({ score: "high" }),
       destination(),
-      { eventId: "evt-1", binding: { table: "t", mode: "dotted_columns" } },
+      { eventId: "evt-1", binding: { table: "t", mode: "dotted_columns", schema_evolution: "add_columns" } },
     );
-    expect(out.status).toBe("success");
+    expect(out.status).toBe("dead");
     const sqls = queryMock.mock.calls.map((c) => String(c[0]));
-    expect(sqls.some((s) => /ALTER COLUMN "score" TYPE text/.test(s))).toBe(true);
+    expect(sqls.some((s) => s.startsWith("ALTER") || s.startsWith("INSERT"))).toBe(false);
   });
 });
 
