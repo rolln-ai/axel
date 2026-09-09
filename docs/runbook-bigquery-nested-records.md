@@ -1,5 +1,10 @@
 # BigQuery nested-record rollout
 
+Before upgrading an existing installation, read [warehouse schema changes](warehouse-schema-policy.md).
+Existing tables now require an explicit `schema_evolution: "add_columns"` binding
+to accept new fields automatically. The default preserves the current schema and
+routes incompatible events to failed deliveries for review and replay.
+
 Axel's `nested_records` mode preserves webhook objects as BigQuery
 `RECORD`/`STRUCT` fields, normalizes scalar leaves to `STRING` for schema-drift
 tolerance, and maps compatible arrays to `REPEATED` fields. Ambiguous arrays

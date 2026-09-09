@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import type { SchemaEvolution } from "@axel/shared";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -14,6 +15,7 @@ import { createPostgresTable } from "../../../../lib/destination-binding-actions
 import { str } from "./helpers";
 import { useTargetPicker } from "./hooks";
 import { CreateTargetRow, ExistingTargetSelect, TargetPickerShell } from "./TargetPickerShell";
+import { SchemaEvolutionPicker } from "./SchemaEvolutionPicker";
 
 export function PostgresPicker({
   destinationId,
@@ -31,13 +33,14 @@ export function PostgresPicker({
   const initialMode = initialBinding?.mode === "jsonb_blob" ? "jsonb_blob" : "dotted_columns";
   const [mode, setMode] = useState<"jsonb_blob" | "dotted_columns">(initialMode);
   const [payloadColumn, setPayloadColumn] = useState(str(initialBinding?.payload_column, "payload"));
+  const [schemaEvolution, setSchemaEvolution] = useState<SchemaEvolution>(initialBinding?.schema_evolution === "add_columns" ? "add_columns" : "manual");
   const modeId = `pg-mode-${destinationId}`;
   const columnId = `pg-column-${destinationId}`;
 
   const binding = table
     ? mode === "jsonb_blob"
       ? { table, mode, payload_column: payloadColumn || "payload" }
-      : { table, mode }
+      : { table, mode, schema_evolution: schemaEvolution }
     : null;
 
   return (
@@ -82,7 +85,7 @@ export function PostgresPicker({
       </p>
       <p className="text-muted-foreground">
         {mode === "dotted_columns"
-          ? "Each top-level + nested key in the payload becomes its own column (quoted, dot-notation). New keys auto-add columns."
+          ? "Each top-level and nested key in the payload maps to its own column using dot notation. Existing columns must have compatible types."
           : "Each event becomes one row with the whole payload in this JSONB column."}
       </p>
       <div className="grid gap-2 sm:grid-cols-[auto_1fr]">
@@ -92,7 +95,7 @@ export function PostgresPicker({
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="dotted_columns">Dot-notation columns — recommended (auto-create columns per key)</SelectItem>
+            <SelectItem value="dotted_columns">Dot-notation columns</SelectItem>
             <SelectItem value="jsonb_blob">Single JSONB column (store whole payload as JSON)</SelectItem>
           </SelectContent>
         </Select>
@@ -109,6 +112,7 @@ export function PostgresPicker({
           </>
         ) : null}
       </div>
+      {mode === "dotted_columns" ? <SchemaEvolutionPicker id={`pg-schema-${destinationId}`} value={schemaEvolution} onChange={setSchemaEvolution} /> : null}
     </TargetPickerShell>
   );
 }

@@ -106,6 +106,50 @@ describe("bigquery connector", () => {
     vi.unstubAllGlobals();
   });
 
+  it.each([undefined, "manual", "unknown", true])("protects an existing nested schema when policy is %s", async (schema_evolution) => {
+    const payload = { data: { subscriber: { custom_fields: { Created: "synthetic" } } } };
+    insertSeq = [makeRes(200, { insertErrors: [{ index: 0, errors: [{ reason: "invalid", message: "no such field: Created" }] }] })];
+    getTableSeq = [makeRes(200, { etag: "existing-view-source", schema: { fields: [
+      { name: "data", type: "RECORD", fields: [{ name: "subscriber", type: "RECORD", fields: [
+        { name: "custom_fields", type: "RECORD", fields: [{ name: "existing", type: "STRING" }] },
+      ] }] },
+    ] } })];
+    const out = await deliver(encode(payload), destination(), {
+      eventId: "evt-drift", binding: { dataset: "webhooks", table: "active_stage", mode: "typed_records", schema_evolution },
+    });
+    expect(out.status).toBe("dead");
+    expect(out.response).toMatchObject({ code: "bigquery_schema_change_required" });
+    expect(calls.filter(c => c.method === "PATCH")).toHaveLength(0);
+    expect(calls.filter(c => c.url.endsWith("/insertAll"))).toHaveLength(1);
+    expect(lastInsertBody).toMatchObject({ ignoreUnknownValues: false, skipInvalidRows: false, rows: [{ json: payload }] });
+  });
+
+  it("does not alter a different schema after a concurrent table creator wins", async () => {
+    insertSeq = [makeRes(404, {})];
+    createTableRes = makeRes(409, {});
+    getTableSeq = [makeRes(200, { etag: "concurrent", schema: { fields: [{ name: "other", type: "STRING" }] } })];
+    const out = await deliver(encode({ extra: "value" }), destination(), {
+      binding: { table: "events", mode: "columns" },
+    });
+    expect(out.status).toBe("dead");
+    expect(calls.some(c => c.method === "PATCH")).toBe(false);
+  });
+
+  it("retries unchanged data when another writer already added the needed field", async () => {
+    insertSeq = [makeRes(200, { insertErrors: [{ errors: [{ reason: "invalid", message: "no such field: extra" }] }] }), makeRes(200, {})];
+    getTableSeq = [makeRes(200, { schema: { fields: [{ name: "extra", type: "STRING" }] } })];
+    const out = await deliver(encode({ extra: "value" }), destination(), { binding: { table: "events", mode: "columns" } });
+    expect(out.status).toBe("success");
+    expect(calls.some(c => c.method === "PATCH")).toBe(false);
+  });
+
+  it("does not attempt schema changes for transient HTTP errors mentioning fields", async () => {
+    insertSeq = [makeRes(503, { error: { message: "no such field temporarily" } })];
+    const out = await deliver(encode({ extra: "value" }), destination(), { binding: { table: "events", mode: "columns", schema_evolution: "add_columns" } });
+    expect(out.status).toBe("retry");
+    expect(calls.some(c => c.method === "PATCH" || c.method === "GET")).toBe(false);
+  });
+
   it("streams a json_column row with insertId=event_id and payload string", async () => {
     const out = await deliver(encode({ a: 1 }), destination(), {
       eventId: "evt-42",
@@ -177,7 +221,7 @@ describe("bigquery connector", () => {
     const out = await deliver(
       encode({ data: { properties: { total_taxes: 1 } } }),
       destination(),
-      { eventId: "evt-typed-add", binding: { table: "events", mode: "typed_records" } },
+      { eventId: "evt-typed-add", binding: { schema_evolution: "add_columns", table: "events", mode: "typed_records" } },
     );
 
     expect(out.status).toBe("success");
@@ -257,7 +301,7 @@ describe("bigquery connector", () => {
 
     const out = await deliver(encode({ a: 1, b: 2 }), destination(), {
       eventId: "evt-cross-dataset-patch",
-      binding: {
+      binding: { schema_evolution: "add_columns",
         dataset: "analytics",
         table: "events",
         mode: "columns",
@@ -631,7 +675,7 @@ describe("bigquery connector", () => {
         top_level_new: true,
       }),
       destination(),
-      { eventId: "evt-evolve-nested", binding: { table: "events", mode: "nested_records" } },
+      { eventId: "evt-evolve-nested", binding: { schema_evolution: "add_columns", table: "events", mode: "nested_records" } },
     );
 
     expect(out.status).toBe("success");
@@ -878,7 +922,7 @@ describe("bigquery connector", () => {
 
     const out = await deliver(encode({ a: 1 }), destination(), {
       eventId: "evt-concurrent-create",
-      binding: { table: "fresh", mode: "json_column", payload_column: "payload" },
+      binding: { schema_evolution: "add_columns", table: "fresh", mode: "json_column", payload_column: "payload" },
     });
 
     expect(out.status).toBe("success");
@@ -936,7 +980,7 @@ describe("bigquery connector", () => {
     patchSeq = [makeRes(200, {})];
     const out = await deliver(encode({ a: 1, b: 2 }), destination(), {
       eventId: "evt-evolve",
-      binding: { table: "events", mode: "columns" },
+      binding: { schema_evolution: "add_columns", table: "events", mode: "columns" },
     });
     expect(out.status).toBe("success");
     const schemaCalls = calls
@@ -986,7 +1030,7 @@ describe("bigquery connector", () => {
 
     const out = await deliver(encode({ a: 1, b: 2 }), destination(), {
       eventId: "evt-etag-race",
-      binding: { table: "events", mode: "columns" },
+      binding: { schema_evolution: "add_columns", table: "events", mode: "columns" },
     });
 
     expect(out.status).toBe("success");
@@ -1014,7 +1058,7 @@ describe("bigquery connector", () => {
 
     const out = await deliver(encode({ a: 1, b: 2 }), destination(), {
       eventId: "evt-patch-quota",
-      binding: { table: "events", mode: "columns" },
+      binding: { schema_evolution: "add_columns", table: "events", mode: "columns" },
     });
 
     expect(out.status).toBe("retry");
@@ -1051,7 +1095,7 @@ describe("bigquery connector", () => {
 
     const out = await deliver(encode({ a: 1, b: 2 }), destination(), {
       eventId: "evt-etag-winner-ready",
-      binding: { table: "events", mode: "columns" },
+      binding: { schema_evolution: "add_columns", table: "events", mode: "columns" },
     });
 
     expect(out.status).toBe("success");
@@ -1075,7 +1119,7 @@ describe("bigquery connector", () => {
 
     const pending = deliver(encode({ a: 1, b: 2 }), destination(), {
       eventId: "evt-field-still-propagating",
-      binding: { table: "events", mode: "columns" },
+      binding: { schema_evolution: "add_columns", table: "events", mode: "columns" },
     });
     await vi.advanceTimersByTimeAsync(400);
     const out = await pending;
@@ -1096,7 +1140,7 @@ describe("bigquery connector", () => {
     patchSeq = [makeRes(200, {})];
     const out = await deliver(encode({ a: 1 }), destination(), {
       eventId: "evt-schemaless",
-      binding: { table: "data-temp", mode: "json_column", payload_column: "payload" },
+      binding: { schema_evolution: "add_columns", table: "data-temp", mode: "json_column", payload_column: "payload" },
     });
     expect(out.status).toBe("success");
     expect(calls.some((c) => c.method === "PATCH")).toBe(true);

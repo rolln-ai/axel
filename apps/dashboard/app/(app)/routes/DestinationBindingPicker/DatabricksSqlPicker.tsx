@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import type { SchemaEvolution } from "@axel/shared";
 import { RefreshCw, Loader2 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -15,6 +16,7 @@ import {
 import { str } from "./helpers";
 import { useTargetList } from "./hooks";
 import { ExistingTargetSelect, TargetPickerShell } from "./TargetPickerShell";
+import { SchemaEvolutionPicker } from "./SchemaEvolutionPicker";
 
 export function DatabricksSqlPicker({
   destinationId,
@@ -33,6 +35,7 @@ export function DatabricksSqlPicker({
     initialBinding && initialBinding.mode !== "typed_columns" ? "json_column" : "typed_columns",
   );
   const [payloadColumn, setPayloadColumn] = useState(str(initialBinding?.payload_column, "payload"));
+  const [schemaEvolution, setSchemaEvolution] = useState<SchemaEvolution>(initialBinding?.schema_evolution === "add_columns" ? "add_columns" : "manual");
   const payloadColumnId = `dbx-sql-payload-${destinationId}`;
   const modeId = `dbx-sql-mode-${destinationId}`;
   const tableId = `dbx-sql-table-${destinationId}`;
@@ -41,6 +44,7 @@ export function DatabricksSqlPicker({
     ? {
         table,
         mode,
+        schema_evolution: schemaEvolution,
         ...(mode === "json_column" ? { payload_column: payloadColumn || "payload" } : {}),
       }
     : null;
@@ -121,8 +125,7 @@ export function DatabricksSqlPicker({
               description={
                 <>
                   <span className="text-emerald-600 dark:text-emerald-400">Recommended.</span> One typed column
-                  per leaf — numbers → BIGINT/DOUBLE, booleans → BOOLEAN. Axel creates the Delta table and adds
-                  columns as they appear.
+                  per leaf. Numbers use DOUBLE and booleans use BOOLEAN when Axel creates the Delta table.
                 </>
               }
             >
@@ -152,8 +155,9 @@ export function DatabricksSqlPicker({
       <p className="text-muted-foreground">
         {mode === "json_column"
           ? "Axel writes each event's JSON body into this STRING (or VARIANT) column. The table must already exist in the catalog and schema configured on this destination."
-          : "Axel flattens each event into one typed column per leaf (numbers → BIGINT/DOUBLE, booleans → BOOLEAN, strings → STRING; nested objects/arrays → STRING JSON). It creates the Delta table and adds new columns as they appear. A value whose type conflicts with an existing column dead-letters."}
+          : "Axel flattens each event into one typed column per leaf. It creates missing Delta tables. Events whose types conflict with existing columns go to failed deliveries for review and replay."}
       </p>
+      {mode === "typed_columns" ? <SchemaEvolutionPicker id={`dbx-schema-${destinationId}`} value={schemaEvolution} onChange={setSchemaEvolution} /> : null}
     </TargetPickerShell>
   );
 }

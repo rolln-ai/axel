@@ -578,8 +578,8 @@ export function createDatabricksSqlConnector(
 
       let out = await exec(insert.statement, insert.parameters);
 
-      // typed_columns: on a missing table/column the connector owns the schema —
-      // create the table or add the missing columns, then retry once. A genuine
+      // typed_columns can create missing tables. Existing columns are added
+      // only when the binding explicitly permits schema evolution. A genuine
       // type conflict (drifted value) is NOT repairable and dead-letters.
       if (
         mode === "typed_columns" &&
@@ -594,6 +594,12 @@ export function createDatabricksSqlConnector(
           const existing = existingColumnsFromDescribe(describe.dataArray);
           const missing = typedColumns.filter((c) => !existing.has(c.name.toLowerCase()));
           if (missing.length > 0) {
+            if (binding.schema_evolution !== "add_columns") {
+              return attemptOf(context, destination, "dead", {
+                code: "databricks_schema_change_required",
+                error: "Incoming fields are missing from the Delta table. The table was left unchanged. Review downstream queries, update the schema and replay, or explicitly enable add_columns on this route.",
+              }, startedAt);
+            }
             await exec(buildAlterAddColumns(tableRef, missing), []);
           }
         }
