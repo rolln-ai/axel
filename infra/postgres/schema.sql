@@ -219,6 +219,9 @@ CREATE TABLE IF NOT EXISTS sources (
   workspace_id text NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   name text NOT NULL,
   secret_token_hash text NOT NULL,
+  -- Opt-in URL credential, independent of the header token. See migration 0075.
+  url_token_hash text CONSTRAINT sources_url_token_hash_format
+    CHECK (url_token_hash IS NULL OR url_token_hash ~ '^[0-9a-f]{64}$'),
   status text NOT NULL CHECK (status IN ('active', 'disabled')),
   -- AXE-23: provider preset + encrypted signing secret. The ingest worker
   -- rejects requests that fail the provider's HMAC check before writing

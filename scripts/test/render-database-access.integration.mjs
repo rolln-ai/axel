@@ -92,7 +92,7 @@ test("Render owner provisions and verifies real service access without provider 
 
     const root = fileURLToPath(new URL("../../", import.meta.url));
     const migrations = new URL("../../infra/postgres/migrations/", import.meta.url);
-    for (const filename of readdirSync(migrations).filter((name) => name.endsWith(".sql") && !name.startsWith("0074_"))) {
+    for (const filename of readdirSync(migrations).filter((name) => name.endsWith(".sql") && name < "0074_")) {
       const sha = createHash("sha256").update(readFileSync(new URL(filename, migrations))).digest("hex");
       await owner.query("INSERT INTO schema_migrations(filename,sha256) VALUES($1,$2)", [filename, sha]);
     }

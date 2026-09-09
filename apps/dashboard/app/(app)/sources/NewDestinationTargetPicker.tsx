@@ -123,8 +123,8 @@ export function NewDestinationTargetPicker({
       </p>
       {destinationType === "postgres" ? (
         <p className="text-xs text-muted-foreground">
-          New routes use dot-notation mode: Axel creates one queryable column per payload leaf and adds new
-          columns automatically as the event shape evolves.
+          New routes use dot-notation columns. A table created here starts with metadata columns.
+          Add the event fields yourself, or explicitly allow new fields below before sending events.
         </p>
       ) : (
         <p className="text-xs text-muted-foreground">

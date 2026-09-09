@@ -13,6 +13,9 @@ inbound events per month. [Cloud pricing](https://axelapp.ai/pricing) covers
 paid usage. Self-hosting has no Axel subscription or license fee; you pay your
 infrastructure providers and maintain the installation.
 
+Webhook senders can use headers or an opt-in authenticated URL. See
+[webhook authentication](webhook-authentication.md) for setup and logging requirements.
+
 ## What can actually be free
 
 Cloudflare Queues became available on the Workers Free plan in February 2026.

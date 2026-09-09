@@ -1,5 +1,7 @@
 "use client";
 
+import { WebhookSetupDetails } from "../../_components/WebhookSetupDetails";
+
 import * as React from "react";
 import { useActionState, useEffect, useRef, useState } from "react";
 import type { SourceProvider } from "@axel/shared";
@@ -18,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ConditionalDestField } from "../destinations/ConditionalDestField";
+import { NewDestinationSchemaPolicy } from "../routes/DestinationBindingPicker/SchemaEvolutionPicker";
 import {
   FIRST_RUN_DESTINATIONS,
   FIRST_RUN_TLS_NO_VERIFY_DEFAULT,
@@ -27,7 +30,6 @@ import {
 } from "../../../lib/first-run-destinations";
 import { summarizeBackfillProgress } from "../../../lib/first-run-backfill";
 import {
-  sourceAuthenticationCopy,
   sourceUsesAxelToken,
 } from "../../../lib/source-ingest-auth";
 import { LocalTime } from "../../_components/LocalTime";
@@ -399,23 +401,7 @@ function EndpointPanel({ created }: { created: CreatedSource }) {
           </span>
         </div>
       ) : null}
-      <SecretRow label="Webhook URL — paste this into your provider" value={created.ingestUrl} />
-      <p className="text-[11px] text-muted-foreground">
-        {sourceAuthenticationCopy(created.provider)}
-      </p>
-      {usesAxelToken && created.token ? (
-        <SecretRow label="Ingest token — send only as x-axel-token" value={created.token} />
-      ) : null}
-      {usesAxelToken && !created.token ? (
-        <p className="text-[11px] text-muted-foreground">
-          The ingest token is shown only once, at creation. If you no longer have it, rotate it on
-          the{" "}
-          <Link href={`/sources/${created.id}`} className="underline hover:text-foreground">
-            source page
-          </Link>
-          .
-        </p>
-      ) : null}
+      <WebhookSetupDetails ingestUrl={created.ingestUrl} provider={created.provider} token={created.token} sourceId={created.id} />
       {created.signingSecret ? (
         <>
           <SecretRow label="Destination signing secret" value={created.signingSecret} />
@@ -748,6 +734,7 @@ function DestinationForm({
         )
       ) : null}
 
+      {["postgres", "bigquery", "databricks_sql"].includes(type) ? <NewDestinationSchemaPolicy key={type} /> : null}
       {state.error ? (
         <Alert variant="destructive">
           <AlertDescription>{state.error}</AlertDescription>

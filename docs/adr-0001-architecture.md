@@ -10,7 +10,7 @@ Axel must capture webhook bursts (30k events in <5s) and deliver to multiple des
 
 We adopt a four-tier pipeline:
 
-1. **Edge ingest** — Cloudflare Worker. Validates a custom source token from the `x-axel-token` header or a named provider's configured authentication, applies source caps/rate limits, generates `event_id`, puts the raw body in R2, sends a compact message to a sharded queue, returns 202. Source credentials in URL query parameters are rejected.
+1. **Edge ingest** — Cloudflare Worker. Validates a custom source token from the `x-axel-token` header or a named provider's configured authentication, applies source caps/rate limits, generates `event_id`, puts the raw body in R2, sends a compact message to a sharded queue, returns 202. Header tokens in URL query parameters are rejected. Custom sources can opt into a separate URL credential for senders that cannot set headers.
 2. **Router** — Render Node service. Consumes ingest queues, fetches payload from R2, evaluates filter/transform per route, fans out to per-destination queues.
 3. **Delivery workers** — Render service per destination type. Each consumes a destination queue, fetches payload, runs the connector, logs the attempt, retries on failure.
 4. **Storage split** — Postgres for config (users, sources, routes, destinations, credentials). R2 for raw payloads (immutable, 30d TTL). ClickHouse for searchable event + delivery logs (30d TTL).

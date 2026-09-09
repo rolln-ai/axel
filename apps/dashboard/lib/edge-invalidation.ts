@@ -265,6 +265,7 @@ export interface SourceDbRow {
   workspace_id: string;
   name: string;
   secret_token_hash: string;
+  url_token_hash: string | null;
   status: "active" | "disabled";
   max_body_bytes: number | null;
   max_body_depth: number | null;
@@ -289,7 +290,7 @@ export interface SourceDbRow {
 
 export async function loadSourceForEdge(sourceId: string, workspaceId: string): Promise<SourceDbRow | null> {
   const result = await db().query<SourceDbRow>(
-    `SELECT id, workspace_id, name, secret_token_hash, status,
+    `SELECT id, workspace_id, name, secret_token_hash, url_token_hash, status,
             max_body_bytes, max_body_depth, max_events_per_minute, field_selection,
             provider, signing_secret_ciphertext, signing_secret_previous_ciphertext,
             redact_paths, ordering_enabled, ordering_key_header, ordering_key_path,
@@ -336,6 +337,7 @@ export async function rowToEdgePayload(row: SourceDbRow, overrides: Partial<{ se
     workspace_id: row.workspace_id,
     name: row.name,
     secret_token: overrides.secretTokenHash ?? row.secret_token_hash,
+    ...(row.url_token_hash ? { url_token_hash: row.url_token_hash } : {}),
     status: row.status,
     ...(row.max_body_bytes !== null ? { max_body_bytes: row.max_body_bytes } : {}),
     ...(row.max_body_depth !== null ? { max_body_depth: row.max_body_depth } : {}),

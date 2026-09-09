@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import type { SchemaEvolution } from "@axel/shared";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -22,6 +23,7 @@ import {
 import { str } from "./helpers";
 import { BigQueryCompatPanel } from "./BigQueryCompat";
 import { TargetPickerShell } from "./TargetPickerShell";
+import { SchemaEvolutionPicker } from "./SchemaEvolutionPicker";
 
 export function BigQueryPicker({
   destinationId,
@@ -40,6 +42,7 @@ export function BigQueryPicker({
     bigQueryModeForBinding(initialBinding),
   );
   const [payloadColumn, setPayloadColumn] = useState(str(initialBinding?.payload_column, "payload"));
+  const [schemaEvolution, setSchemaEvolution] = useState<SchemaEvolution>(initialBinding?.schema_evolution === "add_columns" ? "add_columns" : "manual");
   const modeId = `bq-mode-${destinationId}`;
   const payloadColumnId = `bq-payload-${destinationId}`;
 
@@ -49,8 +52,8 @@ export function BigQueryPicker({
   const binding =
     ds && tbl
       ? mode === "json_column"
-        ? { dataset: ds, table: tbl, mode, payload_column: payloadColumn || "payload" }
-        : { dataset: ds, table: tbl, mode }
+        ? { dataset: ds, table: tbl, mode, schema_evolution: schemaEvolution, payload_column: payloadColumn || "payload" }
+        : { dataset: ds, table: tbl, mode, schema_evolution: schemaEvolution }
       : null;
 
   return (
@@ -84,7 +87,7 @@ export function BigQueryPicker({
               description={
                 <>
                   <span className="text-emerald-600 dark:text-emerald-400">Recommended.</span> Keeps source
-                  types — numbers → INT64/FLOAT64, booleans → BOOL, objects → RECORD. Best for a clean or
+                  types. New number fields use FLOAT64, booleans use BOOL, and objects use RECORD. Best for a clean or
                   existing typed table.
                 </>
               }
@@ -93,7 +96,7 @@ export function BigQueryPicker({
             </SelectItem>
             <SelectItem
               value="nested_records"
-              description="Every value stored as STRING in a nested RECORD shape. Most tolerant — never rejects on type drift."
+              description="Scalar values stored as STRING in a nested RECORD shape. Object and array shapes still need compatible fields."
             >
               Nested RECORD fields
             </SelectItem>
@@ -126,13 +129,14 @@ export function BigQueryPicker({
       ) : null}
       <p className="text-muted-foreground">
         {mode === "nested_records"
-          ? "Use a new/empty table or one whose existing RECORD schema is compatible. Axel maps objects to RECORD fields, normalizes scalar leaves to STRING, maps object arrays to REPEATED RECORD, and additively evolves nested keys."
+          ? "Use a new table or one whose existing RECORD schema is compatible. Axel maps objects to RECORD fields, normalizes scalar leaves to STRING, and maps object arrays to REPEATED RECORD."
           : mode === "typed_records"
-            ? "Like nested RECORD, but scalar leaves keep the source type: numbers → INT64/FLOAT64, booleans → BOOL, strings → STRING. Best for a clean, stable schema or an existing typed table. A field whose type drifts on an existing column can't be widened (BigQuery limitation) and dead-letters, so run the compatibility check below first."
+            ? "Keeps numbers, booleans, strings, and nested objects in their native shapes. New numeric fields use FLOAT64. Existing column types stay unchanged; incompatible events go to failed deliveries for review and replay. Run the compatibility check before saving."
             : mode === "columns"
-              ? "Axel flattens each JSON leaf into an underscore-joined STRING column (for example, data_subscriber_email). It creates the table when needed and adds new columns automatically."
+              ? "Axel flattens each JSON leaf into an underscore-joined STRING column (for example, data_subscriber_email). It creates the table when needed."
               : "Axel stores each event's JSON body in one STRING column. It creates the table and payload column when the table does not exist."}
       </p>
+      <SchemaEvolutionPicker id={`bq-schema-${destinationId}`} value={schemaEvolution} onChange={setSchemaEvolution} />
       {ds && tbl ? (
         <BigQueryCompatPanel
           destinationId={destinationId}
@@ -141,6 +145,7 @@ export function BigQueryPicker({
           table={tbl}
           mode={mode}
           payloadColumn={payloadColumn}
+          schemaEvolution={schemaEvolution}
         />
       ) : null}
     </TargetPickerShell>

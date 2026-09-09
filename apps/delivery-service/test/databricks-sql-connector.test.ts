@@ -191,6 +191,19 @@ describe("databricks_sql connector", () => {
     expect(create!.statement).not.toContain("BIGINT");
   });
 
+  it("leaves existing Delta schemas unchanged unless additions are explicitly enabled", async () => {
+    responder = (stmt) => stmt.startsWith("INSERT")
+      ? stmtRes("FAILED", { message: "[UNRESOLVED_COLUMN] newcol cannot be resolved" })
+      : stmtRes("SUCCEEDED", { dataArray: [["existing", "string", null]] });
+    const out = await deliver(encode({ newcol: "value" }), {
+      binding: { table: "subs", mode: "typed_columns" },
+    });
+    expect(out.status).toBe("dead");
+    expect(out.response).toMatchObject({ code: "databricks_schema_change_required" });
+    expect(calls.some(c => c.statement.startsWith("ALTER"))).toBe(false);
+    expect(inserts()).toHaveLength(1);
+  });
+
   it("typed_columns adds only the missing columns via ALTER (column drift)", async () => {
     responder = (stmt) => {
       if (stmt.startsWith("INSERT")) {
@@ -210,7 +223,7 @@ describe("databricks_sql connector", () => {
     };
     const out = await deliver(encode({ id: 42, active: true, newcol: "hi", count: 7 }), {
       eventId: "e4",
-      binding: { table: "subs", mode: "typed_columns" },
+      binding: { table: "subs", mode: "typed_columns", schema_evolution: "add_columns" },
     });
     expect(out.status).toBe("success");
     const alter = calls.find((c) => c.statement.startsWith("ALTER TABLE"));

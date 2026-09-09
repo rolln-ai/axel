@@ -17,6 +17,12 @@ export function generateSourceToken(): { plaintext: string; hash: string } {
   return { plaintext, hash: hashSourceToken(plaintext) };
 }
 
+/** Independent of header tokens so URL rotation does not interrupt other senders. */
+export function generateSourceUrlToken(): { plaintext: string; hash: string } {
+  const plaintext = `axu_${randomBytes(32).toString("base64url")}`;
+  return { plaintext, hash: hashSourceToken(plaintext) };
+}
+
 function hashSourceToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }

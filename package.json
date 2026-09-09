@@ -21,13 +21,14 @@
     "test:database": "AXEL_RUN_POSTGRES_INTEGRATION=1 node --test scripts/test/database-service-roles.integration.mjs scripts/test/render-database-access.integration.mjs",
     "test:analytics": "node --experimental-strip-types --conditions=react-server --test scripts/test/clickhouse-outcomes.integration.mjs",
     "verify": "pnpm lint && pnpm lint:sql && pnpm typecheck && pnpm test && pnpm test:database && pnpm test:analytics && pnpm visual:smoke && pnpm test:dashboard",
-    "test:dashboard": "node --experimental-strip-types scripts/dashboard-qa.mjs --test",
-    "qa:dashboard": "node --experimental-strip-types scripts/dashboard-qa.mjs"
+    "test:dashboard": "tsx scripts/dashboard-qa.mjs --test",
+    "qa:dashboard": "tsx scripts/dashboard-qa.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.0",
     "@playwright/test": "^1.51.1",
     "pg": "8.21.0",
+    "tsx": "4.22.4",
     "turbo": "^2.9.18",
     "typescript": "^6.0.3",
     "vercel": "58.4.0",
@@ -36,13 +37,13 @@
   },
   "pnpm": {
     "overrides": {
-      "hono": "^4.12.34",
+      "hono": "^4.13.5",
       "@hono/node-server": "2.0.11",
       "body-parser": "2.3.0",
       "esbuild": ">=0.28.1",
       "ws": ">=8.21.0",
       "undici": "7.29.0",
-      "js-yaml": "4.3.1",
+      "js-yaml": "4.3.2",
       "dompurify": "3.4.13",
       "@babel/core": "7.29.6",
       "ajv@8.6.3": "8.20.0",
@@ -60,10 +61,12 @@
       "nanoid@<3.3.18": "3.3.18",
       "nanoid@>=4.0.0 <5.1.16": "5.1.16",
       "postcss-selector-parser": "7.1.6",
-      "sharp": ">=0.35.0",
+      "sharp": ">=0.35.4",
       "tar": "7.5.21",
       "wrangler": "^4.101.0",
-      "@cloudflare/workers-types": "^4.20260616.1"
+      "@cloudflare/workers-types": "^4.20260616.1",
+      "baseline-browser-mapping": ">=2.11.0",
+      "@ai-sdk/provider-utils@>=4.0.0-beta.10 <4.0.33": "4.0.33"
     }
   },
   "engines": {

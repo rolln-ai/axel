@@ -9,6 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { hashPassword } from "../apps/dashboard/lib/passwords.ts";
 import { origins, qaPortBase } from "../tests/visual/origins.ts";
 import { dashboardFixture, qaPassword, qaProjects } from "../tests/dashboard/fixtures.mjs";
+import { startDashboardQaIngest } from "./test/dashboard-qa-ingest.mjs";
 import { connectDisposablePostgres } from "./test/postgres-integration-test-helpers.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -67,6 +68,7 @@ function docker(...args) {
 let container;
 let client;
 let server;
+let ingest;
 try {
   // Refuse a busy port before building; never test a neighboring worktree's server.
   const probe = createServer();
@@ -96,12 +98,31 @@ try {
       [fixture.workspaceId, fixture.userId]);
     await client.query("INSERT INTO sources (id,workspace_id,name,secret_token_hash,status) VALUES ($1,$2,'Synthetic webhook',$3,'active')",
       [fixture.sourceId, fixture.workspaceId, randomBytes(32).toString("hex")]);
+    const routeId = `${fixture.sourceId}_schema`;
+    await client.query("INSERT INTO routes (id,workspace_id,source_id,name,status) VALUES ($1,$2,$3,'Synthetic schema policy','active')",
+      [routeId, fixture.workspaceId, fixture.sourceId]);
+    for (const [type, binding] of Object.entries({
+      bigquery: { dataset: "synthetic", table: "events", mode: "typed_records" },
+      postgres: { table: "events", mode: "dotted_columns" },
+      databricks_sql: { table: "events", mode: "typed_columns" },
+    })) {
+      const destinationId = `${routeId}_${type}`;
+      await client.query("INSERT INTO destinations (id,workspace_id,name,type,config) VALUES ($1,$2,$3,$4,'{}'::jsonb)",
+        [destinationId, fixture.workspaceId, `Synthetic ${type}`, type]);
+      await client.query("INSERT INTO route_destinations (route_id,destination_id,binding) VALUES ($1,$2,$3::jsonb)",
+        [routeId, destinationId, JSON.stringify(binding)]);
+    }
   }
   await client.query("INSERT INTO workspaces (id,name,slug) VALUES ('ws_qa_foreign','Foreign workspace','foreign-workspace')");
   await client.query("INSERT INTO sources (id,workspace_id,name,secret_token_hash,status) VALUES ('src_qa_foreign','ws_qa_foreign','Foreign source',$1,'active')",
     [randomBytes(32).toString("hex")]);
   await client.end();
   client = undefined;
+
+  ingest = await startDashboardQaIngest(qaEnv.DATABASE_URL);
+  qaEnv.AXEL_INGEST_URL = ingest.origin;
+  qaEnv.INGEST_ADMIN_URL = ingest.origin;
+  qaEnv.INGEST_ADMIN_TOKEN = ingest.adminToken;
 
   server = start(process.execPath, ["node_modules/next/dist/bin/next", "start", "-H", "127.0.0.1", "-p", String(qaPortBase + 1)], dashboard);
   const serverClosed = once(server, "close");
@@ -124,6 +145,7 @@ try {
     assert.ok(interrupted || code === 0, "Dashboard QA server failed");
   }
 } finally {
+  await ingest?.close();
   if (server && server.exitCode === null && server.signalCode === null) {
     const closed = once(server, "close");
     server.kill("SIGTERM");

@@ -392,7 +392,7 @@ export async function createSourceWithPipeline(
           }
           let pipelineBinding =
             destinationMode === "new"
-              ? pipelineBindingForNewDestination(newDestinationType, newDestTarget)
+              ? pipelineBindingForNewDestination(newDestinationType, newDestTarget, formValue(formData, "new_destination_schema_evolution"))
               : existingBinding;
           const pipelineDestinationType =
             destinationMode === "new" ? newDestinationType : existingDestType;
@@ -610,7 +610,7 @@ export async function connectFirstDestination(
     // the same helper the full wizard uses so the blob shape can't drift.
     let binding: Record<string, unknown> | null = null;
     if (catalogEntry.target) {
-      binding = pipelineBindingForNewDestination(catalogEntry.type, target);
+      binding = pipelineBindingForNewDestination(catalogEntry.type, target, formValue(formData, "new_destination_schema_evolution"));
       if (binding && catalogEntry.type === "bigquery") {
         const prepared = prepareBigQueryBindingForCreate(binding);
         if ("error" in prepared) {

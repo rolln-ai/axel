@@ -77,6 +77,7 @@ interface SourceRow {
   // "signature verification" badge on the source detail page.
   provider: SourceProvider;
   signing_secret_fingerprint: string | null;
+  url_token_enabled: boolean;
   // AXE-34 — inbound IP allowlist (CIDRs); empty = accept any IP.
   inbound_ip_allowlist: string[];
   // GDPR — configured subject-key paths for per-subject erasure indexing.
@@ -139,6 +140,7 @@ export default async function SourceDetailPage({
               sources.field_selection,
               COALESCE(sources.provider, 'custom') AS provider,
               sources.signing_secret_fingerprint,
+              (sources.url_token_hash IS NOT NULL) AS url_token_enabled,
               sources.inbound_ip_allowlist,
               sources.subject_key_paths,
               sources.transient_mode,
@@ -403,6 +405,9 @@ function IngestTab({
         GitHub <code className="font-mono">push</code> event, a custom internal event, a CSV row
         wrapped as JSON — all flow through unchanged.
       </p>
+      <Link href={`/sources/${source.id}?tab=settings`} className="inline-block text-sm underline hover:text-foreground">
+        Manage header tokens and authenticated webhook URLs
+      </Link>
       <div className="mt-3">
         <SendTestEventDialog
           sourceId={source.id}
@@ -527,10 +532,12 @@ function SettingsTab({
   isWebhook: boolean;
 }) {
   return (
-    <Section title="Configuration" pill="strongly consistent edge auth" className="first:mt-0">
+    <Section title="Configuration" className="first:mt-0">
       {isWebhook ? (
         <SourceTokenPanel
+          key={source.id}
           sourceId={source.id}
+          urlTokenEnabled={source.url_token_enabled}
           ingestUrl={ingestUrl}
           canRotate={canMutate}
           provider={source.provider}

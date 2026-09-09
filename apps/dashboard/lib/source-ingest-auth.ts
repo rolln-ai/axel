@@ -36,7 +36,7 @@ export function sourceAuthHeaderExample(provider: SourceProvider): string {
 
 export function sourceAuthenticationCopy(provider: SourceProvider): string {
   if (provider === "custom") {
-    return "Custom sources require the one-time source token in the x-axel-token request header. Axel rejects source credentials in URL query parameters.";
+    return "Send the source token in the x-axel-token header. If your sender cannot set headers, generate a separate authenticated URL in the source's Settings tab.";
   }
 
   if (provider === "chargebee") {
@@ -44,4 +44,17 @@ export function sourceAuthenticationCopy(provider: SourceProvider): string {
   }
 
   return `${sourceProviderLabel(provider)} authenticates each request with its configured provider signature. Use the ingest URL as shown, without an Axel source token.`;
+}
+
+/** Only a separately generated URL token may be embedded, never a header token. */
+export function sourceAuthenticatedUrl(ingestUrl: string, urlToken: string): string {
+  if (!/^axu_[A-Za-z0-9_-]{43}$/.test(urlToken)) {
+    throw new Error("A generated URL credential is required.");
+  }
+  const url = new URL(ingestUrl);
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error("Use the clean ingest endpoint.");
+  }
+  url.searchParams.set("url_token", urlToken);
+  return url.toString();
 }

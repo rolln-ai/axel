@@ -40,6 +40,9 @@ export interface Source {
   workspace_id: string;
   name: string;
   secret_token: string;
+  /** SHA-256 hash of a separate URL credential. Missing means URL auth is disabled.
+   * Only custom sources may use it; provider/HMAC verification is never bypassed. */
+  url_token_hash?: string;
   status: "active" | "disabled";
   // Optional per-source overrides for the ingest input-shape caps. When unset,
   // the ingest worker falls back to the global defaults from its Env. Set on
@@ -275,15 +278,20 @@ export type RouteDestinationBinding =
   | ObjectStoreBinding
   | EmptyBinding;
 
+/** Existing warehouse schemas stay fixed unless the route explicitly permits additions. */
+export type SchemaEvolution = "manual" | "add_columns";
+
 export interface PostgresBinding {
   table: string;
+  /** Defaults to manual. add_columns never permits changing existing column types. */
+  schema_evolution?: SchemaEvolution;
   /**
    * `jsonb_blob`   — each event becomes one row with the entire body
    *                  in a single jsonb column (`payload_column`).
    * `dotted_columns` — flatten payload keys with dot-notation and
-   *                  auto-create columns. Nested `{user: {email: ...}}`
-   *                  becomes column `"user.email"`. New keys trigger
-   *                  `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`.
+   *                  infer columns. Nested `{user: {email: ...}}`
+   *                  becomes column `"user.email"`. New keys require a schema
+   *                  update unless schema_evolution explicitly allows additions.
    */
   mode: "jsonb_blob" | "dotted_columns";
   /** Only used for `jsonb_blob` mode. Defaults to "payload". */
@@ -297,6 +305,8 @@ export interface MongoBinding {
 
 export interface DatabricksSqlBinding {
   table: string;
+  /** Defaults to manual. Review downstream queries before enabling add_columns. */
+  schema_evolution?: SchemaEvolution;
   /**
    * `json_column` (default) — each event's JSON body is stored as a string in
    *   a single column (`payload_column`, default "payload"). No per-field
@@ -304,7 +314,7 @@ export interface DatabricksSqlBinding {
    * `typed_columns` — the event is flattened into one typed column per leaf
    *   (number → BIGINT/DOUBLE, boolean → BOOLEAN, string → STRING; nested
    *   objects/arrays → STRING JSON), preserving source types. Axel creates the
-   *   Delta table and adds new columns as they appear. A value whose type
+   *   Delta table; adding later columns requires schema_evolution: add_columns. A value whose type
    *   conflicts with an existing column dead-letters.
    */
   mode?: "json_column" | "typed_columns";
@@ -324,17 +334,24 @@ export interface BigQueryBinding {
   /** Target table id within `dataset`. */
   table: string;
   /**
-   * `nested_records` — recommended for new routes. JSON objects become
+   * Defaults to manual, including legacy bindings. Missing tables can be created,
+   * but existing schemas are never patched without add_columns. Even additive
+   * nested fields can break downstream STRUCT/UNION queries; review those first.
+   * Unknown fields are rejected for dead-letter/replay, never silently discarded.
+   */
+  schema_evolution?: SchemaEvolution;
+  /**
+   * `nested_records` — JSON objects become
    *                    recursive BigQuery RECORD fields, scalar leaves are
    *                    normalized to STRING for schema-drift tolerance, and
    *                    compatible object arrays become REPEATED RECORD fields.
    *                    Primitive arrays become REPEATED STRING fields. The
-   *                    connector creates the table when needed and evolves
-   *                    nested fields additively as new keys appear.
+   *                    connector creates the table when needed. Later nested
+   *                    additions require schema_evolution: add_columns.
    * `columns`        — legacy flattened-warehouse shape. Nested leaf paths
    *                    become underscore-joined STRING columns (for example,
-   *                    `data_subscriber_email`) and new columns are added
-   *                    automatically.
+   *                    `data_subscriber_email`). Later additions require
+   *                    schema_evolution: add_columns.
    * `json_column`    — each event becomes one row with the body stored as a
    *                    string in a single column (`payload_column`, default
    *                    "payload"). Robust: no per-field schema to maintain.
@@ -342,12 +359,12 @@ export interface BigQueryBinding {
    *                    source JSON type: number → INT64/FLOAT64, boolean →
    *                    BOOL, string → STRING (objects → RECORD, arrays →
    *                    REPEATED). Best for a clean, stable schema. Type drift
-   *                    on an existing column dead-letters the row (BigQuery
-   *                    can't widen a column's type in place), so validate with
+   *                    on an existing column dead-letters the row and requires
+   *                    a reviewed schema update, so validate with
    *                    the pre-flight compatibility check first.
    *
    * An omitted mode retains the legacy `json_column` behavior for existing
-   * bindings. New dashboard-created bindings explicitly use `nested_records`.
+   * bindings. New dashboard-created bindings explicitly use `typed_records`.
    */
   mode?: "nested_records" | "json_column" | "columns" | "typed_records";
   /** Only used for `json_column` mode. Defaults to "payload". */
