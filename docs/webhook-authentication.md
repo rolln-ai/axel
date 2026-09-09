@@ -32,8 +32,10 @@ IP restrictions, source status, billing limits, body limits, and durable
 storage/queue acknowledgement apply to both authentication methods.
 
 Axel rejects duplicate `url_token` parameters, combining a URL credential with
-`x-axel-token`, and the legacy `token` query parameter. A credential from another
-source, a revoked URL, or a header token placed in a URL cannot authorize a request.
+`x-axel-token`, and the legacy `token` query parameter by default. The only legacy
+exception is an explicit source-scoped [migration window](ingest-auth-migration.md)
+of at most 72 hours; mixing legacy and new credentials is always rejected.
+A credential from another source or a revoked URL cannot authorize a request.
 
 ## Keeping the URL private
 

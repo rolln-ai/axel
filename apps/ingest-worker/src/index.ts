@@ -11,6 +11,7 @@ import { lookupSourceFromDeliveryService } from "./source-lookup-http.js";
 import { SourceLookupUnavailableError } from "./source-lookup-error.js";
 import { logEventToClickhouse } from "./clickhouse-log.js";
 import { beginSourceAuthorizationWithAuthority, confirmSourceAuthorizationWithAuthority, sourceAuthorityAdminClient, type SourceAuthorityNamespaceLike } from "./source-authority.js";
+import { allowsLegacyQueryToken } from "./legacy-query-token.js";
 
 export { SourceAuthorityDurableObject } from "./source-authority.js";
 
@@ -58,6 +59,8 @@ export interface Env extends SentryEnv {
    * deployments must set this and front the worker with Cloudflare Access.
    */
   ADMIN_TOKEN?: string;
+  /** Operator-only, per-source migration windows (at most 72 hours). Disabled by default. */
+  LEGACY_QUERY_TOKEN_SOURCES?: string;
   /**
    * Optional ClickHouse Cloud HTTPS endpoint for analytics-row logging.
    * When set, every accepted webhook also produces an `events` row that
@@ -314,16 +317,21 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     if (!match) return json({ error: "not_found" }, 404);
 
     const sourceId = match[1]!;
-    // Header credentials must never work in URLs. Headerless senders use a
-    // separately generated, source-specific URL credential, disabled by default.
-    if (url.searchParams.has("token")) {
+    // Headerless senders use a separate URL credential. Legacy header tokens
+    // in URLs require an explicit, expiring source migration window.
+    const queryTokens = url.searchParams.getAll("token");
+    const urlTokens = url.searchParams.getAll("url_token");
+    const headerToken = request.headers.get("x-axel-token");
+    const legacyQuery = queryTokens.length === 1 && Boolean(queryTokens[0])
+      && headerToken === null && urlTokens.length === 0
+      && allowsLegacyQueryToken(env.LEGACY_QUERY_TOKEN_SOURCES, sourceId);
+    if (queryTokens.length > 0 && !legacyQuery) {
       return json({ error: "query_token_not_allowed" }, 401);
     }
-    const headerToken = request.headers.get("x-axel-token");
-    const urlTokens = url.searchParams.getAll("url_token");
     if (urlTokens.length > 1 || (urlTokens.length > 0 && headerToken !== null)) {
       return json({ error: "ambiguous_authentication" }, 401);
     }
+
 
     const authorization = await beginSourceAuthorizationWithAuthority(
       env,
@@ -334,6 +342,8 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
     if (!source) return json({ error: "unknown_source" }, 404);
     if (source.status !== "active") return json({ error: "source_disabled" }, 403);
     const provider = source.provider ?? "custom";
+    // The compatibility window cannot substitute token auth for a provider's signature.
+    if (legacyQuery && provider !== "custom") return json({ error: "query_token_not_allowed" }, 401);
     // AXE-34 — inbound IP allowlist. When set, reject any IP outside
     // the union (cheaper than running token verify on forged traffic;
     // 403 is non-billable). `cf-connecting-ip` is the canonical
@@ -348,7 +358,7 @@ async function handleFetch(request: Request, env: Env, ctx: ExecutionContext): P
       return json({ error: "url_authentication_disabled" }, 401);
     }
     if (provider === "custom") {
-      const presentedToken = urlTokens.length > 0 ? urlTokens[0] : headerToken;
+      const presentedToken = legacyQuery ? queryTokens[0] : urlTokens.length > 0 ? urlTokens[0] : headerToken;
       if (!presentedToken) return json({ error: "missing_token" }, 401);
       // The stored token is a SHA-256 hex hash. Compare hashes in constant time
       // and keep plaintext confined to this request's memory.

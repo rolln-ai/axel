@@ -262,6 +262,62 @@ describe("ingest worker", () => {
     expect(send).toHaveBeenCalledTimes(3);
   });
 
+  it("keeps a grandfathered feed authenticated, durable, and free of retained URL credentials", async () => {
+    env.LEGACY_QUERY_TOKEN_SOURCES = JSON.stringify({ src_test: {
+      starts_at: new Date(Date.now() - 60_000).toISOString(),
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    } });
+    const res = await worker.fetch(new Request("https://axel.app/in/src_test?token=secret-abc", {
+      method: "POST", body: '{"kind":"synthetic"}',
+    }), env, ctx);
+    expect(res.status).toBe(202);
+    expect((env.EVENTS_RAW as unknown as FakeR2).store.size).toBe(1);
+    const sent = Array.from({ length: 16 }, (_, i) => (env[`QUEUE_EVENTS_${i.toString().padStart(2, "0")}` as keyof Env] as unknown as FakeQueue<QueueMessage>).sent).flat();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.query).toEqual({});
+    expect(sent[0]?.headers).toEqual({});
+    expect(sent[0]?.is_test).toBe(false);
+    expect(JSON.stringify(sent)).not.toContain("secret-abc");
+  });
+
+  it.each(["wrong", "", "secret-abc&token=secret-abc"])("rejects invalid or ambiguous legacy credentials: %s", async (token) => {
+    env.LEGACY_QUERY_TOKEN_SOURCES = JSON.stringify({ src_test: {
+      starts_at: new Date(Date.now() - 60_000).toISOString(),
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    } });
+    const res = await worker.fetch(new Request(`https://axel.app/in/src_test?token=${token}`, {
+      method: "POST", body: "{}",
+    }), env, ctx);
+    expect(res.status).toBe(401);
+    expect((env.EVENTS_RAW as unknown as FakeR2).store.size).toBe(0);
+  });
+
+  it("still respects a hosted authority fence during a legacy migration window", async () => {
+    env.DEV_MODE = "false";
+    env.SOURCE_AUTHORITY = {
+      idFromName: () => ({}) as DurableObjectId,
+      get: () => ({ fetch: async () => new Response("", { status: 423 }) }),
+    } as SourceAuthorityNamespaceLike;
+    env.LEGACY_QUERY_TOKEN_SOURCES = JSON.stringify({ src_test: {
+      starts_at: new Date(Date.now() - 60_000).toISOString(),
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    } });
+    const res = await worker.fetch(new Request("https://axel.app/in/src_test?token=secret-abc", { method: "POST", body: "{}" }), env, ctx);
+    expect(res.status).toBe(503);
+    expect((env.EVENTS_RAW as unknown as FakeR2).store.size).toBe(0);
+  });
+
+  it("does not use a migration window to bypass named-provider signatures", async () => {
+    env.DEV_SOURCES = JSON.stringify({ src_test: { workspace_id: "ws_1", secret_token: tokenHash("secret-abc"), status: "active", provider: "shopify" } });
+    env.LEGACY_QUERY_TOKEN_SOURCES = JSON.stringify({ src_test: {
+      starts_at: new Date(Date.now() - 60_000).toISOString(),
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    } });
+    const res = await worker.fetch(new Request("https://axel.app/in/src_test?token=secret-abc", { method: "POST", body: "{}" }), env, ctx);
+    expect(res.status).toBe(401);
+    expect((env.EVENTS_RAW as unknown as FakeR2).store.size).toBe(0);
+  });
+
   it("rejects invalid token with 401", async () => {
     const req = new Request("https://axel.app/in/src_test", {
       method: "POST",
@@ -836,6 +892,24 @@ describe("authenticated webhook URLs", () => {
     expect((env.EVENTS_RAW as unknown as FakeR2).store.size).toBe(0);
     expect(queues(env).flatMap((q) => q.sent)).toHaveLength(0);
     expect(await res.text()).not.toContain(urlToken);
+  });
+  it.each([
+    ["legacy alone", "token=synthetic-header-token", {}, 202],
+    ["URL alone", `url_token=${urlToken}`, {}, 202],
+    ["header alone", "", withSourceToken(headerToken), 202],
+    ["legacy and URL", `token=${headerToken}&url_token=${urlToken}`, {}, 401],
+    ["legacy and header", `token=${headerToken}`, withSourceToken(headerToken), 401],
+    ["URL credential in legacy parameter", `token=${urlToken}`, {}, 401],
+  ] as const)("preserves credential boundaries during recovery: %s", async (_name, query, headers, status) => {
+    const env = makeEnv({ src_url: source });
+    env.LEGACY_QUERY_TOKEN_SOURCES = JSON.stringify({ src_url: {
+      starts_at: new Date(Date.now() - 60_000).toISOString(),
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    } });
+    const res = await worker.fetch(request(query, headers), env, ctx);
+    expect(res.status).toBe(status);
+    expect(queues(env).flatMap((q) => q.sent)).toHaveLength(status === 202 ? 1 : 0);
+    expect((env.EVENTS_RAW as unknown as FakeR2).store.size).toBe(status === 202 ? 1 : 0);
   });
   it("cannot use one source's URL credential on another source", async () => {
     const env = makeEnv({
