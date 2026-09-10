@@ -46,9 +46,20 @@ SELECT count() AS waiting_count FROM (
 WHERE coalesce(d.attempted, 0) = 0`;
 
 // A failed replay is another attempt at the same event, not additional lost data.
+// A later confirmed replay of the original supersedes its older failure rows.
+// Manual dismissal and success at another route/destination do not qualify.
 export const DEAD_LETTER_COUNTS_SQL = `
-SELECT source_id, route_id, destination_id,
-       count(DISTINCT regexp_replace(event_id, '#rpy_[A-Za-z0-9_-]+$', ''))::text AS count,
-       count(*) FILTER (WHERE errored_at >= now() - interval '7 days')::text AS recent_count
-FROM dead_letters WHERE workspace_id = $1 AND resolved_at IS NULL AND is_test = false
-GROUP BY source_id, route_id, destination_id`;
+SELECT dl.source_id, dl.route_id, dl.destination_id,
+       count(DISTINCT regexp_replace(dl.event_id, '#rpy_[A-Za-z0-9_-]+$', ''))::text AS count,
+       count(*) FILTER (WHERE dl.errored_at >= now() - interval '7 days')::text AS recent_count
+FROM dead_letters dl WHERE dl.workspace_id = $1 AND dl.resolved_at IS NULL AND dl.is_test = false
+  AND NOT EXISTS (
+    SELECT 1 FROM dead_letters delivered
+    WHERE delivered.workspace_id = dl.workspace_id
+      AND delivered.event_id = regexp_replace(dl.event_id, '#rpy_[A-Za-z0-9_-]+$', '')
+      AND delivered.route_id IS NOT DISTINCT FROM dl.route_id
+      AND delivered.destination_id IS NOT DISTINCT FROM dl.destination_id
+      AND delivered.resolved_by_replay_id IS NOT NULL
+      AND delivered.resolved_at >= dl.errored_at
+  )
+GROUP BY dl.source_id, dl.route_id, dl.destination_id`;

@@ -56,6 +56,16 @@ describe.skipIf(!integration)("incident transactions and recipient retries on Po
     const counts = (await pool.query(DEAD_LETTER_COUNTS_SQL, ['ws_a'])).rows;
     expect(counts).toHaveLength(1);
     expect(counts[0]).toMatchObject({source_id: "src_a", count: "1", recent_count: "2"});
+    // Only a confirmed replay at the same route/destination supersedes failure.
+    await pool.query(`UPDATE dead_letters SET resolved_at = now() + interval '1 second'
+      WHERE event_id = 'original' AND workspace_id = 'ws_a'`);
+    expect((await pool.query(DEAD_LETTER_COUNTS_SQL, ['ws_a'])).rows[0].count).toBe("1");
+    await pool.query(`UPDATE dead_letters SET resolved_by_replay_id = 'rpy_confirmed', destination_id = 'another_target'
+      WHERE event_id = 'original' AND workspace_id = 'ws_a'`);
+    expect((await pool.query(DEAD_LETTER_COUNTS_SQL, ['ws_a'])).rows[0].count).toBe("1");
+    await pool.query(`UPDATE dead_letters SET destination_id = NULL
+      WHERE event_id = 'original' AND workspace_id = 'ws_a'`);
+    expect((await pool.query(DEAD_LETTER_COUNTS_SQL, ['ws_a'])).rows).toEqual([]);
   });
 
   it("deduplicates concurrent scans, retries only failed recipients, and holds ambiguous sends", async () => {
