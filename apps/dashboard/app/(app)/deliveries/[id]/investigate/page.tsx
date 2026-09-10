@@ -49,7 +49,7 @@ import {
 } from "../../../../../lib/replay-jobs";
 import { ReplayJobProgressCard } from "../../../../_components/ReplayJobProgressCard";
 import { dataTypeRepairFor, type DeadLetterRepair } from "../../../../../lib/dead-letter-repair";
-import { sanitizeConnectorDiagnosticForStorage } from "@axel/shared";
+import { sanitizeConnectorDiagnosticForStorage, parseTransform as validateStoredTransform, parseFilter as validateStoredFilter } from "@axel/shared";
 
 export const dynamic = "force-dynamic";
 // Explain involves an LLM call + R2 fetches + ClickHouse + Postgres.
@@ -590,7 +590,7 @@ function RelatedFailuresCard({
             <Badge variant="destructive">{reason}</Badge>)
           </span>
         </h2>
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
           {canReplay && unresolvedCount > 0 ? (
             <>
               {!repair ? (
@@ -848,7 +848,7 @@ async function DataContractInvestigationSection({
 
   return (
     <Suspense fallback={<AiPatchSkeleton dataContractName={activeContract.map.name} />}>
-      <InvestigationBody
+      <SafeInvestigationBody
         dl={dl}
         dataContractId={activeContract.map.id}
         dataContractName={activeContract.map.name}
@@ -877,6 +877,24 @@ function NoDataContractNotice({ sourceId }: { sourceId: string }) {
       </Link>
     </section>
   );
+}
+
+async function SafeInvestigationBody(props: Parameters<typeof InvestigationBody>[0]) {
+  try {
+    // Saved contract summaries can omit executable assignments. Never run
+    // them as a transform or let an optional preview hide recovery controls.
+    return await InvestigationBody(props);
+  } catch {
+    return (
+      <section className="rounded-md border border-border bg-card p-4 text-sm">
+        <h2 className="mb-2 font-semibold">AI explanation unavailable</h2>
+        <p className="mb-3 text-muted-foreground">
+          Refresh this Data Contract before generating a patch. Payload inspection and replay controls remain available.
+        </p>
+        <Link href={`/data-contracts/${props.dataContractId}`} className="underline">Review Data Contract</Link>
+      </section>
+    );
+  }
 }
 
 // Server component: actually fires the LLM call. Streams in as the page
@@ -1051,20 +1069,9 @@ function ConfidenceBar({
 }
 
 function parseTransform(serialized: string | null): GeneratedTransform {
-  if (!serialized) return { kind: "passthrough" };
-  try {
-    const parsed = JSON.parse(serialized) as GeneratedTransform;
-    return parsed;
-  } catch {
-    return { kind: "passthrough" };
-  }
+  return serialized ? validateStoredTransform(serialized) : { kind: "passthrough" };
 }
 
 function parseFilter(serialized: string | null): GeneratedFilter | null {
-  if (!serialized) return null;
-  try {
-    return JSON.parse(serialized) as GeneratedFilter;
-  } catch {
-    return null;
-  }
+  return serialized ? validateStoredFilter(serialized) : null;
 }

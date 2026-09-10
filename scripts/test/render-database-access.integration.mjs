@@ -92,17 +92,30 @@ test("Render owner provisions and verifies real service access without provider 
 
     const root = fileURLToPath(new URL("../../", import.meta.url));
     const migrations = new URL("../../infra/postgres/migrations/", import.meta.url);
-    for (const filename of readdirSync(migrations).filter((name) => name.endsWith(".sql") && name < "0074_")) {
+    for (const filename of readdirSync(migrations).filter((name) => name.endsWith(".sql") && name < "0076_")) {
       const sha = createHash("sha256").update(readFileSync(new URL(filename, migrations))).digest("hex");
       await owner.query("INSERT INTO schema_migrations(filename,sha256) VALUES($1,$2)", [filename, sha]);
     }
+    // Exercise a real 0075 -> 0076 upgrade, not a new database whose schema
+    // snapshot already contains the future tables and grants.
+    await owner.query(`DROP TABLE alert_email_outbox, pipeline_incidents;
+      ALTER TABLE sources DROP COLUMN alert_after_minutes, DROP COLUMN flow_monitoring_enabled;
+      DROP INDEX sources_workspace_identity_idx;
+      ALTER TABLE workspaces DROP COLUMN impact_monitor_checked_at;`);
+    await assert.rejects(verifyDatabaseServiceRole(runtime.dashboard, { ...options, profile: "dashboard", expectedConnectionRole: options.registry.dashboard.loginRole }), /schema_inventory_mismatch/);
+    await verifyRenderMigration(owner, options);
+    await owner.query("ALTER TABLE users RENAME TO users_missing");
+    await assert.rejects(verifyRenderMigration(owner, options), /schema_inventory_mismatch/);
+    await owner.query("ALTER TABLE users_missing RENAME TO users");
     const migrationEnv = { PATH: process.env.PATH, HOME: process.env.HOME,
       DATABASE_URL: url("axel", "synthetic-owner"), DATABASE_ACCESS_MODE: "render",
       DATABASE_MIGRATION_ROLE: "axel", DATABASE_SERVICE_REQUIRE_FINAL_STATE: "1" };
     for (let run = 0; run < 2; run++) {
       execFileSync("bash", ["scripts/run-migrations.sh"], { cwd: root, env: migrationEnv, stdio: ["ignore", "pipe", "pipe"] });
     }
-    assert.equal((await owner.query("SELECT count(*)::integer n FROM schema_migrations WHERE filename LIKE '0074_%'")).rows[0].n, 1);
+    assert.equal((await owner.query("SELECT count(*)::integer n FROM schema_migrations WHERE filename = '0076_impact_alerts.sql'")).rows[0].n, 1);
+    await verifyDatabaseServiceRole(runtime.dashboard, { ...options, profile: "dashboard", expectedConnectionRole: options.registry.dashboard.loginRole });
+    await verifyRenderMigration(owner, options);
   } finally {
     await Promise.all(clients.map((client) => client.end().catch(() => {})));
     docker("rm", "-f", container);

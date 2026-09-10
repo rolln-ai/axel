@@ -11,5 +11,6 @@ export function dashboardFixture(project) {
     workspaceId: `ws_qa_${suffix}`,
     workspaceName: `Synthetic ${project}`,
     sourceId: `src_qa_${suffix}`,
+    investigationId: 900000 + qaProjects.indexOf(project),
   };
 }

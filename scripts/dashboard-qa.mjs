@@ -105,6 +105,16 @@ try {
         routeId: null, lastReceived: new Date(Date.now() - 7200000).toISOString(), lastDelivered: null,
         failedCount: 0, waitingCount: 0, thresholdMinutes: 30, cause: "no_traffic"}),
     ]);
+    const recoverySource = `${fixture.sourceId}_recovery`;
+    const recoveryMap = `${fixture.sourceId}_contract`;
+    const recoveryVersion = `${fixture.sourceId}_version`;
+    await client.query("INSERT INTO sources (id,workspace_id,name,secret_token_hash,status) VALUES ($1,$2,'Recovery fixture','synthetic','active')", [recoverySource, fixture.workspaceId]);
+    await client.query("INSERT INTO data_contracts (id,workspace_id,source_id,name,status) VALUES ($1,$2,$3,'Saved contract summary','active')", [recoveryMap, fixture.workspaceId, recoverySource]);
+    await client.query(`INSERT INTO data_contract_versions (id,data_contract_id,workspace_id,version_number,inferred_schema,generated_transform)
+      VALUES ($1,$2,$3,1,'{"event_types":[],"fields":{}}','{"kind":"select","assignment_count":1}')`, [recoveryVersion,recoveryMap,fixture.workspaceId]);
+    await client.query("UPDATE data_contracts SET current_version_id=$2 WHERE id=$1", [recoveryMap,recoveryVersion]);
+    await client.query(`INSERT INTO dead_letters (id,workspace_id,event_id,source_id,route_id,r2_key,reason,message,errored_at,ai_summary,ai_suggested_action,ai_summarized_at)
+      VALUES ($1,$2,'synthetic-failure',$3,'synthetic-route','events/synthetic/key','delivery_dead','bigquery_schema_mismatch',now(),'Synthetic diagnostic','Review synthetic schema',now())`, [fixture.investigationId,fixture.workspaceId,recoverySource]);
     const routeId = `${fixture.sourceId}_schema`;
     await client.query("INSERT INTO routes (id,workspace_id,source_id,name,status) VALUES ($1,$2,$3,'Synthetic schema policy','active')",
       [routeId, fixture.workspaceId, fixture.sourceId]);
