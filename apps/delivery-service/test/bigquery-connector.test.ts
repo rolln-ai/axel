@@ -1,6 +1,6 @@
 import { generateKeyPairSync } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Destination } from "@axel/shared";
+import { sanitizeDeliveryAttemptResponseForStorage, type Destination } from "@axel/shared";
 import { createBigQueryConnector, clearBigQueryTokenCache } from "../src/connectors/bigquery.ts";
 
 // A real RSA key so the connector's RS256 JWT signing actually runs.
@@ -119,6 +119,7 @@ describe("bigquery connector", () => {
     });
     expect(out.status).toBe("dead");
     expect(out.response).toMatchObject({ code: "bigquery_schema_change_required" });
+    expect(sanitizeDeliveryAttemptResponseForStorage(out.response)).toMatchObject({ error: "bigquery_schema_mismatch" });
     expect(calls.filter(c => c.method === "PATCH")).toHaveLength(0);
     expect(calls.filter(c => c.url.endsWith("/insertAll"))).toHaveLength(1);
     expect(lastInsertBody).toMatchObject({ ignoreUnknownValues: false, skipInvalidRows: false, rows: [{ json: payload }] });
@@ -751,7 +752,7 @@ describe("bigquery connector", () => {
     expect(out.status).toBe("dead");
   });
 
-  it("enriches a permanent type mismatch with the field and repair choices", async () => {
+  it("classifies a permanent type mismatch without retaining diagnostic values", async () => {
     insertSeq = [makeRes(200, {
       insertErrors: [{
         index: 0,
@@ -771,14 +772,14 @@ describe("bigquery connector", () => {
 
     expect(out.status).toBe("dead");
     expect(out.response).toMatchObject({
-      error: expect.stringMatching(/type mismatch at "amount".*FLOAT64.*INT64.*Retrying unchanged data.*rounding rule/),
+      error: "bigquery_schema_mismatch",
       schemaMismatches: [
         expect.objectContaining({ path: "amount", expected: "FLOAT64", existing: "INT64" }),
       ],
     });
   });
 
-  it("suggests a text conversion for bool-to-STRING mismatches", async () => {
+  it("classifies bool-to-STRING mismatches", async () => {
     insertSeq = [makeRes(200, {
       insertErrors: [{
         index: 0,
@@ -795,11 +796,11 @@ describe("bigquery connector", () => {
     });
 
     expect(out.response).toMatchObject({
-      error: expect.stringMatching(/"active".*BOOL.*STRING.*Text \(STRING\)/),
+      error: "bigquery_schema_mismatch",
     });
   });
 
-  it("suggests a repeated field or explicit array collapse for array-to-scalar mismatches", async () => {
+  it("classifies array-to-scalar mismatches", async () => {
     insertSeq = [makeRes(200, {
       insertErrors: [{
         index: 0,
@@ -816,7 +817,7 @@ describe("bigquery connector", () => {
     });
 
     expect(out.response).toMatchObject({
-      error: expect.stringMatching(/"tags".*REPEATED STRING.*NULLABLE STRING.*Collapse arrays to text/),
+      error: "bigquery_schema_mismatch",
       schemaMismatches: [
         expect.objectContaining({
           path: "tags",

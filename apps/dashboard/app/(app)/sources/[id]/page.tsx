@@ -15,6 +15,7 @@ import {
 import { FieldSelectionEditor } from "./FieldSelectionEditor";
 import { IpAllowlistEditor } from "./IpAllowlistEditor";
 import { SubjectKeysEditor } from "./SubjectKeysEditor";
+import { FlowMonitoringEditor } from "./FlowMonitoringEditor";
 import { LimitsEditor } from "./LimitsEditor";
 import {
   resolveIngestBaseUrl,
@@ -72,6 +73,8 @@ interface SourceRow {
   max_body_depth: number | null;
   created_at: string;
   routes_attached: number;
+  alert_after_minutes: number | null;
+  flow_monitoring_enabled: boolean;
   field_selection: string[] | null;
   // AXE-23 — provider preset + signing-secret fingerprint for the
   // "signature verification" badge on the source detail page.
@@ -134,6 +137,8 @@ export default async function SourceDetailPage({
               COALESCE(ps.type, 'webhook') AS source_kind,
               ps.config AS pull_config,
               sources.max_events_per_minute,
+              sources.alert_after_minutes,
+              sources.flow_monitoring_enabled,
               sources.max_body_bytes,
               sources.max_body_depth,
               sources.created_at::text,
@@ -544,6 +549,7 @@ function SettingsTab({
           signingSecretFingerprint={source.signing_secret_fingerprint}
         />
       ) : null}
+      <FlowMonitoringEditor sourceId={source.id} enabled={source.flow_monitoring_enabled} minutes={source.alert_after_minutes} canMutate={canMutate} />
       <div className={isWebhook ? "border-t border-border pt-5" : ""}>
         <LimitsEditor
           sourceId={source.id}

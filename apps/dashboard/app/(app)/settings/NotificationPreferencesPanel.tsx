@@ -13,7 +13,7 @@ import { Button } from "@/components/ui/button";
 export function NotificationPreferencesPanel({
   current,
 }: {
-  current: { email_digest_daily: boolean; email_immediate: boolean };
+  current: { email_schema_weekly: boolean; email_immediate: boolean };
 }) {
   const [state, action, pending] = useActionState<ActionState, FormData>(
     updateNotificationPreferencesAction,
@@ -22,20 +22,19 @@ export function NotificationPreferencesPanel({
   return (
     <form action={action} className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        Choose which emails you get. You&apos;ll always see every notification in the
-        in-app bell — these settings only control email.
+        Choose which emails you get for this workspace. Active incidents remain visible in the Inbox.
       </p>
       <PreferenceToggle
         name="email_immediate"
-        label="Immediate alerts"
-        hint="Email me as soon as something needs attention — like a new error type that starts failing deliveries. Repeats are de-duplicated, so a problem that happens 100 times is still just one email."
+        label="Data flow incidents"
+        hint="Alert me when an established source stops receiving data or delivery is blocked. One email per incident, reminders at most every six hours, and a recovery notice. Acknowledge in the Inbox to pause reminders for 24 hours."
         defaultChecked={current.email_immediate}
       />
       <PreferenceToggle
-        name="email_digest_daily"
-        label="Daily digest"
-        hint="A once-a-day summary of everything else — usage and billing notices, best-practice nudges, and anything you weren't alerted about immediately."
-        defaultChecked={current.email_digest_daily}
+        name="email_schema_weekly"
+        label="Weekly schema observations"
+        hint="Optional Monday summary of observed schema changes. Off by default. These observations do not prove that data is flowing or that destination storage is compatible."
+        defaultChecked={current.email_schema_weekly}
       />
       {state.error ? (
         <Alert variant="destructive"><AlertDescription>{state.error}</AlertDescription></Alert>

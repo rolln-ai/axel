@@ -1,9 +1,5 @@
 import { sentryClientFromEnv, withCronCheckIn } from "@axel/observability";
-import {
-  publicNotificationScanSummary,
-  runNotificationScan,
-  shouldReportNotificationScanError,
-} from "../../../../lib/notification-scan";
+import { runImpactAlertScan } from "../../../../lib/impact-alerts";
 import { isCronAuthorized } from "../../../../lib/cron-auth";
 import { captureDashboardException } from "../../../../lib/sentry-capture";
 
@@ -11,12 +7,6 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 export const dynamic = "force-dynamic";
 
-/**
- * Every-15-minutes scan that turns newly-appearing dead-letter fingerprints
- * into "new error type" notifications + a single immediate alert email per
- * error. Scheduled in apps/dashboard/vercel.json. Same dual-auth as the other
- * crons (Bearer CRON_SECRET, or x-axel-ops-token for manual triggers).
- */
 async function handle(request: Request): Promise<Response> {
   if (!isCronAuthorized(request)) {
     return Response.json({ ok: false, error: "unauthorized" }, { status: 401 });
@@ -37,32 +27,22 @@ async function handle(request: Request): Promise<Response> {
         },
       },
       async () => {
-        const s = await runNotificationScan();
-        if (s.errors.length > 0) {
-          for (const error of s.errors.slice(0, 20)) {
-            if (error.code === "transient_dependency") continue;
-            await captureDashboardException(
-              new Error("notification_scan_item_failed"),
-              {
-                level: "warning",
-                tags: {
-                  component: "notification_scan_cron",
-                  error_code: error.code,
-                },
-              },
-            );
-          }
+        const summary = await runImpactAlertScan();
+        if (summary.monitor_unavailable || summary.failed || summary.needs_review) {
+          await captureDashboardException(new Error("impact_alert_scan_incomplete"), {
+            level: "error", tags: { component: "notification_scan_cron" },
+          });
+          // A failed monitor check must fail its external heartbeat too.
+          throw new Error("impact_alert_scan_incomplete");
         }
-        return publicNotificationScanSummary(s);
+        return summary;
       },
     );
     return Response.json({ ok: true, summary });
-  } catch (err) {
-    if (shouldReportNotificationScanError(err)) {
+  } catch {
       await captureDashboardException(new Error("notification_scan_failed"), {
         tags: { component: "notification_scan_cron", phase: "job" },
       });
-    }
     return Response.json(
       { ok: false, error: "notification_scan_failed" },
       { status: 500 },

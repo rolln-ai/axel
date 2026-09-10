@@ -1,3 +1,4 @@
+import { FLOW_ACTIVITY_SQL, DELIVERY_ACTIVITY_SQL, UNATTEMPTED_SQL } from "../../apps/dashboard/lib/impact-alert-queries.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -44,6 +45,10 @@ test("delivery rollup preserves outcomes before background merges", { timeout: 1
     url.searchParams.set("default_format", "JSON");
     url.searchParams.set("max_execution_time", "15");
     url.searchParams.set("max_threads", "2");
+    url.searchParams.set("join_algorithm", "full_sorting_merge");
+    url.searchParams.set("max_memory_usage", "536870912");
+    url.searchParams.set("max_bytes_before_external_group_by", "134217728");
+    url.searchParams.set("max_bytes_before_external_sort", "134217728");
     for (const [key, value] of Object.entries(params)) url.searchParams.set(`param_${key}`, value);
     const response = await fetch(url, { method: "POST", body: sql, signal: AbortSignal.timeout(20_000) });
     const body = await response.text();
@@ -71,6 +76,30 @@ test("delivery rollup preserves outcomes before background merges", { timeout: 1
   ];
   // Separate inserts force different parts. FINAL must work before merges run.
   for (const row of rows) await query(`INSERT INTO delivery_base_latest_outcomes FORMAT JSONCompactEachRow\n${JSON.stringify(row)}`);
+  await query(schema.match(/CREATE TABLE IF NOT EXISTS events\b[\s\S]*?;/)[0]);
+  await t.test("impact monitoring uses accepted traffic, current retries and tenant-scoped missing deliveries", async () => {
+    const received = (minutes) => new Date(now - minutes * 60000).toISOString().replace("T", " ").replace("Z", "");
+    const eventRows = Array.from({length: 25}, (_, i) => ({workspace_id: "ws_monitor", source_id: "src_monitor", event_id: `event_${i}`, received_at: received(60 + i * 2)}));
+    eventRows.push({workspace_id: "ws_monitor", source_id: "src_monitor", event_id: "test", received_at: received(0), is_test: true});
+    eventRows.push({workspace_id: "ws_other", source_id: "src_monitor", event_id: "other", received_at: received(0)});
+    await query(`INSERT INTO events FORMAT JSONEachRow\n${eventRows.map(r => JSON.stringify(r)).join("\n")}`);
+    const flow = (await query(FLOW_ACTIVITY_SQL, {workspace_id: "ws_monitor"})).data;
+    assert.equal(flow.length, 1);
+    assert.equal(Number(flow[0].samples), 25);
+    assert.equal(Number(flow[0].typical_gap_seconds), 120);
+    assert.equal(Date.parse(flow[0].last_received.replace(" ", "T") + "Z"), now - 60 * 60000);
+    await query(`INSERT INTO events FORMAT JSONEachRow\n${JSON.stringify(eventRows[0])}`);
+    await query(`INSERT INTO delivery_base_latest_outcomes FORMAT JSONEachRow\n${[
+      {workspace_id: "ws_monitor", base_event_id: "event_0", route_id: "route_monitor", destination_id: "dst_monitor", latest_status: "retry", latest_response: "{}", latest_at: received(1)},
+      {workspace_id: "ws_monitor", base_event_id: "event_1", route_id: "route_monitor", destination_id: "dst_monitor", latest_status: "dead", latest_response: '{"error":"bigquery_schema_mismatch"}', latest_at: received(1)},
+      {workspace_id: "ws_monitor", base_event_id: "test", route_id: "route_monitor", destination_id: "dst_monitor", latest_status: "retry", latest_response: "{}", latest_at: received(60)},
+    ].map(r => JSON.stringify(r)).join("\n")}`);
+    const delivery = (await query(DELIVERY_ACTIVITY_SQL, {workspace_id: "ws_monitor"})).data[0];
+    assert.equal(Number(delivery.waiting_count), 1, "recent retry of an old event is still overdue; test events are excluded");
+    assert.equal(Number(delivery.schema_failures), 1);
+    const missing = (await query(UNATTEMPTED_SQL, {workspace_id: "ws_monitor", source_id: "src_monitor", route_id: "route_monitor", destination_id: "dst_monitor", route_created: received(300)})).data[0];
+    assert.equal(Number(missing.waiting_count), 23);
+  });
   const params = { workspace_id: "ws_a", start: at(-7), end: at(0), destination_id: "dst_a" };
   const candidate = latestOutcomesCTE({ source: "rollup" });
   const reference = `SELECT base_event_id, route_id, destination_id,

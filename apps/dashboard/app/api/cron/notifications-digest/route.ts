@@ -7,8 +7,8 @@ export const maxDuration = 300;
 export const dynamic = "force-dynamic";
 
 /**
- * Daily digest cron — emails workspace members a summary of Axel
- * notifications from the last 24h. Scheduled in vercel.json. Same
+ * Daily scheduler entry; sends optional schema observations only on Mondays.
+ * The seven-day window excludes billing and incident notifications. Same
  * dual-auth pattern as the other crons (Bearer CRON_SECRET or
  * x-axel-ops-token for manual triggers).
  */

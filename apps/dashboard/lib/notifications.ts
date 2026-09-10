@@ -242,8 +242,8 @@ export async function markNotificationRead(
  * Each flag gates an EMAIL lane only — in-app notifications are never suppressed.
  */
 export interface NotificationPreferences {
-  /** Daily digest email (lib/data-contracts/email-digest.ts). */
-  email_digest_daily: boolean;
+  /** Optional weekly schema digest email (lib/data-contracts/email-digest.ts). */
+  email_schema_weekly: boolean;
   /** Immediate alert emails for serious events (lib/notification-alerts.ts). */
   email_immediate: boolean;
 }
@@ -260,7 +260,7 @@ export async function getNotificationPreferences(
   );
   const prefs = result.rows[0]?.prefs ?? null;
   return {
-    email_digest_daily: prefs?.email_digest_daily !== false,
+    email_schema_weekly: prefs?.email_schema_weekly === true,
     email_immediate: prefs?.email_immediate !== false,
   };
 }

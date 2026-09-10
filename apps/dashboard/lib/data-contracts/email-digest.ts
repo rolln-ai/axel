@@ -13,23 +13,8 @@ import {
 } from "../email-layout";
 import { failedDeliveriesPath } from "../delivery-stream";
 
-/**
- * Email digest of recent Data Contract notifications. Runs from a cron
- * every 24 hours; collects each workspace's unread notifications from
- * the last day and fans an email per workspace member.
- *
- * Honors a workspace-level opt-out via the notification_preferences
- * row (workspace_id, user_id) — a `{ email_digest_daily: false }`
- * preference suppresses the digest for that user. Absence of a row
- * = opted-in by default.
- *
- * The window is bounded by notifications.created_at. Sending at most
- * once per recipient per UTC day is enforced by a claim row in
- * `digest_sends` (migration 0063) taken before the send — a retried or
- * hand-triggered cron finds the claim held and mails nobody twice.
- * Resend gets the same key as an `Idempotency-Key` header, which covers
- * the narrow case of a send whose response we never saw.
- */
+/** Optional weekly schema observations. Impact alerts use a separate durable outbox.
+ * The existing cron URL remains stable for self-hosted schedulers. */
 export interface DigestRecipient {
   user_id: string;
   email: string;
@@ -78,7 +63,7 @@ interface DigestRecipientRow {
   prefs: Record<string, unknown> | null;
 }
 
-const DIGEST_WINDOW_HOURS = 24;
+const DIGEST_WINDOW_HOURS = 168;
 
 async function listRecipientsForDigest(
   client: Queryable = db(),
@@ -138,6 +123,7 @@ async function listDigestNotifications(
         -- Exclude anything the immediate alert lane already emailed, so a new
         -- error type isn't sent twice (once as an alert, once in the digest).
         AND n.alerted_at IS NULL
+        AND n.kind IN ('data_contract_drift', 'data_contract_auto_drafted', 'data_contract_auto_extended')
         -- Anything already read in the Inbox — or reconciled away because it
         -- is no longer true, like a quota alert after an upgrade — is dropped.
         AND n.read_at IS NULL
@@ -233,9 +219,7 @@ async function pruneDigestSends(
 }
 
 function optedIn(prefs: Record<string, unknown> | null): boolean {
-  if (!prefs) return true; // default: subscribed
-  if (prefs.email_digest_daily === false) return false;
-  return true;
+  return prefs?.email_schema_weekly === true;
 }
 
 export interface DigestRenderer {
@@ -460,7 +444,7 @@ function buildDigestSections(notifications: DigestNotification[]): DigestSection
         body:
           `${failures ? `${failures} deliveries in a row failed` : "Deliveries failed repeatedly"}` +
           `${trippedAt ? ` around ${trippedAt}` : ""}` +
-          `${count > 1 ? `, and this happened ${count} times in the last 24 hours` : ""}. ` +
+          `${count > 1 ? `, and this happened ${count} times in the last seven days` : ""}. ` +
           (recovered
             ? "Deliveries have since resumed on their own; the delivery log has the failed attempts."
             : stillKnown
@@ -506,7 +490,7 @@ function buildDigestSections(notifications: DigestNotification[]): DigestSection
     {
       key: "watching",
       heading: "What Axel spotted",
-      intro: "Found while watching your schemas. Nothing here needs doing — open it if it's useful.",
+      intro: "Observed in sampled events. These findings do not confirm current data flow or destination compatibility.",
     },
     {
       key: "automatic",
@@ -532,12 +516,12 @@ const defaultRenderer: DigestRenderer = ({ workspaceName, notifications }) => {
   const attentionCount = sections.find((section) => section.key === "attention")?.items.length ?? 0;
   const subject = attentionCount > 0
     ? `${workspaceName} — ${attentionCount} item${attentionCount === 1 ? " needs" : "s need"} your attention`
-    : `${workspaceName} — your Axel daily update`;
+    : `${workspaceName} — your weekly schema observations`;
   const app = appUrl();
   const settingsUrl = `${app}/settings?tab=notifications`;
 
   const textLines = [
-    `${workspaceName} — daily update`,
+    `${workspaceName} — weekly schema observations`,
     "",
   ];
   const htmlSections: string[] = [];
@@ -574,14 +558,14 @@ const defaultRenderer: DigestRenderer = ({ workspaceName, notifications }) => {
 
   const preheader = attentionCount > 0
     ? `${attentionCount} item${attentionCount === 1 ? " needs" : "s need"} your attention; the rest are grouped below.`
-    : `${count} thing${count === 1 ? "" : "s"} Axel spotted in the last 24 hours. Nothing needs doing.`;
+    : `${count} thing${count === 1 ? "" : "s"} Axel spotted in the last seven days. Check the Inbox for current data flow incidents.`;
 
   const html = renderBrandedEmail({
     preheader,
     contentHtml:
-      emailHeading(`${workspaceName} — daily update`) +
+      emailHeading(`${workspaceName} — weekly schema observations`) +
       htmlSections.join(""),
-    footerNote: `You're receiving the Axel daily digest for <strong>${escapeHtml(workspaceName)}</strong>. ${emailLink(settingsUrl, "Manage notification settings")}.`,
+    footerNote: `You're receiving the Axel weekly schema digest for <strong>${escapeHtml(workspaceName)}</strong>. ${emailLink(settingsUrl, "Manage notification settings")}.`,
   });
 
   textLines.push(emailTextSignature(`Manage notification settings: ${settingsUrl}`));
@@ -595,6 +579,7 @@ function severityColor(sev: DigestNotification["severity"]): string {
 }
 
 export interface DigestDeps {
+  now?: Date;
   listRecipients?: typeof listRecipientsForDigest;
   listNotifications?: typeof listDigestNotifications;
   send?: (
@@ -628,6 +613,9 @@ export async function runDigestJob(deps: DigestDeps = {}): Promise<DigestSummary
     errors: [],
     duration_ms: 0,
   };
+
+  // Manual retries are allowed on Monday. The existing claim prevents duplicates.
+  if ((deps.now ?? new Date()).getUTCDay() !== 1) return summary;
 
   for (const r of recipients) {
     summary.recipients_scanned += 1;

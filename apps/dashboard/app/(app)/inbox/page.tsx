@@ -6,6 +6,7 @@ import { ReplayJobProgress } from "../../_components/ReplayJobProgress";
 import { loadInboxGroups } from "../../../lib/inbox";
 import { requireSession } from "../../../lib/session";
 import { BillingAlerts } from "./BillingAlerts";
+import { PipelineIncidents } from "./PipelineIncidents";
 import { InboxClient } from "./InboxClient";
 
 export const dynamic = "force-dynamic";
@@ -57,7 +58,7 @@ export default async function InboxPage({
       <PageHeader
         eyebrow="Workspace"
         title="Inbox"
-        description="Dead letters grouped by fingerprint. Triage with j/k, retry with r, mute with m. Linear-style."
+        description="Review data flow incidents and recover failed deliveries."
         actions={
           <Link
             href="/deliveries"
@@ -73,6 +74,7 @@ export default async function InboxPage({
           the "Replay all N unresolved" job here too (their "message in my
           inbox" expectation). Renders nothing when no job is active. */}
       <ReplayJobProgress workspaceId={workspaceId} />
+      <PipelineIncidents workspaceId={workspaceId} canMutate={session.activeWorkspace.role === "owner" || session.activeWorkspace.role === "admin"} />
 
       {/* Unread billing alerts (quota / payment / suspension) — the bell
           is gone, so billing surfaces here alongside dead letters. */}
@@ -156,5 +158,5 @@ function emptyBody({
   }
   return mutedCount > 0
     ? `${mutedCount} fingerprint${mutedCount === 1 ? " is" : "s are"} currently muted. ${mutedCount === 1 ? "It" : "They"} won't appear here until the mute expires.`
-    : "Every event Axel received has been delivered (or replayed and delivered). High-five.";
+    : "No unresolved failures are recorded here. Check data flow incidents above for sources that stopped sending.";
 }

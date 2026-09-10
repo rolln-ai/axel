@@ -83,6 +83,8 @@ export function sanitizeConnectorDiagnosticForStorage(
 }
 
 const FIXED_DIAGNOSTIC_CODES = new Set([
+  "bigquery_schema_mismatch",
+  "bigquery_row_rejected",
   "authorization_failed",
   "circuit_breaker_open",
   "connection_failed",

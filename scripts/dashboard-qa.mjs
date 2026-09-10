@@ -98,6 +98,13 @@ try {
       [fixture.workspaceId, fixture.userId]);
     await client.query("INSERT INTO sources (id,workspace_id,name,secret_token_hash,status) VALUES ($1,$2,'Synthetic webhook',$3,'active')",
       [fixture.sourceId, fixture.workspaceId, randomBytes(32).toString("hex")]);
+    await client.query(`INSERT INTO pipeline_incidents (id, workspace_id, source_id, incident_key, kind, snapshot)
+      VALUES ($1,$2,$3,$4,'source_silent',$5::jsonb)`, [
+      `inc_${fixture.sourceId}`, fixture.workspaceId, fixture.sourceId, `source:${fixture.sourceId}`,
+      JSON.stringify({sourceId: fixture.sourceId, sourceName: "Synthetic webhook", destinationId: null, destinationName: null,
+        routeId: null, lastReceived: new Date(Date.now() - 7200000).toISOString(), lastDelivered: null,
+        failedCount: 0, waitingCount: 0, thresholdMinutes: 30, cause: "no_traffic"}),
+    ]);
     const routeId = `${fixture.sourceId}_schema`;
     await client.query("INSERT INTO routes (id,workspace_id,source_id,name,status) VALUES ($1,$2,$3,'Synthetic schema policy','active')",
       [routeId, fixture.workspaceId, fixture.sourceId]);

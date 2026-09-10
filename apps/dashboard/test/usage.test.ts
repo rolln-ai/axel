@@ -148,11 +148,12 @@ describe("usage", () => {
     process.env.CLICKHOUSE_QUERY_MAX_RESULT_ROWS = "25";
     globalThis.__axelClickhouseFetch = vi.fn(async () => new Response(JSON.stringify({ data: [] }), { status: 200 }));
 
-    await clickhouse({ unbounded: true }).query("SELECT workspace_id, count() FROM events GROUP BY workspace_id");
+    await clickhouse({ unbounded: true, mergeJoins: true }).query("SELECT workspace_id, count() FROM events GROUP BY workspace_id");
 
     const url = new URL(String(vi.mocked(globalThis.__axelClickhouseFetch).mock.calls[0]?.[0]));
     // The billing rollup GROUP BYs every active workspace; result_overflow_mode=break
     // would silently drop workspaces past the cap → never metered, billed, or capped.
+    expect(url.searchParams.get("join_algorithm")).toBe("full_sorting_merge");
     expect(url.searchParams.has("max_result_rows")).toBe(false);
     expect(url.searchParams.has("result_overflow_mode")).toBe(false);
     // The unrelated safety settings are still applied.
