@@ -131,6 +131,17 @@ test("sign-in, workspace changes, source isolation, and sign-out", async ({ page
   await expect(page.getByRole("checkbox", {name: /^Data flow incidents/})).toBeChecked();
   await expect(page.getByRole("checkbox", {name: /^Weekly schema observations/})).not.toBeChecked();
 
+  await page.goto(`/deliveries/${fixture.investigationId}/investigate`);
+  await expect(page.getByRole("heading", {name: "Investigate failure", exact: true})).toBeVisible();
+  await expect(page.getByRole("heading", {name: "AI explanation unavailable", exact: true})).toBeVisible();
+  await expect(page.getByRole("button", {name: "Reveal payload", exact: true})).toBeVisible();
+  await expect(page.getByRole("button", {name: "Replay 1 unresolved", exact: true})).toBeVisible();
+  const recoveryWidths = await page.evaluate(() => ({scroll: document.documentElement.scrollWidth, viewport: innerWidth}));
+  expect(recoveryWidths.scroll).toBeLessThanOrEqual(recoveryWidths.viewport + 2);
+  const recoveryScreenshot = testInfo.outputPath("investigation-fallback.png");
+  await page.screenshot({path: recoveryScreenshot, fullPage: true});
+  await testInfo.attach("investigation-fallback", {path: recoveryScreenshot, contentType: "image/png"});
+
   await page.goto("/sources/src_qa_foreign");
   await expect(page.getByRole("heading", { name: "Not found", exact: true })).toBeVisible();
   await expect(page.getByText("Foreign source", { exact: true })).toHaveCount(0);

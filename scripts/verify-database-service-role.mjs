@@ -31,6 +31,7 @@ const TABLE_PRIVILEGES = [
   "REFERENCES",
   "TRIGGER",
 ];
+const IMPACT_TABLES = new Set(["pipeline_incidents", "alert_email_outbox"]);
 const SEQUENCE_PRIVILEGES = ["USAGE", "SELECT", "UPDATE"];
 const LEGACY_RUNTIME_PROFILE = Object.freeze({
   tables: Object.freeze(Object.fromEntries(
@@ -179,6 +180,11 @@ export function validateDatabaseServiceRoleOptions(rawOptions) {
     throw fixedError("database_service_legacy_role_collision");
   }
   const requireIdentity = rawOptions.requireIdentity !== false;
+  const pendingTables = rawOptions.pendingTables ?? [];
+  if (!Array.isArray(pendingTables) || pendingTables.some(table => !IMPACT_TABLES.has(table))
+    || (pendingTables.length > 0 && (requireIdentity || rawOptions.managedOwnerLogin !== true))) {
+    throw fixedError("database_service_pending_tables_invalid");
+  }
   const expectedConnectionRole = rawOptions.expectedConnectionRole === undefined
     ? registry[profile].loginRole
     : roleName(rawOptions.expectedConnectionRole, "database_service_connection_role_invalid");
@@ -207,6 +213,7 @@ export function validateDatabaseServiceRoleOptions(rawOptions) {
     requireIdentity,
     expectedConnectionRole,
     managedOwnerLogin: rawOptions.managedOwnerLogin === true,
+    pendingTables,
   };
 }
 
@@ -281,7 +288,7 @@ async function inspectRelations(client, options) {
     relations.rows.filter((row) => row.relkind === "S").map((row) => row.relname),
   );
   if (
-    !(options.managedOwnerLogin ? APPLICATION_TABLES.every((table) => tables.has(table)) : sameSet(tables, new Set(APPLICATION_TABLES)))
+    !(options.managedOwnerLogin ? APPLICATION_TABLES.every((table) => tables.has(table) || options.pendingTables.includes(table)) : sameSet(tables, new Set(APPLICATION_TABLES)))
     || !(options.managedOwnerLogin ? APPLICATION_SEQUENCES.every((sequence) => sequences.has(sequence)) : sameSet(sequences, new Set(APPLICATION_SEQUENCES)))
     || !relations.rows.some((row) => row.relname === "schema_migrations" && row.relkind === "r")
   ) {
@@ -802,7 +809,7 @@ async function inspectRawAclInventory(client, options) {
   for (const [capabilityRole, profileName] of capabilityProfiles) {
     const profile = databaseServiceAccessProfile(profileName);
     const expected = new Set([
-      ...[...expectedPrivilegeSet(profile.tables)].map((entry) => `table|${entry}`),
+      ...[...expectedPrivilegeSet(profile.tables)].filter(entry => !options.pendingTables.includes(entry.split("|")[0])).map((entry) => `table|${entry}`),
       ...[...expectedPrivilegeSet(profile.sequences)].map((entry) => `sequence|${entry}`),
     ]);
     if (!sameSet(actualByCapability.get(capabilityRole) ?? new Set(), expected)) {
@@ -812,6 +819,7 @@ async function inspectRawAclInventory(client, options) {
   const expectedLegacyAcl = legacyPresent && !options.requireFinalState
     ? new Set([
       ...[...expectedPrivilegeSet(LEGACY_RUNTIME_PROFILE.tables)]
+        .filter(entry => !options.pendingTables.includes(entry.split("|")[0]))
         .map((entry) => `table|${entry}`),
       ...[...expectedPrivilegeSet(LEGACY_RUNTIME_PROFILE.sequences)]
         .map((entry) => `sequence|${entry}`),

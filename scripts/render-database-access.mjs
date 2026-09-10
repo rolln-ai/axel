@@ -56,7 +56,12 @@ export async function prepareRenderDatabase(client, options, verifyPassword) {
 
 export async function verifyRenderMigration(client, options) {
   await requireRenderOwner(client, options);
-  await verifyDatabaseServiceRole(client, { ...options, requireIdentity: false });
+  // Only absent tables introduced by an unapplied, reviewed migration may be
+  // absent during owner preflight. Runtime verification remains strict.
+  const pending = await client.query(`SELECT name FROM unnest(ARRAY['pipeline_incidents','alert_email_outbox']) name
+    WHERE to_regclass('public.' || name) IS NULL
+      AND NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE filename = '0076_impact_alerts.sql')`);
+  await verifyDatabaseServiceRole(client, { ...options, requireIdentity: false, pendingTables: pending.rows.map(row => row.name) });
 }
 
 async function main() {
