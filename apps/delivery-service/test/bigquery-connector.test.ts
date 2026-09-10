@@ -1,6 +1,6 @@
 import { generateKeyPairSync } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Destination } from "@axel/shared";
+import { sanitizeDeliveryAttemptResponseForStorage, type Destination } from "@axel/shared";
 import { createBigQueryConnector, clearBigQueryTokenCache } from "../src/connectors/bigquery.ts";
 
 // A real RSA key so the connector's RS256 JWT signing actually runs.
@@ -119,6 +119,7 @@ describe("bigquery connector", () => {
     });
     expect(out.status).toBe("dead");
     expect(out.response).toMatchObject({ code: "bigquery_schema_change_required" });
+    expect(sanitizeDeliveryAttemptResponseForStorage(out.response)).toMatchObject({ error: "bigquery_schema_mismatch" });
     expect(calls.filter(c => c.method === "PATCH")).toHaveLength(0);
     expect(calls.filter(c => c.url.endsWith("/insertAll"))).toHaveLength(1);
     expect(lastInsertBody).toMatchObject({ ignoreUnknownValues: false, skipInvalidRows: false, rows: [{ json: payload }] });

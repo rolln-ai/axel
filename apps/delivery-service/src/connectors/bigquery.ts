@@ -1180,7 +1180,7 @@ export function createBigQueryConnector(): Connector<BigQueryConfig> {
           return attemptOf(context, destination, "dead", {
             status: res.status,
             code: "bigquery_schema_change_required",
-            error: "Incoming fields are missing from the BigQuery table. The table was left unchanged. Review downstream views, update the schema and replay, or explicitly enable add_columns on this route. No fields were discarded.",
+            error: "bigquery_schema_mismatch",
           }, startedAt);
         }
         if (repairOutcome === "retry") {
