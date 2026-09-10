@@ -1846,3 +1846,23 @@ CREATE INDEX IF NOT EXISTS alert_email_outbox_pending_idx
   ON alert_email_outbox(next_attempt_at) WHERE state IN ('pending','sending');
 
 ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS impact_monitor_checked_at timestamptz;
+
+-- Upgrade existing installations without assuming capability-role names.
+-- Only the dashboard profile can insert AND update notification preferences.
+-- Fresh installations receive the same privileges from the service profiles.
+DO $impact_grants$
+DECLARE dashboard_grantee record;
+BEGIN
+  FOR dashboard_grantee IN
+    SELECT r.rolname FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    CROSS JOIN LATERAL aclexplode(c.relacl) a
+    JOIN pg_roles r ON r.oid = a.grantee
+    WHERE n.nspname = 'public' AND c.relname = 'notification_preferences'
+      AND a.grantee <> c.relowner AND a.privilege_type IN ('INSERT', 'UPDATE')
+    GROUP BY r.rolname HAVING count(DISTINCT a.privilege_type) = 2
+  LOOP
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.pipeline_incidents, public.alert_email_outbox TO %I', dashboard_grantee.rolname);
+  END LOOP;
+END
+$impact_grants$;

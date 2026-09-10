@@ -20,6 +20,15 @@ describe.skipIf(!integration)("incident transactions and recipient retries on Po
       try { await pool.query("SELECT 1"); break; } catch { if (i > 80) throw new Error("disposable database unavailable"); await new Promise(r => setTimeout(r, 250)); }
     }
     await pool.query(readFileSync(new URL("../../../infra/postgres/schema.sql", import.meta.url), "utf8"));
+    await pool.query(`CREATE ROLE synthetic_dashboard; CREATE ROLE synthetic_reader;
+      GRANT SELECT, INSERT, UPDATE ON notification_preferences TO synthetic_dashboard;
+      GRANT SELECT ON notification_preferences TO synthetic_reader;`);
+    await pool.query(readFileSync(new URL("../../../infra/postgres/migrations/0076_impact_alerts.sql", import.meta.url), "utf8"));
+    for (const table of ["pipeline_incidents", "alert_email_outbox"]) {
+      const permissions = (await pool.query(`SELECT has_table_privilege('synthetic_dashboard', $1, 'SELECT,INSERT,UPDATE,DELETE') AS dashboard,
+        has_table_privilege('synthetic_reader', $1, 'SELECT') AS reader`, [table])).rows[0];
+      expect(permissions).toEqual({dashboard: true, reader: false});
+    }
     await pool.query(`INSERT INTO workspaces (id, name) VALUES ('ws_a','Synthetic A'), ('ws_b','Synthetic B');
       INSERT INTO users (id,email,name,password_hash) VALUES ('u_a','a@example.invalid','A','synthetic'), ('u_b','b@example.invalid','B','synthetic');
       INSERT INTO workspace_members (workspace_id,user_id,role) VALUES ('ws_a','u_a','owner'),('ws_a','u_b','admin');
