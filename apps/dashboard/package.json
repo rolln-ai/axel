@@ -32,7 +32,7 @@
     "@sentry/nextjs": "^10.64.0",
     "@scalar/api-reference-react": "^0.9.46",
     "@tailwindcss/postcss": "^4.3.0",
-    "@xyflow/react": "^12.11.0",
+    "@xyflow/react": "^12.11.6",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
