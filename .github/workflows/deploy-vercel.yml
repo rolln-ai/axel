@@ -93,6 +93,14 @@ jobs:
           DATABASE_VERIFY_CAPABILITY_ROLE: ${{ vars.DATABASE_VERIFY_CAPABILITY_ROLE }}
           DATABASE_MIGRATION_ROLE_REQUIRED: "1"
 
+      - name: Grant dashboard access to incident tables
+        if: ${{ inputs.application != 'marketing' }}
+        run: node scripts/psql-safe.mjs -v ON_ERROR_STOP=1 -v owner_role="$DATABASE_MIGRATION_ROLE" -f scripts/sync-impact-alert-access.sql
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_MIGRATION_URL }}
+          DATABASE_MIGRATION_ROLE: ${{ vars.DATABASE_MIGRATION_ROLE }}
+          CONTROL_PLANE_DB_SSL_VERIFY: ${{ vars.CONTROL_PLANE_DB_SSL_VERIFY }}
+
       - name: Stage dashboard at the reviewed commit
         if: ${{ inputs.application != 'marketing' }}
         id: dashboard

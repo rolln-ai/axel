@@ -45,6 +45,10 @@ test("delivery rollup preserves outcomes before background merges", { timeout: 1
     url.searchParams.set("default_format", "JSON");
     url.searchParams.set("max_execution_time", "15");
     url.searchParams.set("max_threads", "2");
+    url.searchParams.set("join_algorithm", "full_sorting_merge");
+    url.searchParams.set("max_memory_usage", "536870912");
+    url.searchParams.set("max_bytes_before_external_group_by", "134217728");
+    url.searchParams.set("max_bytes_before_external_sort", "134217728");
     for (const [key, value] of Object.entries(params)) url.searchParams.set(`param_${key}`, value);
     const response = await fetch(url, { method: "POST", body: sql, signal: AbortSignal.timeout(20_000) });
     const body = await response.text();
@@ -84,6 +88,7 @@ test("delivery rollup preserves outcomes before background merges", { timeout: 1
     assert.equal(Number(flow[0].samples), 25);
     assert.equal(Number(flow[0].typical_gap_seconds), 120);
     assert.equal(Date.parse(flow[0].last_received.replace(" ", "T") + "Z"), now - 60 * 60000);
+    await query(`INSERT INTO events FORMAT JSONEachRow\n${JSON.stringify(eventRows[0])}`);
     await query(`INSERT INTO delivery_base_latest_outcomes FORMAT JSONEachRow\n${[
       {workspace_id: "ws_monitor", base_event_id: "event_0", route_id: "route_monitor", destination_id: "dst_monitor", latest_status: "retry", latest_response: "{}", latest_at: received(1)},
       {workspace_id: "ws_monitor", base_event_id: "event_1", route_id: "route_monitor", destination_id: "dst_monitor", latest_status: "dead", latest_response: '{"error":"bigquery_schema_mismatch"}', latest_at: received(1)},

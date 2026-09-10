@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import pg from "pg";
 import { drainImpactOutbox, recordImpactObservations } from "../lib/impact-alerts";
 import { sourceSilenceObservation, type ImpactObservation } from "../lib/impact-alert-policy";
+import { DEAD_LETTER_COUNTS_SQL } from "../lib/impact-alert-queries";
 import type { SendArgs } from "../lib/email";
 
 // Always synthetic, loopback-only. No production environment is consumed.
@@ -23,7 +24,9 @@ describe.skipIf(!integration)("incident transactions and recipient retries on Po
     await pool.query(`CREATE ROLE synthetic_dashboard; CREATE ROLE synthetic_reader;
       GRANT SELECT, INSERT, UPDATE ON notification_preferences TO synthetic_dashboard;
       GRANT SELECT ON notification_preferences TO synthetic_reader;`);
-    await pool.query(readFileSync(new URL("../../../infra/postgres/migrations/0076_impact_alerts.sql", import.meta.url), "utf8"));
+    execFileSync("docker", ["exec", "-i", container, "psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-v", "owner_role=postgres"], {
+      input: readFileSync(new URL("../../../scripts/sync-impact-alert-access.sql", import.meta.url), "utf8"), encoding: "utf8",
+    });
     for (const table of ["pipeline_incidents", "alert_email_outbox"]) {
       const permissions = (await pool.query(`SELECT has_table_privilege('synthetic_dashboard', $1, 'SELECT,INSERT,UPDATE,DELETE') AS dashboard,
         has_table_privilege('synthetic_reader', $1, 'SELECT') AS reader`, [table])).rows[0];
@@ -41,6 +44,19 @@ describe.skipIf(!integration)("incident transactions and recipient retries on Po
     try { await c.query("BEGIN"); const result = await recordImpactObservations(c, "ws_a", o, date); await c.query("COMMIT"); return result; }
     catch (err) { await c.query("ROLLBACK"); throw err; } finally { c.release(); }
   };
+
+  it("counts failed replays once and excludes other workspaces and resolved events", async () => {
+    await pool.query(`INSERT INTO dead_letters (workspace_id,event_id,source_id,route_id,r2_key,reason,message,is_test,errored_at,resolved_at)
+      SELECT workspace_id,event_id,'src_a','route_a','synthetic/key','delivery_dead','synthetic',is_test,now(),resolved_at
+      FROM (VALUES ('ws_a','original',false,NULL::timestamptz),
+             ('ws_a','original#rpy_retry-a',false,NULL),
+             ('ws_a','test',true,NULL),
+             ('ws_a','resolved',false,now()),
+             ('ws_b','other',false,NULL)) AS v(workspace_id,event_id,is_test,resolved_at)`);
+    const counts = (await pool.query(DEAD_LETTER_COUNTS_SQL, ['ws_a'])).rows;
+    expect(counts).toHaveLength(1);
+    expect(counts[0]).toMatchObject({source_id: "src_a", count: "1", recent_count: "2"});
+  });
 
   it("deduplicates concurrent scans, retries only failed recipients, and holds ambiguous sends", async () => {
     await Promise.all([record([observation()]), record([observation()])]);

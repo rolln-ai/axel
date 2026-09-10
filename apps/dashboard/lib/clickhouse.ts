@@ -58,6 +58,8 @@ export function clickhouse(options?: {
   timeoutMs?: number;
   /** Retry client-side timeout aborts. Keep disabled for latency-sensitive UI reads. */
   retryTimeouts?: boolean;
+  /** Spill monitoring joins to disk instead of building an unbounded hash table. */
+  mergeJoins?: boolean;
 }): ClickhouseQueryable {
   const baseUrl = process.env.CLICKHOUSE_URL;
   if (!baseUrl) {
@@ -95,6 +97,7 @@ export function clickhouse(options?: {
       if (Number.isFinite(maxThreads) && maxThreads > 0) {
         url.searchParams.set("max_threads", String(maxThreads));
       }
+      if (options?.mergeJoins) url.searchParams.set("join_algorithm", "full_sorting_merge");
       if (!options?.unbounded && Number.isFinite(maxResultRows) && maxResultRows > 0) {
         url.searchParams.set("max_result_rows", String(maxResultRows));
         url.searchParams.set("result_overflow_mode", "break");

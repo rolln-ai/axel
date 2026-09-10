@@ -1,4 +1,4 @@
-// Bounded, payload-free monitoring queries. Tested against disposable ClickHouse.
+// Payload-free monitoring queries. Tested against disposable databases.
 export const FLOW_ACTIVITY_SQL = `
 SELECT source_id, toString(max(received_at)) AS last_received, count() AS samples,
        quantileExactIf(0.95)(gap_seconds, gap_seconds > 0) AS typical_gap_seconds
@@ -13,9 +13,10 @@ FROM (
     ORDER BY received_at DESC LIMIT 2000 BY source_id
   )
 )
-GROUP BY source_id
-SETTINGS max_result_rows = 10000, result_overflow_mode = 'throw'`;
+GROUP BY source_id`;
 
+// Duplicate analytics inserts retain the immutable event receipt time. ANY
+// prevents those copies from multiplying outcomes without a large GROUP BY.
 export const DELIVERY_ACTIVITY_SQL = `
 SELECT route_id, destination_id,
   toString(maxIf(latest_at, latest_status = 'success' OR JSONExtractString(latest_response, 'error') = 'already_delivered')) AS last_delivered,
@@ -24,11 +25,10 @@ SELECT route_id, destination_id,
     ('bigquery_schema_mismatch', 'bigquery_row_rejected')) AS schema_failures,
   countIf(latest_status = 'dead' AND JSONExtractInt(latest_response, 'http_status') IN (401, 403)) AS auth_failures
 FROM (SELECT * FROM delivery_base_latest_outcomes FINAL WHERE workspace_id = {workspace_id:String}) outcomes
-INNER JOIN (SELECT event_id, min(received_at) AS received_at FROM events
-  WHERE workspace_id = {workspace_id:String} AND is_test = false GROUP BY event_id) accepted
+INNER ANY JOIN (SELECT event_id, received_at FROM events
+  WHERE workspace_id = {workspace_id:String} AND is_test = false) accepted
   ON outcomes.base_event_id = accepted.event_id
-GROUP BY route_id, destination_id
-SETTINGS max_result_rows = 10000, result_overflow_mode = 'throw'`;
+GROUP BY route_id, destination_id`;
 
 // Only unconditional declarative routes qualify. Filtered/transformed routes
 // may intentionally drop events, so their health uses actual failures/retries.
@@ -38,8 +38,17 @@ SELECT count() AS waiting_count FROM (
   WHERE workspace_id = {workspace_id:String} AND source_id = {source_id:String}
     AND is_test = false AND received_at >= parseDateTimeBestEffort({route_created:String})
     AND received_at >= now() - INTERVAL 7 DAY AND received_at < now() - INTERVAL 30 MINUTE
-) e LEFT ANTI JOIN (
-  SELECT base_event_id FROM delivery_base_latest_outcomes FINAL
+) e LEFT ANY JOIN (
+  SELECT base_event_id, toUInt8(1) AS attempted FROM delivery_base_latest_outcomes FINAL
   WHERE workspace_id = {workspace_id:String} AND route_id = {route_id:String}
     AND destination_id = {destination_id:String}
-) d ON e.event_id = d.base_event_id`;
+) d ON e.event_id = d.base_event_id
+WHERE coalesce(d.attempted, 0) = 0`;
+
+// A failed replay is another attempt at the same event, not additional lost data.
+export const DEAD_LETTER_COUNTS_SQL = `
+SELECT source_id, route_id, destination_id,
+       count(DISTINCT regexp_replace(event_id, '#rpy_[A-Za-z0-9_-]+$', ''))::text AS count,
+       count(*) FILTER (WHERE errored_at >= now() - interval '7 days')::text AS recent_count
+FROM dead_letters WHERE workspace_id = $1 AND resolved_at IS NULL AND is_test = false
+GROUP BY source_id, route_id, destination_id`;

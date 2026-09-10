@@ -1,7 +1,7 @@
 import "server-only";
 import { db } from "./db";
 import { clickhouse } from "./clickhouse";
-import { DELIVERY_ACTIVITY_SQL, FLOW_ACTIVITY_SQL, UNATTEMPTED_SQL } from "./impact-alert-queries";
+import { DEAD_LETTER_COUNTS_SQL, DELIVERY_ACTIVITY_SQL, FLOW_ACTIVITY_SQL, UNATTEMPTED_SQL } from "./impact-alert-queries";
 import { sourceSilenceObservation, timestamp, type FlowActivity, type FlowSource, type ImpactObservation, type ImpactSnapshot } from "./impact-alert-policy";
 
 interface RouteRow {
@@ -28,12 +28,9 @@ export async function loadImpactObservations(workspaceId: string): Promise<Impac
        JOIN destinations d ON d.id = rd.destination_id AND d.workspace_id = r.workspace_id
       WHERE r.workspace_id = $1 AND r.status <> 'disabled'`, [workspaceId])).rows;
   const failures = (await client.query<{source_id: string; route_id: string | null; destination_id: string | null; count: string; recent_count: string}>(
-    `SELECT source_id, route_id, destination_id, count(DISTINCT event_id)::text AS count,
-            count(*) FILTER (WHERE errored_at >= now() - interval '7 days')::text AS recent_count
-       FROM dead_letters WHERE workspace_id = $1 AND resolved_at IS NULL AND is_test = false
-      GROUP BY source_id, route_id, destination_id`, [workspaceId])).rows;
+    DEAD_LETTER_COUNTS_SQL, [workspaceId])).rows;
   // Analytics errors propagate. An unavailable monitor must never resolve an incident.
-  const ch = clickhouse({ unbounded: true, timeoutMs: 20_000, retryTimeouts: false });
+  const ch = clickhouse({ unbounded: true, mergeJoins: true, timeoutMs: 20_000, retryTimeouts: false });
   const activity = (await ch.query<FlowActivity>(FLOW_ACTIVITY_SQL, { workspace_id: workspaceId })).rows;
   const delivery = (await ch.query<DeliveryActivity>(DELIVERY_ACTIVITY_SQL, { workspace_id: workspaceId })).rows;
   const open = (await client.query<{incident_key: string; snapshot: ImpactSnapshot; opened_at: string}>(
