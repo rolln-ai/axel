@@ -991,23 +991,6 @@ async function diagnoseSchemaMismatches(
   ).conflicts;
 }
 
-function actionableMismatchMessage(issue: BqCompatIssue): string {
-  const lead = `BigQuery type mismatch at "${issue.path}": Axel sends ${issue.expected}, but the target column is ${issue.existing}. Retrying unchanged data will fail again.`;
-  if (issue.kind === "mode_conflict") {
-    if (issue.expected.startsWith("REPEATED ")) {
-      return `${lead} Use a compatible table where "${issue.path}" is ${issue.expected}, or add a Collapse arrays to text step for "${issue.path}" if one STRING value is intentional.`;
-    }
-    return `${lead} Use a compatible non-repeated column, or adjust the route so "${issue.path}" is an array before delivery.`;
-  }
-  if (issue.existing.includes("INT64") && issue.expected.includes("FLOAT64")) {
-    return `${lead} Change the target column to FLOAT64, or add a Convert field types step for "${issue.path}" and choose an explicit integer rounding rule.`;
-  }
-  if (issue.existing.includes("STRING")) {
-    return `${lead} Change the target column to ${issue.expected.replace("REPEATED ", "")}, or convert "${issue.path}" to Text (STRING) before delivery.`;
-  }
-  return `${lead} Change the target column type, or convert "${issue.path}" in the route before delivery.`;
-}
-
 export function createBigQueryConnector(): Connector<BigQueryConfig> {
   return {
     type: "bigquery",
@@ -1334,9 +1317,7 @@ export function createBigQueryConnector(): Connector<BigQueryConfig> {
           retryable ? "retry" : "dead",
           {
             status: res.status,
-            ...(schemaMismatches[0]
-              ? { error: actionableMismatchMessage(schemaMismatches[0]) }
-              : {}),
+            error: schemaMismatches.length > 0 ? "bigquery_schema_mismatch" : "bigquery_row_rejected",
             insertErrors: rowErrors.slice(0, 8).map((e) => ({
               reason: e.reason,
             })),

@@ -20,6 +20,8 @@ export const DATABASE_SERVICE_PROFILE_NAMES = Object.freeze([
 ]);
 
 export const APPLICATION_TABLES = Object.freeze([
+  "pipeline_incidents",
+  "alert_email_outbox",
   "admin_mfa_methods",
   "audit_log",
   "auth_rate_limits",
@@ -100,6 +102,8 @@ function buildTables({ select = [], insert = [], update = [], delete: remove = [
 }
 
 const dashboardInsert = [
+  "pipeline_incidents",
+  "alert_email_outbox",
   "admin_mfa_methods",
   "audit_log",
   "auth_rate_limits",
@@ -139,6 +143,8 @@ const dashboardInsert = [
 ];
 
 const dashboardUpdate = [
+  "pipeline_incidents",
+  "alert_email_outbox",
   "admin_mfa_methods",
   "auth_rate_limits",
   "backfill_jobs",
@@ -171,6 +177,8 @@ const dashboardUpdate = [
 ];
 
 const dashboardDelete = [
+  "pipeline_incidents",
+  "alert_email_outbox",
   "data_contract_drift_events",
   "data_contract_fixtures",
   "data_contracts",

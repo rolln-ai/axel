@@ -20,10 +20,10 @@ function fakeClient(rows: unknown[]): {
 }
 
 describe("getNotificationPreferences", () => {
-  it("defaults every channel to ON when there's no row", async () => {
+  it("defaults impact alerts on and routine schema emails off", async () => {
     const { client } = fakeClient([]);
     expect(await getNotificationPreferences("ws1", "u1", client)).toEqual({
-      email_digest_daily: true,
+      email_schema_weekly: false,
       email_immediate: true,
     });
   });
@@ -31,7 +31,7 @@ describe("getNotificationPreferences", () => {
   it("honours an explicit opt-out and leaves the other channel on", async () => {
     const { client } = fakeClient([{ prefs: { email_immediate: false } }]);
     expect(await getNotificationPreferences("ws1", "u1", client)).toEqual({
-      email_digest_daily: true,
+      email_schema_weekly: false,
       email_immediate: false,
     });
   });

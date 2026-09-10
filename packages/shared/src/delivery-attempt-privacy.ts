@@ -13,6 +13,8 @@ const SAFE_DESTINATION_TYPES = new Set([
 const SAFE_ERROR_CODES = new Set([
   "already_delivered",
   "bigquery_delivery_failed",
+  "bigquery_schema_mismatch",
+  "bigquery_row_rejected",
   "bigquery_delivery_transient",
   "bigquery_forbidden",
   "bigquery_http_error",

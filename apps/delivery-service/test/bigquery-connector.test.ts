@@ -751,7 +751,7 @@ describe("bigquery connector", () => {
     expect(out.status).toBe("dead");
   });
 
-  it("enriches a permanent type mismatch with the field and repair choices", async () => {
+  it("classifies a permanent type mismatch without retaining diagnostic values", async () => {
     insertSeq = [makeRes(200, {
       insertErrors: [{
         index: 0,
@@ -771,14 +771,14 @@ describe("bigquery connector", () => {
 
     expect(out.status).toBe("dead");
     expect(out.response).toMatchObject({
-      error: expect.stringMatching(/type mismatch at "amount".*FLOAT64.*INT64.*Retrying unchanged data.*rounding rule/),
+      error: "bigquery_schema_mismatch",
       schemaMismatches: [
         expect.objectContaining({ path: "amount", expected: "FLOAT64", existing: "INT64" }),
       ],
     });
   });
 
-  it("suggests a text conversion for bool-to-STRING mismatches", async () => {
+  it("classifies bool-to-STRING mismatches", async () => {
     insertSeq = [makeRes(200, {
       insertErrors: [{
         index: 0,
@@ -795,11 +795,11 @@ describe("bigquery connector", () => {
     });
 
     expect(out.response).toMatchObject({
-      error: expect.stringMatching(/"active".*BOOL.*STRING.*Text \(STRING\)/),
+      error: "bigquery_schema_mismatch",
     });
   });
 
-  it("suggests a repeated field or explicit array collapse for array-to-scalar mismatches", async () => {
+  it("classifies array-to-scalar mismatches", async () => {
     insertSeq = [makeRes(200, {
       insertErrors: [{
         index: 0,
@@ -816,7 +816,7 @@ describe("bigquery connector", () => {
     });
 
     expect(out.response).toMatchObject({
-      error: expect.stringMatching(/"tags".*REPEATED STRING.*NULLABLE STRING.*Collapse arrays to text/),
+      error: "bigquery_schema_mismatch",
       schemaMismatches: [
         expect.objectContaining({
           path: "tags",

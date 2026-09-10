@@ -45,9 +45,19 @@ function claimStore(): Required<Pick<DigestDeps, "claimSend" | "releaseSend" | "
 }
 
 describe("runDigestJob", () => {
+  it("does not subscribe legacy daily recipients to routine weekly email", async () => {
+    const summary = await runDigestJob({ now: new Date("2030-01-14T14:00:00Z"), ...claimStore(),
+      listRecipients: async () => [{user_id: "u1", email: "a@example.invalid", workspace_id: "ws_1", workspace_name: "Example", prefs: {email_digest_daily: true}}],
+      listNotifications: async () => {throw new Error("should not query notifications for an opted-out recipient");},
+    });
+    expect(summary.recipients_opted_out).toBe(1);
+    expect(summary.emails_sent).toBe(0);
+  });
+
   it("sends one email per recipient with notifications in window", async () => {
     const sent: Array<{ to: string; subject: string; lines: number }> = [];
     const summary = await runDigestJob({
+      now: new Date("2030-01-14T14:00:00Z"),
       ...claimStore(),
       listRecipients: async () => [
         {
@@ -55,14 +65,14 @@ describe("runDigestJob", () => {
           email: "a@example.com",
           workspace_id: "ws_1",
           workspace_name: "Acme",
-          prefs: null,
+          prefs: { email_schema_weekly: true },
         },
         {
           user_id: "u2",
           email: "b@example.com",
           workspace_id: "ws_1",
           workspace_name: "Acme",
-          prefs: null,
+          prefs: { email_schema_weekly: true },
         },
       ],
       listNotifications: async (ws) => {
@@ -87,6 +97,7 @@ describe("runDigestJob", () => {
 
   it("skips recipients with no notifications in window", async () => {
     const summary = await runDigestJob({
+      now: new Date("2030-01-14T14:00:00Z"),
       ...claimStore(),
       listRecipients: async () => [
         {
@@ -94,7 +105,7 @@ describe("runDigestJob", () => {
           email: "a@example.com",
           workspace_id: "ws_quiet",
           workspace_name: "Quiet",
-          prefs: null,
+          prefs: { email_schema_weekly: true },
         },
       ],
       listNotifications: async () => [],
@@ -106,8 +117,9 @@ describe("runDigestJob", () => {
     expect(summary.emails_sent).toBe(0);
   });
 
-  it("respects the email_digest_daily=false opt-out", async () => {
+  it("respects the email_schema_weekly=false opt-out", async () => {
     const summary = await runDigestJob({
+      now: new Date("2030-01-14T14:00:00Z"),
       ...claimStore(),
       listRecipients: async () => [
         {
@@ -115,14 +127,14 @@ describe("runDigestJob", () => {
           email: "out@example.com",
           workspace_id: "ws_1",
           workspace_name: "Acme",
-          prefs: { email_digest_daily: false },
+          prefs: { email_schema_weekly: false },
         },
         {
           user_id: "u_opt_in",
           email: "in@example.com",
           workspace_id: "ws_1",
           workspace_name: "Acme",
-          prefs: { email_digest_daily: true },
+          prefs: { email_schema_weekly: true },
         },
       ],
       listNotifications: async () => [notification()],
@@ -134,6 +146,7 @@ describe("runDigestJob", () => {
 
   it("collects send errors per-recipient and doesn't abort", async () => {
     const summary = await runDigestJob({
+      now: new Date("2030-01-14T14:00:00Z"),
       ...claimStore(),
       listRecipients: async () => [
         {
@@ -141,14 +154,14 @@ describe("runDigestJob", () => {
           email: "a@example.com",
           workspace_id: "ws_1",
           workspace_name: "Acme",
-          prefs: null,
+          prefs: { email_schema_weekly: true },
         },
         {
           user_id: "u2",
           email: "b@example.com",
           workspace_id: "ws_1",
           workspace_name: "Acme",
-          prefs: null,
+          prefs: { email_schema_weekly: true },
         },
       ],
       listNotifications: async () => [notification()],
@@ -172,6 +185,7 @@ describe("runDigestJob", () => {
   it("counts only blocked pipelines in the subject", async () => {
     const subjects: string[] = [];
     await runDigestJob({
+      now: new Date("2030-01-14T14:00:00Z"),
       ...claimStore(),
       listRecipients: async () => [
         {
@@ -179,7 +193,7 @@ describe("runDigestJob", () => {
           email: "a@example.com",
           workspace_id: "ws_acme",
           workspace_name: "Acme Co",
-          prefs: null,
+          prefs: { email_schema_weekly: true },
         },
       ],
       listNotifications: async () => [
@@ -208,6 +222,7 @@ describe("runDigestJob", () => {
   it("groups related changes by action and hides internal IDs from the copy", async () => {
     let rendered: { subject: string; html: string; text: string } | null = null;
     await runDigestJob({
+      now: new Date("2030-01-14T14:00:00Z"),
       ...claimStore(),
       listRecipients: async () => [
         {
@@ -215,7 +230,7 @@ describe("runDigestJob", () => {
           email: "a@example.com",
           workspace_id: "ws_demo",
           workspace_name: "Demo Workspace",
-          prefs: null,
+          prefs: { email_schema_weekly: true },
         },
       ],
       listNotifications: async () => [
@@ -289,6 +304,7 @@ describe("runDigestJob", () => {
         context_kind: "destination",
       });
     await runDigestJob({
+      now: new Date("2030-01-14T14:00:00Z"),
       ...claimStore(),
       listRecipients: async () => [
         {
@@ -296,7 +312,7 @@ describe("runDigestJob", () => {
           email: "a@example.com",
           workspace_id: "ws_demo_publishing",
           workspace_name: "Acme Publishing",
-          prefs: null,
+          prefs: { email_schema_weekly: true },
         },
       ],
       listNotifications: async () => [breaker(3), breaker(3), breaker(10), breaker(3)],
@@ -321,6 +337,7 @@ describe("runDigestJob", () => {
   it("reports a recovered breaker as an FYI instead of an open problem", async () => {
     let rendered: { subject: string; html: string; text: string } | null = null;
     await runDigestJob({
+      now: new Date("2030-01-14T14:00:00Z"),
       ...claimStore(),
       listRecipients: async () => [
         {
@@ -328,7 +345,7 @@ describe("runDigestJob", () => {
           email: "a@example.com",
           workspace_id: "ws_acme",
           workspace_name: "Acme Co",
-          prefs: null,
+          prefs: { email_schema_weekly: true },
         },
       ],
       listNotifications: async () => [
@@ -361,6 +378,7 @@ describe("runDigestJob", () => {
   it("reports a still-open pause as unresolved", async () => {
     let rendered: { subject: string; html: string; text: string } | null = null;
     await runDigestJob({
+      now: new Date("2030-01-14T14:00:00Z"),
       ...claimStore(),
       listRecipients: async () => [
         {
@@ -368,7 +386,7 @@ describe("runDigestJob", () => {
           email: "a@example.com",
           workspace_id: "ws_acme",
           workspace_name: "Acme Co",
-          prefs: null,
+          prefs: { email_schema_weekly: true },
         },
       ],
       listNotifications: async () => [
@@ -400,6 +418,7 @@ describe("runDigestJob", () => {
   it("deep-links a failed replay-complete notice to the failed deliveries stream", async () => {
     let rendered: { subject: string; html: string; text: string } | null = null;
     await runDigestJob({
+      now: new Date("2030-01-14T14:00:00Z"),
       ...claimStore(),
       listRecipients: async () => [
         {
@@ -407,7 +426,7 @@ describe("runDigestJob", () => {
           email: "a@example.com",
           workspace_id: "ws_demo_publishing",
           workspace_name: "Acme Publishing",
-          prefs: null,
+          prefs: { email_schema_weekly: true },
         },
       ],
       listNotifications: async () => [
@@ -439,6 +458,7 @@ describe("runDigestJob", () => {
     const claims = claimStore();
     const keys: Array<string | undefined> = [];
     const deps = {
+      now: new Date("2030-01-14T14:00:00Z"),
       ...claims,
       listRecipients: async () => [
         {
@@ -446,7 +466,7 @@ describe("runDigestJob", () => {
           email: "a@example.com",
           workspace_id: "ws_1",
           workspace_name: "Acme",
-          prefs: null,
+          prefs: { email_schema_weekly: true },
         },
       ],
       listNotifications: async () => [notification()],
@@ -469,6 +489,7 @@ describe("runDigestJob", () => {
     const claims = claimStore();
     let attempt = 0;
     const deps = {
+      now: new Date("2030-01-14T14:00:00Z"),
       ...claims,
       listRecipients: async () => [
         {
@@ -476,7 +497,7 @@ describe("runDigestJob", () => {
           email: "a@example.com",
           workspace_id: "ws_1",
           workspace_name: "Acme",
-          prefs: null,
+          prefs: { email_schema_weekly: true },
         },
       ],
       listNotifications: async () => [notification()],

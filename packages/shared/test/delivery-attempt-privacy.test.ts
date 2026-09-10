@@ -30,6 +30,13 @@ describe("delivery attempt privacy", () => {
     expect(JSON.stringify(result)).not.toContain("nested-marker");
   });
 
+  it("preserves storage-impact codes without retaining schema fields or values", () => {
+    expect(sanitizeDeliveryAttemptResponseForStorage({ status: 200, error: "bigquery_schema_mismatch",
+      schemaMismatches: [{ path: "private_field", expected: "FLOAT64", existing: "INT64" }], body: "private-value" }))
+      .toEqual({ http_status: 200, error: "bigquery_schema_mismatch" });
+    expect(deliveryAttemptErrorCode("bigquery_row_rejected")).toBe("bigquery_row_rejected");
+  });
+
   it("normalizes SSRF detail and preserves stable delivery codes", () => {
     expect(deliveryAttemptErrorCode("ssrf_blocked: private target customer-marker"))
       .toBe("ssrf_blocked");

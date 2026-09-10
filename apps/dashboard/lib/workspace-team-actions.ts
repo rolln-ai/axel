@@ -158,7 +158,7 @@ export async function updateNotificationPreferencesAction(
 ): Promise<ActionState> {
   const session = await requireSession();
   const update = {
-    email_digest_daily: formData.has("email_digest_daily"),
+    email_schema_weekly: formData.has("email_schema_weekly"),
     email_immediate: formData.has("email_immediate"),
   };
   try {
