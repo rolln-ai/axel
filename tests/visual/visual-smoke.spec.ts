@@ -198,3 +198,25 @@ for (const theme of ["light", "dark"]) {
     await testInfo.attach(`status-${theme}`, { path: screenshot, contentType: "image/png" });
   });
 }
+
+test("open-source and cloud paths are available on desktop and mobile", async ({ page, request }, testInfo) => {
+  await page.goto(origins.marketing);
+  await expect(page.getByRole("heading", { level: 1 })).toContainText("Open-source webhook delivery");
+  const hero = page.locator(".hero").first();
+  await expect(hero.getByRole("link", { name: "View source", exact: false })).toHaveAttribute("href", "https://github.com/rolln-ai/axel");
+  await expect(hero.getByRole("link", { name: /Start on Axel Cloud/ })).toHaveAttribute("href", "https://app.axelapp.ai/signup");
+  await expect(page.locator("#open-source").getByRole("heading", { name: "Self-host Axel", exact: true })).toBeVisible();
+  await expect(page.locator("#open-source").getByRole("heading", { name: "Axel Cloud", exact: true })).toBeVisible();
+  if (testInfo.project.name === "mobile") {
+    await page.getByRole("button", { name: "Open menu", exact: true }).click();
+    await expect(page.getByRole("navigation", { name: "Primary mobile" }).getByRole("link", { name: "GitHub", exact: true })).toBeVisible();
+    await page.getByRole("navigation", { name: "Primary mobile" }).getByRole("link", { name: "Open source", exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "Mobile navigation" })).toHaveCount(0);
+  } else {
+    await expect(page.getByRole("navigation", { name: "Primary", exact: true }).getByRole("link", { name: "GitHub", exact: true })).toBeVisible();
+  }
+  await expect(page.getByRole("navigation", { name: "Footer", exact: true }).getByRole("link", { name: "GitHub", exact: true })).toBeVisible();
+  await expect(page.locator('form[action="/api/subscribe"], input[type="email"]')).toHaveCount(0);
+  const retired = await request.post(`${origins.marketing}/api/subscribe`, { data: { email: "synthetic@example.test" } });
+  expect([404, 405]).toContain(retired.status());
+});

@@ -23,7 +23,7 @@ import { AxelMark } from "../lib/logo-mark";
  *    now comes from a flat wash with no edge inside the frame.
  */
 export const runtime = "nodejs";
-export const alt = "Axel — capture webhooks and deliver them to your data stack";
+export const alt = "Axel — open-source webhook delivery to your data stack";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
@@ -31,7 +31,8 @@ export const contentType = "image/png";
 const BG = "#1a1814";
 const INK = "#f0eee5";
 const MUTED = "#a09e96";
-const PRIMARY = "#ff7a3a";
+// The hero highlight mixes 45% brand orange with 55% background.
+const HIGHLIGHT = "#814425";
 const COPPER = "#d98a5a";
 
 export default async function OpengraphImage() {
@@ -93,9 +94,12 @@ export default async function OpengraphImage() {
             }}
           >
             <div style={{ display: "flex", color: INK }}>
-              Capture webhooks and deliver them to
+              Open-source webhook delivery to
             </div>
-            <div style={{ display: "flex", color: PRIMARY }}>your data stack.</div>
+            <div style={{ display: "flex", color: INK, position: "relative" }}>
+              <div style={{ position: "absolute", left: 0, bottom: 1, width: 398, height: 20, background: HIGHLIGHT }} />
+              <span style={{ position: "relative" }}>your data stack.</span>
+            </div>
           </div>
 
           <div
@@ -108,8 +112,8 @@ export default async function OpengraphImage() {
               lineHeight: 1.45,
             }}
           >
-            The original payload is stored before Axel returns 202. Failed deliveries retry, and
-            you can replay from the dashboard.
+            Apache-2.0. Self-host Axel or start free on Axel Cloud.
+            Capture, route, retry, and replay your webhooks.
           </div>
         </div>
 

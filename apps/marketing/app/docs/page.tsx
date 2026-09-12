@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { COMMUNITY_SUPPORT_URL, SUPPORT_HREF } from "../../lib/contact";
 import { SiteFooter, SiteHeader } from "../_components/SiteChrome";
-import { sourceReleasePublished } from "../../lib/source-release";
+import { SOURCE_URL, SELF_HOSTING_URL } from "../../lib/project";
 import { JsonLd } from "../_components/JsonLd";
 import { DashboardMock, PipelineMock, RouteMock, SourceMock } from "../_components/ProductMocks";
 import { pageMetadata } from "../../lib/seo";
@@ -85,7 +85,7 @@ export default function DocsPage() {
           </h1>
           <p className="heroLede">
             Start on Axel Cloud to use the managed service. These guides cover sources,
-            routing, delivery, and recovery. {sourceReleasePublished ? "You can also self-host the Apache-2.0 application." : "The public source release for self-hosting is being prepared."}
+            routing, delivery, and recovery. You can also self-host the Apache-2.0 application.
           </p>
           <div className="heroActions">
             <a className="btn" href="https://app.axelapp.ai/signup">
@@ -103,9 +103,6 @@ export default function DocsPage() {
           <div className="sectionHead">
             <span className="kicker">Self-hosting</span>
             <h2>Your infrastructure, the same application.</h2>
-            {!sourceReleasePublished ? (
-              <p className="lede">The public source release is being prepared. It will include the application under Apache-2.0, with installation instructions. Axel Cloud is available now.</p>
-            ) : null}
             <p className="lede">
               The small install runs Postgres, the dashboard, and delivery in Docker, with
               Cloudflare Workers, Queues, and R2 for ingest. You maintain the host, backups,
@@ -113,14 +110,8 @@ export default function DocsPage() {
               There is no Axel license fee. Provider charges depend on your traffic and setup.
             </p>
             <div className="heroActions">
-              {sourceReleasePublished ? (
-                <>
-                  <a className="btn" href="https://github.com/rolln-ai/axel/blob/main/docs/self-hosting.md">Installation guide <span className="arrow">→</span></a>
-                  <a className="btn ghost" href="https://github.com/rolln-ai/axel">Browse the source</a>
-                </>
-              ) : (
-                <a className="btn" href="https://app.axelapp.ai/signup">Start on Axel Cloud <span className="arrow">→</span></a>
-              )}
+              <a className="btn" href={SELF_HOSTING_URL}>Installation guide <span className="arrow">→</span></a>
+              <a className="btn ghost" href={SOURCE_URL}>View source on GitHub</a>
             </div>
           </div>
         </div>

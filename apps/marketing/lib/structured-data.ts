@@ -1,5 +1,6 @@
 import { SITE_NAME, SITE_URL } from "./seo";
 import { SUPPORT_EMAIL } from "./contact";
+import { SOURCE_URL, LICENSE_URL } from "./project";
 
 /**
  * schema.org builders. Keep claims factual and consistent with the visible
@@ -18,6 +19,7 @@ export function organizationLd() {
     name: SITE_NAME,
     url: SITE_URL,
     logo: `${SITE_URL}/icon.svg`,
+    sameAs: [SOURCE_URL],
     description:
       "Axel captures third-party webhooks, stores their original payloads before returning 202, and delivers them to databases, warehouses, object storage, and HTTP endpoints.",
     ...(SUPPORT_EMAIL ? { email: SUPPORT_EMAIL } : {}),
@@ -42,10 +44,12 @@ export function softwareApplicationLd() {
     name: SITE_NAME,
     url: SITE_URL,
     applicationCategory: "DeveloperApplication",
-    applicationSubCategory: "Webhook data sync",
+    applicationSubCategory: "Open-source webhook delivery",
+    license: LICENSE_URL,
+    isAccessibleForFree: true,
     operatingSystem: "Web",
     description:
-      "Capture third-party webhooks and deliver them to databases, warehouses, object storage, and HTTP endpoints with retries, delivery history, and replay controls.",
+      "Open-source webhook ingestion and delivery under Apache-2.0. Self-host Axel or use Axel Cloud for managed infrastructure, retries, searchable delivery history, and replay.",
     publisher: { "@id": ORG_ID },
     offers: {
       "@type": "Offer",
