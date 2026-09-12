@@ -1,17 +1,8 @@
 /**
- * Value-level privacy boundaries for text that may echo customer data.
- *
- * Two surfaces use this:
- *   - Database-connector error strings before they land in `dead_letters.message`
- *     (which flows into notification rows and Resend alert emails). A Postgres
- *     driver error like `Key (email)=(alice@x.com) already exists` or
- *     `invalid input syntax for type integer: "4111 1111 1111 1111"` echoes the
- *     offending value verbatim.
- *   - Payload excerpts sent to the OpenRouter LLM for failure/inference explain.
- *
- * `scrubConnectorError` remains a UI-only compatibility helper. Durable and
- * external diagnostics use a fixed code projector because pattern matching
- * cannot prove that an arbitrary string is not a webhook value.
+ * Privacy boundaries for customer-derived text and connector diagnostics.
+ * AI excerpts use text masking; durable and external diagnostics use fixed
+ * operational codes because pattern matching cannot prove that arbitrary
+ * text contains no webhook values.
  */
 
 const EMAIL_RE = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
@@ -39,19 +30,6 @@ const MAX_RESPONSE_ARRAY_ITEMS = 32;
 /** Mask emails and long digit sequences in arbitrary text. */
 export function maskPiiInText(input: string): string {
   return input.replace(EMAIL_RE, "[EMAIL]").replace(LONG_DIGITS_RE, "[NUM]");
-}
-
-/**
- * Scrub a database-connector error string before persisting it. Redacts the
- * Postgres DETAIL value echo (`Key (col)=(value)`), then masks residual
- * emails/long-digit runs. Deliberately narrow — it must not mangle structured
- * (JSON) error diagnostics — so it keeps constraint names, type names, and the
- * error class, and leaves free-text names it can't pattern-match (an accepted
- * residual; the DETAIL echo is the common unique-violation case).
- */
-export function scrubConnectorError(message: string): string {
-  // Postgres DETAIL: `Key (col)=(value) already exists.`
-  return maskPiiInText(message.replace(/=\([^)]*\)/g, "=([REDACTED])"));
 }
 
 /**

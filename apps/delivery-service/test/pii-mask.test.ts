@@ -3,7 +3,6 @@ import {
   controlPlaneDbSslVerify,
   controlPlanePgSslOption,
   maskPiiInText,
-  scrubConnectorError,
 } from "@axel/shared";
 
 describe("maskPiiInText", () => {
@@ -17,32 +16,6 @@ describe("maskPiiInText", () => {
   });
   it("keeps short numbers and identifiers", () => {
     expect(maskPiiInText("status 404 on route rt_12")).toBe("status 404 on route rt_12");
-  });
-});
-
-describe("scrubConnectorError", () => {
-  it("redacts Postgres DETAIL value echoes but keeps the column name", () => {
-    expect(
-      scrubConnectorError('duplicate key value violates unique constraint "u_email" DETAIL: Key (email)=(alice@example.com) already exists.'),
-    ).toBe(
-      'duplicate key value violates unique constraint "u_email" DETAIL: Key (email)=([REDACTED]) already exists.',
-    );
-  });
-  it("masks a numeric value echo while keeping the type/class", () => {
-    expect(scrubConnectorError('invalid input syntax for type integer: "4111111111111111"')).toBe(
-      'invalid input syntax for type integer: "[NUM]"',
-    );
-  });
-  it("does not mangle structured JSON diagnostics without PII", () => {
-    // Router-style diagnostics must survive intact so fingerprints stay stable.
-    expect(scrubConnectorError('delivery_service_503: {"ok":false,"error":"overloaded"}')).toBe(
-      'delivery_service_503: {"ok":false,"error":"overloaded"}',
-    );
-  });
-  it("keeps a value-free error intact", () => {
-    expect(scrubConnectorError("connection terminated unexpectedly")).toBe(
-      "connection terminated unexpectedly",
-    );
   });
 });
 
