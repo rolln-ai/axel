@@ -2,16 +2,12 @@
 
 ## Reporting a vulnerability
 
-Use the repository Security tab's **Report a vulnerability** action when it is
-available. Otherwise email `security@axelapp.ai`. Do not open public GitHub
-issues for vulnerabilities.
+[Report a vulnerability privately on GitHub](https://github.com/rolln-ai/axel/security/advisories/new).
+Reports are visible to the maintainers and invited collaborators, not to the
+public. Do not open public issues for vulnerabilities or include credentials
+and customer payloads in public discussions.
 
-GitHub makes private vulnerability reporting available only for public
-repositories. During the public launch, maintainers first verify the security
-mailbox end to end. Immediately after the visibility change, an administrator
-enables private vulnerability reporting, secret scanning, push protection,
-and validity checks, then verifies the **Report a vulnerability** flow. The
-launch is not complete until both reporting paths work.
+You can also contact `security@axelapp.ai`.
 
 Include:
 
