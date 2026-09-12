@@ -1,7 +1,8 @@
 "use client";
 
 import * as React from "react";
-import Link, { useLinkStatus } from "next/link";
+import { useLinkStatus } from "next/link";
+import Link from "./_components/NavigationLink";
 import { usePathname } from "next/navigation";
 import {
   LayoutGrid,
@@ -99,7 +100,6 @@ export function AppNav({ isSuperAdmin = false }: { isSuperAdmin?: boolean }) {
                     <Link
                       href={link.href}
                       aria-current={active ? "page" : undefined}
-                      prefetch={false}
                       className={cn(
                         "group flex h-7 items-center gap-2 rounded-md px-2 text-sm transition-colors",
                         active

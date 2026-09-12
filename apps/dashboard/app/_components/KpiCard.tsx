@@ -1,4 +1,4 @@
-import Link from "next/link";
+import Link from "@/app/_components/NavigationLink";
 import * as React from "react";
 import { TrendingUp, TrendingDown } from "lucide-react";
 import { cn } from "@/lib/utils";

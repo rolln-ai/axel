@@ -1,4 +1,7 @@
-import Link from "next/link";
+import Link from "@/app/_components/NavigationLink";
+import { Suspense } from "react";
+import { LoaderCircle } from "lucide-react";
+import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "../../EmptyState";
 import { FirstRunOnboardingCard } from "../_components/FirstRunOnboardingCard";
 import { PageHeader } from "../../_components/PageHeader";
@@ -44,9 +47,9 @@ async function loadSourceEventCounts(workspaceId: string): Promise<Map<string, S
 export default async function SourcesPage() {
   const session = await requireSession();
   const workspaceId = session.activeWorkspace.workspace_id;
-  const [sources, eventCounts, destinationsRaw] = await Promise.all([
+  const eventCounts = loadSourceEventCounts(workspaceId);
+  const [sources, destinationsRaw] = await Promise.all([
     listSources(workspaceId),
-    loadSourceEventCounts(workspaceId),
     listDestinationsWithRouteCount(workspaceId, db()),
   ]);
   const canMutate = session.activeWorkspace.role === "owner" || session.activeWorkspace.role === "admin";
@@ -95,11 +98,10 @@ export default async function SourcesPage() {
             </TableHeader>
             <TableBody>
               {visibleSources.map((source) => {
-                const counts = eventCounts.get(source.id);
                 return (
                   <TableRow key={source.id}>
                     <TableCell>
-                      <Link href={`/sources/${source.id}`} prefetch={false} className="block">
+                      <Link href={`/sources/${source.id}`} className="block">
                         <strong className="text-sm font-medium text-foreground">{source.name}</strong>
                         <small className="block font-mono text-[11px] text-muted-foreground">
                           {source.id}
@@ -117,15 +119,9 @@ export default async function SourcesPage() {
                     <TableCell className="text-sm">
                       {`${source.max_events_per_minute ?? "default"}/min`}
                     </TableCell>
-                    <TableCell className="text-right text-sm tabular-nums">
-                      {counts ? formatCount(counts.events_24h) : "—"}
-                    </TableCell>
-                    <TableCell className="text-right text-sm tabular-nums">
-                      {counts ? formatCount(counts.events_30d) : "—"}
-                    </TableCell>
-                    <TableCell className="text-right text-sm tabular-nums">
-                      {counts ? formatCount(counts.events_all) : "—"}
-                    </TableCell>
+                    <Suspense fallback={<EventCountCellsLoading />}>
+                      <EventCountCells sourceId={source.id} countsPromise={eventCounts} />
+                    </Suspense>
                     <TableCell className="text-sm text-muted-foreground">
                       <LocalTime value={source.created_at} mode="date" />
                     </TableCell>
@@ -199,11 +195,10 @@ export default async function SourcesPage() {
             </TableHeader>
             <TableBody>
               {pullSources.map((source) => {
-                const counts = eventCounts.get(source.id);
                 return (
                   <TableRow key={source.id}>
                     <TableCell>
-                      <Link href={`/sources/${source.id}`} prefetch={false} className="block">
+                      <Link href={`/sources/${source.id}`} className="block">
                         <strong className="text-sm font-medium text-foreground">{source.name}</strong>
                         <small className="block font-mono text-[11px] text-muted-foreground">
                           {source.id}
@@ -218,15 +213,9 @@ export default async function SourcesPage() {
                     <TableCell>
                       <EntityStatusBadge status={source.status} className="capitalize" />
                     </TableCell>
-                    <TableCell className="text-right text-sm tabular-nums">
-                      {counts ? formatCount(counts.events_24h) : "—"}
-                    </TableCell>
-                    <TableCell className="text-right text-sm tabular-nums">
-                      {counts ? formatCount(counts.events_30d) : "—"}
-                    </TableCell>
-                    <TableCell className="text-right text-sm tabular-nums">
-                      {counts ? formatCount(counts.events_all) : "—"}
-                    </TableCell>
+                    <Suspense fallback={<EventCountCellsLoading />}>
+                      <EventCountCells sourceId={source.id} countsPromise={eventCounts} />
+                    </Suspense>
                     <TableCell className="text-sm text-muted-foreground">
                       <LocalTime value={source.created_at} mode="date" />
                     </TableCell>
@@ -237,6 +226,37 @@ export default async function SourcesPage() {
           </Table>
         </section>
       ) : null}
+    </>
+  );
+}
+
+function EventCountCellsLoading() {
+  return (
+    <>
+      <TableCell className="text-right" aria-busy="true">
+        <span role="status" className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+          <LoaderCircle className="size-3 motion-safe:animate-spin" aria-hidden="true" />
+          Loading counts…
+        </span>
+      </TableCell>
+      <TableCell><Skeleton className="ml-auto h-4 w-16" /></TableCell>
+      <TableCell><Skeleton className="ml-auto h-4 w-16" /></TableCell>
+    </>
+  );
+}
+
+async function EventCountCells({ sourceId, countsPromise }: {
+  sourceId: string;
+  countsPromise: Promise<Map<string, SourceEventCounts>>;
+}) {
+  const counts = (await countsPromise).get(sourceId);
+  return (
+    <>
+      {[counts?.events_24h, counts?.events_30d, counts?.events_all].map((count, index) => (
+        <TableCell key={index} className="text-right text-sm tabular-nums">
+          {count === undefined ? <span title="Event counts unavailable">—</span> : formatCount(count)}
+        </TableCell>
+      ))}
     </>
   );
 }

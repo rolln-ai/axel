@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { usePathname, useSearchParams } from "next/navigation";
 import { Menu } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -13,7 +14,10 @@ import {
 export function MobileSidebar({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = React.useState(false);
   const [ready, setReady] = React.useState(false);
+  const pathname = usePathname();
+  const search = useSearchParams().toString();
   React.useEffect(() => setReady(true), []);
+  React.useEffect(() => setOpen(false), [pathname, search]);
   return (
     <Sheet open={open} onOpenChange={setOpen}>
       <SheetTrigger asChild>

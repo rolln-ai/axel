@@ -133,7 +133,7 @@ export function clickhouse(options?: {
           if (!res.ok || code !== null) {
             await res.body?.cancel().catch(() => undefined);
             const error = new ClickhouseQueryError(res.status, code);
-            if (attempt < CLICKHOUSE_QUERY_ATTEMPTS && isTransientPlatformHttpError(error)) {
+            if (code === null && attempt < CLICKHOUSE_QUERY_ATTEMPTS && isTransientPlatformHttpError(error)) {
               await sleep(CLICKHOUSE_QUERY_RETRY_BASE_DELAY_MS * attempt);
               continue;
             }
@@ -151,6 +151,9 @@ export function clickhouse(options?: {
           }
           return { rows: json.data ?? [] };
         } catch (err) {
+          // SQL, memory, and execution-limit failures will not improve by
+          // immediately repeating the same query. Keep transport retries only.
+          if (err instanceof ClickhouseQueryError && err.code !== null) throw err;
           if (controller?.signal.aborted) {
             if (options?.retryTimeouts && attempt < CLICKHOUSE_QUERY_ATTEMPTS) {
               await sleep(CLICKHOUSE_QUERY_RETRY_BASE_DELAY_MS * attempt);

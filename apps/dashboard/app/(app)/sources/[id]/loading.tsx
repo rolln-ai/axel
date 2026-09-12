@@ -1,3 +1,4 @@
+import { NavigationProgress } from "@/app/_components/NavigationProgress";
 import { Skeleton } from "@/components/ui/skeleton";
 
 /**
@@ -9,7 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 export default function SourceDetailLoading() {
   return (
     <div aria-busy="true" aria-live="polite">
-      <span className="sr-only">Loading…</span>
+      <NavigationProgress />
 
       <div className="mb-4 flex flex-col gap-3 border-b border-border pb-5 md:flex-row md:items-end md:justify-between">
         <div className="flex min-w-0 flex-col gap-2">

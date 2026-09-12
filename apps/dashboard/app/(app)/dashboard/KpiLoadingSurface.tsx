@@ -1,4 +1,5 @@
 import { Skeleton } from "@/components/ui/skeleton";
+import { LoaderCircle } from "lucide-react";
 
 const KPI_LABELS = [
   { label: "Events ingested", href: "/usage" },
@@ -26,7 +27,10 @@ export function KpiLoadingSurface() {
           className="flex min-h-32 flex-col gap-2 rounded-xl border border-border bg-card p-5 transition-colors hover:border-foreground/20 hover:bg-accent/30"
         >
           <p className="text-xs font-medium text-muted-foreground">{item.label}</p>
-          <Skeleton className="h-10 w-24" />
+          <span className="flex h-10 items-center gap-2 text-sm text-muted-foreground">
+            <LoaderCircle className="size-4 motion-safe:animate-spin" aria-hidden="true" />
+            Loading…
+          </span>
           <Skeleton className="mt-1 h-3 w-20" />
         </a>
       ))}

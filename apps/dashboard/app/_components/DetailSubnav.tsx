@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
+import Link from "@/app/_components/NavigationLink";
 import { usePathname, useSearchParams } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -52,7 +52,6 @@ export function DetailSubnav({
     <nav aria-label={resourceLabel} data-dashboard-nav="ready" className="flex flex-col gap-3 py-2">
       <Link
         href={backHref}
-        prefetch={false}
         className="inline-flex items-center gap-1.5 px-2 text-xs text-muted-foreground transition-colors hover:text-foreground"
       >
         <ArrowLeft className="size-3" />
@@ -70,7 +69,6 @@ export function DetailSubnav({
               <Link
                 href={section.href}
                 aria-current={active ? "page" : undefined}
-                prefetch={false}
                 className={cn(
                   "group flex h-7 items-center gap-2 rounded-md px-2 text-sm transition-colors",
                   active

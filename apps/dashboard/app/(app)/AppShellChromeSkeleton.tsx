@@ -1,3 +1,4 @@
+import { NavigationProgress } from "../_components/NavigationProgress";
 import Link from "next/link";
 import { Activity } from "lucide-react";
 import { AppNav } from "../AppNav";
@@ -21,7 +22,7 @@ export function AppShellChromeSkeleton() {
       aria-label="Loading workspace"
       aria-busy="true"
     >
-      <span className="sr-only">Loading workspace…</span>
+      <NavigationProgress label="Loading workspace…" />
       <aside className="hidden md:sticky md:top-0 md:flex md:h-svh md:w-64 md:shrink-0 md:flex-col md:self-start md:border-r md:border-border md:bg-sidebar md:text-sidebar-foreground">
         {sidebar}
       </aside>

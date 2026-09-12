@@ -1,7 +1,7 @@
 "use client";
 
 import { useActionState, useEffect, useMemo, useState } from "react";
-import Link from "next/link";
+import Link from "@/app/_components/NavigationLink";
 import { RotateCcw } from "lucide-react";
 import {
   requestReplay,

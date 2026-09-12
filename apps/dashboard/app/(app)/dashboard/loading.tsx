@@ -1,3 +1,4 @@
+import { NavigationProgress } from "@/app/_components/NavigationProgress";
 import Link from "next/link";
 import { Webhook } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -8,7 +9,7 @@ import { PrimaryChartLoadingSurface } from "./PrimaryChartLoadingSurface";
 export default function DashboardLoading() {
   return (
     <div aria-busy="true" aria-live="polite">
-      <span className="sr-only">Loading dashboard metrics…</span>
+      <NavigationProgress label="Loading dashboard…" />
 
       <div className="mb-8 flex flex-col gap-4 pb-6 md:flex-row md:items-end md:justify-between md:gap-6">
         <div className="flex min-w-0 flex-col gap-1.5">

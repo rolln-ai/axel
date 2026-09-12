@@ -1,4 +1,5 @@
 import { FLOW_ACTIVITY_SQL, DELIVERY_ACTIVITY_SQL, UNATTEMPTED_SQL } from "../../apps/dashboard/lib/impact-alert-queries.ts";
+import { SOURCE_EVENT_COUNTS_SQL } from "../../apps/dashboard/lib/source-event-counts-query.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -77,6 +78,36 @@ test("delivery rollup preserves outcomes before background merges", { timeout: 1
   // Separate inserts force different parts. FINAL must work before merges run.
   for (const row of rows) await query(`INSERT INTO delivery_base_latest_outcomes FORMAT JSONCompactEachRow\n${JSON.stringify(row)}`);
   await query(schema.match(/CREATE TABLE IF NOT EXISTS events\b[\s\S]*?;/)[0]);
+  await t.test("source counts preserve exact deduplication and time windows within the memory cap", async () => {
+    const eventRows = [
+      ["ws_counts", "source_a", "duplicate", at(-0.5)],
+      ["ws_counts", "source_a", "duplicate", at(-0.5)],
+      ["ws_counts", "source_a", "month", at(-2)],
+      ["ws_counts", "source_a", "older", at(-5)],
+      ["ws_counts", "source_b", "duplicate", at(-2)],
+      ["ws_other_counts", "source_a", "foreign", at(0)],
+      ["ws_counts", "source_a", "boundary", at(-1)],
+      ["ws_counts", "source_a", "different_receipts", at(-2)],
+      ["ws_counts", "source_a", "different_receipts", at(0)],
+    ].map(([workspace_id, source_id, event_id, received_at]) => ({ workspace_id, source_id, event_id, received_at }));
+    await query(`INSERT INTO events FORMAT JSONEachRow\n${eventRows.map((row) => JSON.stringify(row)).join("\n")}`);
+    // Keep every fixture inside the table TTL while exercising an older window.
+    const params = { workspace_id: "ws_counts", since24h: at(-1), since30d: at(-3) };
+    const reference = `SELECT source_id,
+      uniqExactIf(event_id, received_at >= parseDateTime64BestEffort({since24h:String}, 3)) AS events_24h,
+      uniqExactIf(event_id, received_at >= parseDateTime64BestEffort({since30d:String}, 3)) AS events_30d,
+      uniqExact(event_id) AS events_all
+      FROM events WHERE workspace_id = {workspace_id:String} GROUP BY source_id`;
+    const baseline = await query(reference, params);
+    const candidate = await query(SOURCE_EVENT_COUNTS_SQL, params);
+    const ordered = (rows) => rows.sort((a, b) => a.source_id.localeCompare(b.source_id));
+    assert.deepEqual(ordered(candidate.data), ordered(baseline.data));
+    assert.deepEqual(candidate.data, [
+      { source_id: "source_a", events_24h: "3", events_30d: "4", events_all: "5" },
+      { source_id: "source_b", events_24h: "0", events_30d: "1", events_all: "1" },
+    ]);
+    t.diagnostic(`Source count query seconds, reference=${baseline.statistics.elapsed}, candidate=${candidate.statistics.elapsed}`);
+  });
   await t.test("impact monitoring uses accepted traffic, current retries and tenant-scoped missing deliveries", async () => {
     const received = (minutes) => new Date(now - minutes * 60000).toISOString().replace("T", " ").replace("Z", "");
     const eventRows = Array.from({length: 25}, (_, i) => ({workspace_id: "ws_monitor", source_id: "src_monitor", event_id: `event_${i}`, received_at: received(60 + i * 2)}));

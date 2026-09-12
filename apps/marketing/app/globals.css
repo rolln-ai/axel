@@ -376,8 +376,15 @@ section.hero::after {
 }
 
 .heroTitle em {
+  --headline-highlight: color-mix(in srgb, var(--primary) 45%, var(--bg));
   font-style: normal;
-  color: var(--primary);
+  color: inherit;
+  padding: 0 0.06em 0.02em;
+  margin-inline: -0.06em;
+  background: linear-gradient(var(--headline-highlight), var(--headline-highlight))
+    0 80% / 100% 0.36em no-repeat;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
 }
 
 .heroLede {

@@ -1,4 +1,5 @@
 import { Skeleton } from "@/components/ui/skeleton";
+import { LoaderCircle } from "lucide-react";
 
 // Mirrors ONE real ChartCard (OverviewChart.tsx): `rounded-xl border bg-card
 // p-6`, an eyebrow/headline/sub header + legend, and an `h-60` (240px) chart
@@ -10,7 +11,10 @@ function ChartCardSkeleton() {
       <div className="mb-4 flex items-start justify-between gap-4">
         <div className="min-w-0 space-y-2">
           <Skeleton className="h-3 w-36" />
-          <Skeleton className="h-7 w-44" />
+          <p className="flex h-7 items-center gap-2 text-sm text-muted-foreground">
+            <LoaderCircle className="size-4 motion-safe:animate-spin" aria-hidden="true" />
+            Loading chart…
+          </p>
           <Skeleton className="h-3 w-28" />
         </div>
         <Skeleton className="h-3 w-24" />

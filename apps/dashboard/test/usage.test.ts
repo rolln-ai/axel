@@ -57,6 +57,16 @@ describe("usage", () => {
     expect(globalThis.__axelClickhouseFetch).toHaveBeenCalledTimes(2);
   });
 
+  it.each(["241", "159", "60"])("does not retry a ClickHouse query rejected with code %s", async (code) => {
+    process.env.CLICKHOUSE_URL = "https://clickhouse.example";
+    globalThis.__axelClickhouseFetch = vi.fn(async () => new Response("private query details", {
+      status: 500,
+      headers: { "X-ClickHouse-Exception-Code": code },
+    }));
+    await expect(clickhouse().query("SELECT 1")).rejects.toMatchObject({ status: 500, code: Number(code) });
+    expect(globalThis.__axelClickhouseFetch).toHaveBeenCalledOnce();
+  });
+
   it("does not expose ClickHouse response bodies in errors", async () => {
     process.env.CLICKHOUSE_URL = "https://clickhouse.example";
     globalThis.__axelClickhouseFetch = vi.fn(async () => (

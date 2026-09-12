@@ -1,4 +1,4 @@
-import Link from "next/link";
+import Link from "@/app/_components/NavigationLink";
 import { EmptyState } from "../../EmptyState";
 import { PageHeader } from "../../_components/PageHeader";
 import { EventStreamTable, type EventStreamRow } from "./EventStreamTable";

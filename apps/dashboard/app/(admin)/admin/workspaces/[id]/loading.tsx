@@ -1,10 +1,11 @@
+import { NavigationProgress } from "@/app/_components/NavigationProgress";
 import { Skeleton } from "@/components/ui/skeleton";
 
 /** Inner-segment loading for /admin/workspaces/[id]. */
 export default function AdminWorkspaceDetailLoading() {
   return (
     <div aria-busy="true" aria-live="polite">
-      <span className="sr-only">Loading…</span>
+      <NavigationProgress />
 
       <div className="mb-6 flex flex-col gap-2 border-b border-border pb-5">
         <Skeleton className="h-3 w-24" />

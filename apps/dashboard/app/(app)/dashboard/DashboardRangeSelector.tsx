@@ -10,11 +10,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { DEFAULT_RANGE, RANGES, type DashboardRange } from "./dashboardRange";
+import { NavigationProgress } from "../../_components/NavigationProgress";
 
 export function DashboardRangeSelector({ current }: { current: DashboardRange }) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [, startTransition] = useTransition();
+  const [pending, startTransition] = useTransition();
 
   function onChange(value: string) {
     const params = new URLSearchParams(searchParams);
@@ -31,6 +32,7 @@ export function DashboardRangeSelector({ current }: { current: DashboardRange })
 
   return (
     <div data-dashboard-filters="ready">
+      <NavigationProgress pending={pending} label="Loading dashboard…" />
       <Select value={current} onValueChange={onChange}>
         <SelectTrigger
           aria-label="Dashboard time range"

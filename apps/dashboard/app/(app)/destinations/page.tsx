@@ -1,4 +1,4 @@
-import Link from "next/link";
+import Link from "@/app/_components/NavigationLink";
 import { EmptyState } from "../../EmptyState";
 import { PageHeader } from "../../_components/PageHeader";
 import { EntityStatusBadge } from "../../_components/StatusBadges";
@@ -93,7 +93,7 @@ export default async function DestinationsPage() {
               {destinations.map((dest) => (
                 <TableRow key={dest.id}>
                   <TableCell>
-                    <Link href={`/destinations/${dest.id}`} prefetch={false} className="block">
+                    <Link href={`/destinations/${dest.id}`} className="block">
                       <strong className="text-sm font-medium text-foreground">
                         {dest.name ?? "(unnamed)"}
                       </strong>
@@ -103,17 +103,17 @@ export default async function DestinationsPage() {
                     </Link>
                   </TableCell>
                   <TableCell>
-                    <Link href={`/destinations/${dest.id}`} prefetch={false} className="block">
+                    <Link href={`/destinations/${dest.id}`} className="block">
                       <code className="rounded-sm bg-muted px-1 font-mono text-xs">{dest.type}</code>
                     </Link>
                   </TableCell>
                   <TableCell>
-                    <Link href={`/destinations/${dest.id}`} prefetch={false} className="block">
+                    <Link href={`/destinations/${dest.id}`} className="block">
                       <DestinationConfigSummary type={dest.type} config={dest.config} />
                     </Link>
                   </TableCell>
                   <TableCell>
-                    <Link href={`/destinations/${dest.id}`} prefetch={false} className="block">
+                    <Link href={`/destinations/${dest.id}`} className="block">
                       {dest.fingerprint_last4 ? (
                         <code className="font-mono text-[11px]">
                           •••{dest.fingerprint_last4}{" "}
@@ -127,12 +127,12 @@ export default async function DestinationsPage() {
                     </Link>
                   </TableCell>
                   <TableCell>
-                    <Link href={`/destinations/${dest.id}`} prefetch={false} className="block text-sm">
+                    <Link href={`/destinations/${dest.id}`} className="block text-sm">
                       {dest.routes_attached}
                     </Link>
                   </TableCell>
                   <TableCell>
-                    <Link href={`/destinations/${dest.id}`} prefetch={false} className="block">
+                    <Link href={`/destinations/${dest.id}`} className="block">
                       <EntityStatusBadge status={dest.status} className="capitalize" />
                     </Link>
                   </TableCell>
