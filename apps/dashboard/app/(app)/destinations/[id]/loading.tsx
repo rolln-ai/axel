@@ -1,3 +1,4 @@
+import { NavigationProgress } from "@/app/_components/NavigationProgress";
 import { Skeleton } from "@/components/ui/skeleton";
 
 /**
@@ -11,7 +12,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 export default function DestinationDetailLoading() {
   return (
     <div aria-busy="true" aria-live="polite">
-      <span className="sr-only">Loading…</span>
+      <NavigationProgress />
 
       {/* Top StatCard grid (destinations/[id]/page.tsx). */}
       <div className="mb-6 grid grid-cols-1 gap-3 md:grid-cols-3" aria-hidden="true">

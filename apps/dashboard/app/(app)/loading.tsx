@@ -1,3 +1,4 @@
+import { NavigationProgress } from "@/app/_components/NavigationProgress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeaderSkeleton } from "../_components/PageHeader";
 
@@ -9,7 +10,7 @@ import { PageHeaderSkeleton } from "../_components/PageHeader";
 export default function AppLoading() {
   return (
     <div aria-busy="true" aria-live="polite">
-      <span className="sr-only">Loading…</span>
+      <NavigationProgress />
 
       <PageHeaderSkeleton actions={<Skeleton className="h-9 w-32 rounded-lg" />} />
 

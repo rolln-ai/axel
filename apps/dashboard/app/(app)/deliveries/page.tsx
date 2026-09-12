@@ -48,26 +48,17 @@ export default async function DeliveriesPage({
   const workspaceId = session.activeWorkspace.workspace_id;
   const canReplay = session.activeWorkspace.role === "owner" || session.activeWorkspace.role === "admin";
 
-  let attempts: WorkspaceDeliveryAttemptRow[] = [];
-  let attemptsError: string | null = null;
-  if (usageEnabled()) {
-    const attemptsResult = await settleWithin(
+  const [attemptsResult, deadLettersResult, unresolvedTotalResult] = await Promise.all([
+    settleWithin(
+      usageEnabled() ?
       listWorkspaceDeliveryAttempts(
         workspaceId,
         clickhouseStatusForFilter(filters.status),
         ATTEMPT_LIMIT,
-      ),
+      ) : Promise.resolve([] as WorkspaceDeliveryAttemptRow[]),
       DELIVERIES_PAGE_TIMEOUT_MS,
       "Delivery stream took too long to load.",
-    );
-    if (attemptsResult.ok) {
-      attempts = attemptsResult.value;
-    } else {
-      attemptsError = attemptsResult.error;
-    }
-  }
-
-  const [deadLettersResult, unresolvedTotalResult] = await Promise.all([
+    ),
     settleWithin(
       listDeadLettersFull(workspaceId),
       DELIVERIES_PAGE_TIMEOUT_MS,
@@ -79,6 +70,8 @@ export default async function DeliveriesPage({
       "Unresolved count took too long to load.",
     ),
   ]);
+  const attempts = attemptsResult.ok ? attemptsResult.value : [];
+  const attemptsError = attemptsResult.ok ? null : attemptsResult.error;
   const deadLetters =
     deadLettersResult.ok ? deadLettersResult.value : [];
   const unresolvedTotal =

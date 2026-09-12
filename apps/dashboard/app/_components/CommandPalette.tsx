@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
+import { NavigationProgress } from "./NavigationProgress";
 import {
   searchWorkspaceAction,
   type WorkspaceSearchHit,
@@ -57,6 +58,7 @@ export function CommandPaletteProvider({
   const [open, setOpen] = React.useState(false);
   const [items, setItems] = React.useState<CommandItem[]>(initialItems);
   const router = useRouter();
+  const [pending, startTransition] = React.useTransition();
   // AXE-31 — workspace search-as-you-type. Debounced 180ms so we
   // don't fire one query per keystroke; cancels prior in-flight
   // queries via a ref-tracked "request id".
@@ -118,7 +120,7 @@ export function CommandPaletteProvider({
       if (item.to.startsWith("http")) {
         window.open(item.to, "_blank", "noopener,noreferrer");
       } else {
-        router.push(item.to);
+        startTransition(() => router.push(item.to!));
       }
     } else if (item.onInvoke) {
       item.onInvoke();
@@ -159,6 +161,7 @@ export function CommandPaletteProvider({
 
   return (
     <CommandPaletteContext.Provider value={api}>
+      <NavigationProgress pending={pending} />
       {children}
       <CommandDialog open={open} onOpenChange={setOpen}>
         <CommandInput

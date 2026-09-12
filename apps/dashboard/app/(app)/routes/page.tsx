@@ -1,4 +1,4 @@
-import Link from "next/link";
+import Link from "@/app/_components/NavigationLink";
 import { EmptyState } from "../../EmptyState";
 import { PageHeader } from "../../_components/PageHeader";
 import { LocalTime } from "../../_components/LocalTime";
@@ -107,7 +107,6 @@ export default async function RoutesPage() {
                   Create a{" "}
                   <Link
                     href="/sources"
-                    prefetch={false}
                     className="font-medium text-foreground underline-offset-2 hover:underline"
                   >
                     source
@@ -119,7 +118,6 @@ export default async function RoutesPage() {
                   Create a{" "}
                   <Link
                     href="/destinations"
-                    prefetch={false}
                     className="font-medium text-foreground underline-offset-2 hover:underline"
                   >
                     destination
@@ -153,25 +151,25 @@ export default async function RoutesPage() {
               {routes.map((route) => (
                 <TableRow key={route.id}>
                   <TableCell>
-                    <Link href={`/routes/${route.id}`} prefetch={false} className="block">
+                    <Link href={`/routes/${route.id}`} className="block">
                       <span className="text-sm font-medium text-foreground">
                         {route.name ?? route.id}
                       </span>
                     </Link>
                   </TableCell>
                   <TableCell>
-                    <Link href={`/routes/${route.id}`} prefetch={false} className="block">
+                    <Link href={`/routes/${route.id}`} className="block">
                       <span className="text-sm text-foreground">{route.source_name}</span>{" "}
                       <small className="font-mono text-[11px] text-muted-foreground">{route.source_id}</small>
                     </Link>
                   </TableCell>
                   <TableCell>
-                    <Link href={`/routes/${route.id}`} prefetch={false} className="block">
+                    <Link href={`/routes/${route.id}`} className="block">
                       <small className="text-xs text-muted-foreground">{route.destination_summary}</small>
                     </Link>
                   </TableCell>
                   <TableCell>
-                    <Link href={`/routes/${route.id}`} prefetch={false} className="flex items-center gap-1.5">
+                    <Link href={`/routes/${route.id}`} className="flex items-center gap-1.5">
                       {route.has_filter ? (
                         <code className="rounded-sm bg-muted px-1 font-mono text-[11px]">ƒ filter</code>
                       ) : null}
@@ -184,7 +182,7 @@ export default async function RoutesPage() {
                     </Link>
                   </TableCell>
                   <TableCell>
-                    <Link href={`/routes/${route.id}`} prefetch={false} className="block">
+                    <Link href={`/routes/${route.id}`} className="block">
                       <Badge
                         variant={
                           route.status === "active"
@@ -200,7 +198,7 @@ export default async function RoutesPage() {
                     </Link>
                   </TableCell>
                   <TableCell className="text-sm text-muted-foreground">
-                    <Link href={`/routes/${route.id}`} prefetch={false} className="block">
+                    <Link href={`/routes/${route.id}`} className="block">
                       <LocalTime value={route.created_at} mode="date" />
                     </Link>
                   </TableCell>

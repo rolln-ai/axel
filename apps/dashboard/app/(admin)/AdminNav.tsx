@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
+import Link from "@/app/_components/NavigationLink";
 import { usePathname } from "next/navigation";
 import { Activity, LayoutGrid, Building2, Users, ScrollText, CreditCard } from "lucide-react";
 import { cn } from "@/lib/utils";

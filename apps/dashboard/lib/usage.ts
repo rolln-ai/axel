@@ -12,6 +12,7 @@ import {
 import { cacheTags, workspaceCacheScope } from "./repositories";
 import { addDaysToDateKey, localDateKey, normalizeWorkspaceTimezone } from "./timezones";
 import { publicDeliveryErrorCode } from "./public-delivery-response";
+import { SOURCE_EVENT_COUNTS_SQL } from "./source-event-counts-query";
 
 /**
  * Usage data is sourced from ClickHouse and aggregates ingest events / delivery
@@ -1214,13 +1215,7 @@ export async function getSourceEventCountsByWindow(
     events_30d: string | number;
     events_all: string | number;
   }>(
-    `SELECT source_id,
-            uniqExactIf(event_id, received_at >= parseDateTime64BestEffort({since24h:String}, 3)) AS events_24h,
-            uniqExactIf(event_id, received_at >= parseDateTime64BestEffort({since30d:String}, 3)) AS events_30d,
-            uniqExact(event_id) AS events_all
-       FROM events
-      WHERE workspace_id = {workspace_id:String}
-      GROUP BY source_id`,
+    SOURCE_EVENT_COUNTS_SQL,
     { workspace_id: workspaceId, since24h, since30d },
   );
   return result.rows.map((row) => ({

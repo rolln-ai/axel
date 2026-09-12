@@ -1,4 +1,4 @@
-import Link from "next/link";
+import Link from "@/app/_components/NavigationLink";
 import { Suspense, type ReactNode } from "react";
 import { Activity, AlertTriangle } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -60,7 +60,6 @@ function SidebarContent({ session }: { session: CurrentSession }) {
       <div className="flex flex-col gap-3 px-3 pt-4 pb-3">
         <Link
           href="/dashboard"
-          prefetch={false}
           className="flex items-center gap-2 px-1"
           aria-label="Axel home"
         >
@@ -126,7 +125,6 @@ function InboxFooterLink({ count }: { count: number }) {
   return (
     <Link
       href="/inbox"
-      prefetch={false}
       aria-label={count > 0 ? `Inbox — ${count} unresolved` : "Inbox"}
       className="relative inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground"
     >

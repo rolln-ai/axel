@@ -1,5 +1,5 @@
 import { Suspense } from "react";
-import Link from "next/link";
+import Link from "@/app/_components/NavigationLink";
 import { ArrowLeft } from "lucide-react";
 import { notFound } from "next/navigation";
 import { LocalTime } from "../../../_components/LocalTime";

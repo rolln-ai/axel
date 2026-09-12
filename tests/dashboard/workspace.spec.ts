@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { dashboardFixture, qaPassword } from "./fixtures.mjs";
+import { verifySlowNavigation } from "./navigation";
 
 test("sign-in, workspace changes, source isolation, and sign-out", async ({ page, request }, testInfo) => {
   const pageErrors: string[] = [];
@@ -23,6 +24,8 @@ test("sign-in, workspace changes, source isolation, and sign-out", async ({ page
   await expect(page.getByText("Workspace settings updated.", { exact: true })).toBeVisible({ timeout: 15_000 });
   await page.reload();
   await expect(page.getByLabel("Name", { exact: true })).toHaveValue(updatedName);
+
+  await test.step("Slow navigation stays visible and interruptible", () => verifySlowNavigation(page, testInfo));
 
   await page.goto("/dashboard");
   await expect(page.getByRole("heading", { name: "Top sources this month" })).toBeVisible();
