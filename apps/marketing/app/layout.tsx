@@ -17,9 +17,9 @@ const mono = Geist_Mono({
   variable: "--font-mono",
 });
 
-const HOME_TITLE = "Axel — Capture webhooks and deliver them to your data stack";
+const HOME_TITLE = "Axel — Open-source webhook delivery. Managed in the cloud.";
 const HOME_DESCRIPTION =
-  "Store original webhook payloads before returning 202, then deliver them to databases, warehouses, object storage, or HTTP endpoints with retries and replay controls.";
+  "Open-source webhook ingestion, routing, retries, and replay under Apache-2.0. Self-host Axel or start free on Axel Cloud with managed infrastructure and searchable delivery history.";
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),

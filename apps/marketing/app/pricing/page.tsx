@@ -5,7 +5,6 @@ import { JsonLd } from "../_components/JsonLd";
 import { pageMetadata } from "../../lib/seo";
 import { breadcrumbLd, faqPageLd } from "../../lib/structured-data";
 import { PricingEstimator } from "./PricingEstimator";
-import { sourceReleasePublished } from "../../lib/source-release";
 
 export const metadata: Metadata = pageMetadata({
   title: "Pricing",
@@ -63,7 +62,7 @@ const tiers: Tier[] = [
 const faqs: Array<{ q: string; a: string }> = [
   {
     q: "Can I self-host Axel?",
-    a: `${sourceReleasePublished ? "Yes. Axel is Apache-2.0 software" : "The public source release is being prepared under Apache-2.0"}, including the connectors, routing, retries, and replay. Self-hosting has no Axel license fee. You run the Docker and Cloudflare infrastructure, backups, and upgrades. The small install omits ClickHouse; add it for event search and analytics. Cloud includes managed infrastructure and 30 days of searchable history.`,
+    a: `Yes. Axel is Apache-2.0 software, including the connectors, routing, retries, and replay. Self-hosting has no Axel license fee. You run the Docker and Cloudflare infrastructure, backups, and upgrades. The small install omits ClickHouse; add it for event search and analytics. Cloud includes managed infrastructure and 30 days of searchable history.`,
   },
   {
     q: "What counts toward usage?",
@@ -141,9 +140,9 @@ export default function PricingPage() {
         <div className="container">
           <div className="sectionHead">
             <span className="kicker">Cloud and self-hosting</span>
-            <h2>{sourceReleasePublished ? "Pay us to run it. Or run it yourself." : "Managed Cloud now. Self-hosting soon."}</h2>
+            <h2>Pay us to run it. Or run it yourself.</h2>
             <p className="lede">
-              {sourceReleasePublished ? "Cloud runs the same application code available under Apache-2.0." : "Axel Cloud is available today. We are preparing the Apache-2.0 public source release."} Your subscription
+              Cloud runs the same application code available under Apache-2.0. Your subscription
               covers managed infrastructure, updates, delivery monitoring, and searchable history.
               Self-hosting has no Axel license fee; you operate the stack and pay your providers.
             </p>

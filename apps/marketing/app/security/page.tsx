@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { SECURITY_REPORT_URL } from "../../lib/project";
 import Link from "next/link";
 import { SiteFooter, SiteHeader } from "../_components/SiteChrome";
 import { JsonLd } from "../_components/JsonLd";
@@ -176,16 +177,17 @@ export default function SecurityPage() {
           <div className="ctaInner">
             <h2>Have a security question?</h2>
             <p>
-              We respond to security@axelapp.ai within one business day. Vulnerability reports get a same-day
-              acknowledgement and a fix or mitigation timeline within 72 hours.
+              Report vulnerabilities privately through GitHub or email security@axelapp.ai.
+              Include the affected component, reproduction steps, and potential impact.
+              Please keep credentials and customer payloads out of public issues.
             </p>
             <div className="heroActions">
               <a className="btn" href="mailto:security@axelapp.ai">
                 Email security@axelapp.ai <span className="arrow">→</span>
               </a>
-              <Link className="btn ghost" href="/pricing">
-                Pricing
-              </Link>
+              <a className="btn ghost" href={SECURITY_REPORT_URL}>
+                Report a vulnerability privately
+              </a>
             </div>
           </div>
         </div>

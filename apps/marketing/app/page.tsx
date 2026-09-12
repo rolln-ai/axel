@@ -1,5 +1,5 @@
 import { SiteFooter, SiteHeader } from "./_components/SiteChrome";
-import { sourceReleasePublished } from "../lib/source-release";
+import { SOURCE_URL, LICENSE_URL, SELF_HOSTING_URL } from "../lib/project";
 import { JsonLd } from "./_components/JsonLd";
 import { DashboardMock, PipelineMock, RouteMock, SourceMock } from "./_components/ProductMocks";
 import { breadcrumbLd, type FaqItem, faqPageLd, softwareApplicationLd } from "../lib/structured-data";
@@ -9,7 +9,15 @@ import { breadcrumbLd, type FaqItem, faqPageLd, softwareApplicationLd } from "..
 const homeFaqs: FaqItem[] = [
   {
     q: "What is Axel?",
-    a: "Axel captures third-party webhooks and delivers them to your data stack. It stores the original payload before returning 202, then routes it to your database, warehouse, object storage, or HTTP endpoint. Failed deliveries retry automatically, with searchable history and replay controls for recovery.",
+    a: "Axel is an open-source platform that captures third-party webhooks and delivers them to your data stack. It stores the original payload before returning 202, then routes it to your database, warehouse, object storage, or HTTP endpoint. Failed deliveries retry automatically, with searchable history and replay controls for recovery.",
+  },
+  {
+    q: "Is Axel open source?",
+    a: "Yes. The application is available on GitHub under Apache-2.0, including the connectors, routing, retries, and replay. You can use, modify, and self-host it without an Axel license fee. Your hosting providers may charge for infrastructure.",
+  },
+  {
+    q: "How is Axel Cloud different from self-hosting?",
+    a: "Axel Cloud runs the same application code. We manage the infrastructure, updates, and delivery monitoring, with 30 days of searchable event and delivery history. When you self-host, you operate Docker and Cloudflare in your own accounts. ClickHouse is optional in the small self-host profile and is needed for analytics-backed search and usage views.",
   },
   {
     q: "What does an Axel 202 response mean?",
@@ -92,23 +100,23 @@ export default function Page() {
       <section className="hero">
         <div className="container heroInner">
           <div>
-            <span className="heroBadge">
-              <strong>{sourceReleasePublished ? "Open source" : "Source release"}</strong>
-              {sourceReleasePublished ? "Run it yourself, or let Axel Cloud run it for you" : "Coming soon. Axel Cloud is available now."}
-            </span>
-            <h1 className="heroTitle">
-              Capture webhooks and deliver them to <em>your data stack</em>.
+            <a className="heroBadge" href={LICENSE_URL}>
+              <strong>Apache-2.0</strong>
+              Self-host it or start on Axel Cloud
+            </a>
+            <h1 className="heroTitle homeHeroTitle">
+              Open-source webhook delivery to <em>your data stack</em>.
             </h1>
             <p className="heroLede">
-              Axel stores the original payload before returning 202, then routes it to your
-              database, warehouse, object storage, or HTTP endpoint. If delivery fails, Axel
-              retries it and gives you the history and replay controls to recover.
+              Capture, route, and replay webhooks with Axel. Read the code and run it on
+              your infrastructure, or create an Axel Cloud account and let us operate it.
+              Your events land in the databases, warehouses, and services you already use.
             </p>
             <div className="heroActions">
               <a className="btn" href="https://app.axelapp.ai/signup">
                 Start on Axel Cloud <span className="arrow">→</span>
               </a>
-              <a className="btn ghost" href="/docs#self-hosting">{sourceReleasePublished ? "Self-host Axel" : "About self-hosting"}</a>
+              <a className="btn ghost" href={SOURCE_URL}>View source <span className="arrow" aria-hidden="true">↗</span></a>
             </div>
             <div className="heroMeta">
               <span className="dot" aria-hidden="true" />
@@ -131,6 +139,46 @@ export default function Page() {
             <span>Databricks</span>
             <span>BigQuery</span>
             <span>Signed webhook</span>
+          </div>
+        </div>
+      </section>
+
+      <section className="deployment" id="open-source" aria-labelledby="deployment-heading">
+        <div className="container">
+          <div className="sectionHead">
+            <span className="kicker">Open source, with a cloud version</span>
+            <h2 id="deployment-heading">Axel Cloud or your infrastructure.</h2>
+            <p className="lede">The same application powers both. Choose who runs the infrastructure.</p>
+          </div>
+          <div className="deploymentGrid">
+            <article className="deploymentOption">
+              <span className="kicker">Apache-2.0</span>
+              <h3>Self-host Axel</h3>
+              <p>Run the application in your own accounts. Inspect the code, change it, and contribute improvements.</p>
+              <ul>
+                <li>Connectors, routing, retries, and replay included</li>
+                <li>Docker and Cloudflare installation guide</li>
+                <li>You manage hosting, backups, and upgrades</li>
+              </ul>
+              <div className="heroActions">
+                <a className="btn ghost" href={SOURCE_URL}>View source on GitHub <span className="arrow" aria-hidden="true">↗</span></a>
+                <a className="textLink" href={SELF_HOSTING_URL}>Self-hosting guide →</a>
+              </div>
+            </article>
+            <article className="deploymentOption deploymentCloud">
+              <span className="kicker">Managed by us</span>
+              <h3>Axel Cloud</h3>
+              <p>Create an account and send your first webhook. We operate the infrastructure, updates, and delivery monitoring.</p>
+              <ul>
+                <li>10,000 accepted events per month free</li>
+                <li>30 days of searchable event and delivery history</li>
+                <li>No infrastructure to deploy or maintain</li>
+              </ul>
+              <div className="heroActions">
+                <a className="btn" href="https://app.axelapp.ai/signup">Create a cloud account <span className="arrow">→</span></a>
+                <a className="textLink" href="/pricing">Cloud pricing →</a>
+              </div>
+            </article>
           </div>
         </div>
       </section>
@@ -359,8 +407,8 @@ export default function Page() {
               <a className="btn" href="https://app.axelapp.ai/signup">
                 Start on Axel Cloud <span className="arrow">→</span>
               </a>
-              <a className="btn ghost" href="/docs">
-                Read the docs
+              <a className="btn ghost" href={SOURCE_URL}>
+                View source on GitHub
               </a>
             </div>
           </div>

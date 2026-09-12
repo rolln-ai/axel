@@ -33,7 +33,7 @@ const OG_IMAGE = {
   url: "/opengraph-image",
   width: 1200,
   height: 630,
-  alt: "Axel — webhook data sync, done right, shown on the product dashboard",
+  alt: "Axel — open-source webhook delivery, available on Axel Cloud or your infrastructure",
 };
 
 export function pageMetadata({ title, description, path, ogTitle }: PageMeta): Metadata {

@@ -4,8 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { COMMUNITY_SUPPORT_URL, SUPPORT_HREF } from "../../lib/contact";
 import { Logo } from "./Logo";
-import { sourceReleasePublished } from "../../lib/source-release";
-import { NewsletterSignup } from "./NewsletterSignup";
+import { SOURCE_URL, LICENSE_URL } from "../../lib/project";
 
 export function SiteHeader() {
   const [scrolled, setScrolled] = useState(false);
@@ -13,12 +12,10 @@ export function SiteHeader() {
 
   const navItems = [
     { href: "/#integrations", label: "Integrations" },
-    { href: "/#pipeline", label: "Pipeline" },
-    { href: "/#why", label: "Why Axel" },
-    { href: "/pricing", label: "Pricing" },
+    { href: "/#open-source", label: "Open source" },
+    { href: "/pricing", label: "Cloud pricing" },
     { href: "/docs", label: "Docs" },
-    { href: "/security", label: "Security" },
-    ...(sourceReleasePublished ? [{ href: "https://github.com/rolln-ai/axel", label: "GitHub" }] : []),
+    { href: SOURCE_URL, label: "GitHub" },
   ] as const;
 
   useEffect(() => {
@@ -78,7 +75,7 @@ export function SiteHeader() {
               Sign in
             </a>
             <a className="btn" href="https://app.axelapp.ai/signup">
-              Sign up free <span className="arrow">→</span>
+              Start on Cloud <span className="arrow">→</span>
             </a>
           </div>
         </div>
@@ -102,27 +99,36 @@ export function SiteHeader() {
 export function SiteFooter() {
   return (
     <footer>
-      <NewsletterSignup />
+      <section className="projectUpdates container" aria-labelledby="project-updates-heading">
+        <div>
+          <h2 id="project-updates-heading">Follow the project on GitHub.</h2>
+          <p>Read the code, ask a question, or contribute a fix.</p>
+        </div>
+        <div className="projectLinks">
+          <a href={`${SOURCE_URL}/commits/main`}>Recent changes ↗</a>
+          <a href={COMMUNITY_SUPPORT_URL}>Discussions ↗</a>
+          <a href={`${SOURCE_URL}/blob/main/CONTRIBUTING.md`}>Contribute ↗</a>
+        </div>
+      </section>
       <div className="container nav">
         <Link className="brand" href="/" aria-label="Axel home">
           <Logo size={24} />
           <span className="brandWord">Axel</span>
         </Link>
-        <nav className="navLinks" aria-label="Footer">
+        <nav className="footerLinks" aria-label="Footer">
           <Link href="/docs">Docs</Link>
           <Link href="/docs#self-hosting">Self-hosting</Link>
           <Link href="/pricing">Pricing</Link>
           <Link href="/security">Security</Link>
-          {sourceReleasePublished ? <a href="https://github.com/rolln-ai/axel">GitHub</a> : null}
+          <a href={SOURCE_URL}>GitHub</a>
+          <a href={LICENSE_URL}>Apache-2.0</a>
           <Link href="/terms">Terms</Link>
           <Link href="/privacy">Privacy</Link>
           <Link href="/dpa">DPA</Link>
           <Link href="/legal">Legal</Link>
-          {SUPPORT_HREF || sourceReleasePublished ? (
-            <a href={SUPPORT_HREF ?? COMMUNITY_SUPPORT_URL}>
-              {SUPPORT_HREF ? "Contact" : "Discussions"}
-            </a>
-          ) : null}
+          <a href={SUPPORT_HREF ?? COMMUNITY_SUPPORT_URL}>
+            {SUPPORT_HREF ? "Contact" : "Discussions"}
+          </a>
         </nav>
         <span>© {new Date().getFullYear()} Axel</span>
       </div>
