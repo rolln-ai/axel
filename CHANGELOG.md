@@ -4,7 +4,9 @@ This file records user-visible changes to Axel. The project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) while public APIs
 and deployment contracts mature toward 1.0.
 
-## [0.1.0] - 2026-09-03
+## Unreleased
+
+The first public release has not been tagged. These features are available on `main`.
 
 - License Axel under Apache License 2.0, including its explicit patent grant.
 - Ingest webhooks, store raw payloads durably, and route events with declarative

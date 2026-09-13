@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { SECURITY_REPORT_URL } from "../../lib/project";
+import { SECURITY_REPORT_URL, SOURCE_URL, SELF_HOSTING_URL } from "../../lib/project";
 import Link from "next/link";
 import { SiteFooter, SiteHeader } from "../_components/SiteChrome";
 import { JsonLd } from "../_components/JsonLd";
@@ -8,12 +8,12 @@ import { breadcrumbLd, type FaqItem, faqPageLd } from "../../lib/structured-data
 
 const securityFaqs: FaqItem[] = [
   {
-    q: "Is Axel secure?",
-    a: "Axel uses TLS 1.2 or newer at the edge, encrypts raw R2 objects at rest, stores source ingest tokens as SHA-256 hashes, scopes data access by workspace_id, and evaluates declarative route rules without eval.",
+    q: "Which security controls does Axel use?",
+    a: "Axel uses TLS 1.2 or newer at the edge, encrypts raw R2 objects at rest, stores source ingest tokens as SHA-256 hashes, checks data access against workspace membership, and runs route filters and transforms without executing customer JavaScript.",
   },
   {
-    q: "Is Axel SOC 2 compliant?",
-    a: "Axel is in a SOC 2 Type I observation period, with the Type I report planned for Q3 2026 and SOC 2 Type II plus ISO 27001 targeted for 2027. Current product controls include edge TLS, source-token hashing, workspace scoping, and outbound request guards.",
+    q: "Who can answer a compliance question?",
+    a: "Email security@axelapp.ai with the requirements for your review. Ask for the documentation you need before relying on a certification or control. The product controls described here are not a certification report.",
   },
   {
     q: "How does Axel handle and store my data?",
@@ -32,11 +32,11 @@ const securityFaqs: FaqItem[] = [
 export const metadata: Metadata = pageMetadata({
   title: "Security",
   description:
-    "How Axel handles tokens, payloads, and customer data: encryption, declarative route rules, retention, tenant scoping, and compliance roadmap.",
+    "How Axel handles tokens, payloads, and customer data: encryption, declarative route rules, retention, workspace access, and private vulnerability reporting.",
   path: "/security",
 });
 
-const promises: Array<{ title: string; body: string; stat: string }> = [
+const controls: Array<{ title: string; body: string; stat: string }> = [
   {
     title: "Source tokens hashed at rest",
     body: "Axel stores custom-source ingest tokens as SHA-256 hashes and validates them with constant-time comparison. Custom sources use the x-axel-token header by default. Senders without custom headers can use a separately generated URL credential, enabled per source and rotated independently. Treat authenticated URLs as secrets; sender and proxy logs may record them. Named-provider sources use the provider's signature or webhook Basic Auth instead of an Axel token.",
@@ -48,18 +48,18 @@ const promises: Array<{ title: string; body: string; stat: string }> = [
     stat: "TLS 1.2+",
   },
   {
-    title: "Declarative route rules, not customer code",
-    body: "Route filters and transforms use an eval-free declarative language. The router does not execute customer JavaScript or expose network, filesystem, or process primitives to route configuration.",
+    title: "Route filters and transforms",
+    body: "Route filters and transforms use an eval-free declarative language. Routes cannot execute customer JavaScript, read files, or start processes.",
     stat: "no eval",
   },
   {
-    title: "Tenant isolation by workspace_id",
+    title: "Access scoped to your workspace",
     body: "Postgres rows, ClickHouse records, object keys, and queue messages carry workspace scope. Dashboard and service queries require the active workspace identifier.",
     stat: "workspace scoped",
   },
   {
     title: "Bounded payload retention",
-    body: "Defaults are 30 days for raw payloads and event traces, 90 days for dead letters, 30 days for replay-request records, and 365 days for audit logs. Configurable ranges are documented below and enforced by scheduled drains.",
+    body: "Defaults are 30 days for raw payloads and event traces, 90 days for dead letters, 30 days for replay-request records, and 365 days for audit logs. Configurable ranges are documented below and applied by scheduled cleanup jobs. The small self-host profile uses fixed 30-day raw retention.",
     stat: "30 days",
   },
   {
@@ -67,18 +67,6 @@ const promises: Array<{ title: string; body: string; stat: string }> = [
     body: "Axel records supported administrative changes such as workspace creation, member invitations and role changes, source lifecycle changes, destination changes, and replay requests. Each record includes an actor and timestamp.",
     stat: "actor + time",
   },
-];
-
-const roadmap: Array<{ when: string; title: string; status: "shipped" | "in-flight" | "planned" }> = [
-  { when: "Shipped", title: "TLS edge, hashed tokens, declarative transforms, audit log", status: "shipped" },
-  { when: "Shipped", title: "Per-source rate limits, body & depth caps, stable delivery IDs", status: "shipped" },
-  { when: "Shipped", title: "Egress guards on every destination connector — private-network and SSRF targets rejected, including connection tests", status: "shipped" },
-  { when: "Shipped", title: "Versioned signing secrets bound to their source, constant-time sign-in, fail-closed ingest", status: "shipped" },
-  { when: "Shipped", title: "Automated CI checks and protected production deployment workflows", status: "shipped" },
-  { when: "In flight", title: "Self-serve GDPR erasure for data-subject requests", status: "in-flight" },
-  { when: "Q3 2026", title: "SOC 2 Type I report (in observation now)", status: "planned" },
-  { when: "Q4 2026", title: "BYO-cloud option for regulated workloads", status: "planned" },
-  { when: "2027", title: "SOC 2 Type II + ISO 27001", status: "planned" },
 ];
 
 export default function SecurityPage() {
@@ -91,11 +79,11 @@ export default function SecurityPage() {
         <div className="container">
           <span className="kicker">Security</span>
           <h1 className="heroTitle securityTitle">
-            Built so the on-call engineer <em>sleeps through</em> the night.
+            How Axel protects <em>your webhook data</em>.
           </h1>
           <p className="heroLede">
-            Webhook traffic carries some of the most sensitive data in your stack — payment events, identity changes,
-            access grants. Axel is engineered like the systems your security team is already comfortable with.
+            Review how Axel authenticates senders, limits data access, and retains payloads.
+            The implementation and security policy are public. Vulnerability reports stay private.
           </p>
           <div className="heroActions">
             <a className="btn" href={SECURITY_REPORT_URL}>
@@ -114,12 +102,12 @@ export default function SecurityPage() {
             <span className="kicker">Implemented controls</span>
             <h2>Security controls in the product today.</h2>
             <p className="lede">
-              The controls below are implemented in the current product. Planned certifications
-              and additional controls are listed separately on the roadmap.
+              These controls cover source authentication, storage, route execution, and administrative access.
+              Self-host operators also manage the security of their host and provider accounts.
             </p>
           </div>
           <div className="frontierGrid securityGrid">
-            {promises.map((card) => (
+            {controls.map((card) => (
               <article className="frontierCard" key={card.title}>
                 <h3>{card.title}</h3>
                 <p>{card.body}</p>
@@ -134,22 +122,18 @@ export default function SecurityPage() {
         <div className="container">
           <div className="operateGrid">
             <div>
-              <span className="kicker">Roadmap</span>
-              <h2>The compliance work, sequenced honestly.</h2>
+              <span className="kicker">Review the implementation</span>
+              <h2>Read the code and operating instructions.</h2>
               <p className="lede">
-                We&apos;d rather you see the plan than a logo soup. Here&apos;s where the security work sits today, and where
-                it&apos;s going next.
+                Use the security policy to report a vulnerability. The review record documents
+                past findings and fixes; the self-hosting guide covers deployment requirements.
               </p>
             </div>
             <ul className="checklist roadmapList">
-              {roadmap.map((item) => (
-                <li key={item.title} data-status={item.status}>
-                  <div>
-                    <small className="roadmapWhen">{item.when}</small>
-                    <strong>{item.title}</strong>
-                  </div>
-                </li>
-              ))}
+              <li><a href={`${SOURCE_URL}/blob/main/SECURITY.md`}>Security policy and supported branches</a></li>
+              <li><a href={`${SOURCE_URL}/blob/main/docs/security-review-2026-08.md`}>Security review findings and fixes</a></li>
+              <li><a href={SELF_HOSTING_URL}>Self-hosting requirements and limitations</a></li>
+              <li><a href={`${SOURCE_URL}/blob/main/docs/credential-rotation.md`}>Credential rotation procedures</a></li>
             </ul>
           </div>
         </div>
@@ -159,7 +143,7 @@ export default function SecurityPage() {
         <div className="container">
           <div className="sectionHead">
             <span className="kicker">FAQ</span>
-            <h2>Is Axel secure, and how is my data handled?</h2>
+            <h2>Data handling questions</h2>
           </div>
           <div className="faqGrid">
             {securityFaqs.map((item) => (

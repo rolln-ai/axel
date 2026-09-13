@@ -28,8 +28,8 @@ const tiers: Tier[] = [
   {
     name: "Free",
     price: "$0",
-    cadence: "forever, no credit card",
-    blurb: "For local development, test webhooks, and proving out a first webhook-to-destination flow.",
+    cadence: "no credit card",
+    blurb: "For development, test webhooks, and sources with up to 10,000 events a month.",
     highlights: [
       "10,000 accepted inbound events / month included",
       "Webhook ingest with Postgres, Mongo, BigQuery, R2, S3, and HTTP destinations",
@@ -44,10 +44,10 @@ const tiers: Tier[] = [
     name: "Pro",
     price: "$20",
     cadence: "monthly credit",
-    blurb: "Your monthly payment is applied to usage. Scale up without choosing a tier or renegotiating a plan.",
+    blurb: "Your $20 payment covers the first $20 of usage each month. Pay for additional events at the same rate.",
     highlights: [
       "$20 monthly usage credit included",
-      "$0.015 per 1,000 accepted inbound events — $15 per million",
+      "$0.015 per 1,000 accepted inbound events, or $15 per million",
       "Destination pushes are included",
       "Retries are included",
       "Per-source rate limits, body & depth caps",
@@ -78,7 +78,7 @@ const faqs: Array<{ q: string; a: string }> = [
   },
   {
     q: "What happens after the $20 credit?",
-    a: "Usage continues at $0.015 per 1,000 accepted inbound events — $15 per million. The dashboard shows received events, delivery activity, metered usage, and the estimated invoice before the month closes.",
+    a: "Usage continues at $0.015 per 1,000 accepted inbound events, or $15 per million. The dashboard shows received events, delivery activity, metered usage, and the estimated invoice before the month closes.",
   },
   {
     q: "Does unused monthly credit roll over?",
@@ -96,11 +96,10 @@ export default function PricingPage() {
         <div className="container">
           <span className="kicker">Axel Cloud pricing</span>
           <h1 className="heroTitle pricingTitle">
-            Free to test. <em>$20 applied to usage</em> when you go live.
+            Start free. <em>$20 in monthly usage credit</em> on Pro.
           </h1>
           <p className="heroLede">
-            Start with 10,000 accepted inbound events free each month. Upgrade when you need
-            production volume: your $20 monthly payment becomes usage credit, then accepted
+            Start with 10,000 accepted inbound events free each month. Upgrade for more traffic. On Pro, your $20 monthly payment becomes usage credit, then accepted
             inbound events are metered at $0.015 per 1,000.
           </p>
         </div>
@@ -160,7 +159,7 @@ export default function PricingPage() {
             <span className="kicker">How metering works</span>
             <h2>One billing unit: accepted inbound events.</h2>
             <p className="lede">
-              The dashboard still shows events received, events pushed, byte volume, and per-source
+              The dashboard shows events received, events pushed, byte volume, and per-source
               breakdowns. Only accepted inbound events count toward your bill.
             </p>
           </div>
@@ -169,7 +168,7 @@ export default function PricingPage() {
             <article className="featureCard">
               <span className="icon" aria-hidden="true">⌁</span>
               <h3>Counted at ingest</h3>
-              <p>Each accepted webhook creates one received task. Rate-limited and rejected requests do not count.</p>
+              <p>Each accepted inbound event counts once. Rate-limited and rejected requests do not count.</p>
             </article>
             <article className="featureCard">
               <span className="icon" aria-hidden="true">→</span>
@@ -189,7 +188,7 @@ export default function PricingPage() {
         <div className="container">
           <div className="sectionHead">
             <span className="kicker">FAQ</span>
-            <h2>Things people ask before they sign.</h2>
+            <h2>Pricing questions</h2>
           </div>
           <div className="faqGrid">
             {faqs.map((item) => (
@@ -207,8 +206,7 @@ export default function PricingPage() {
           <div className="ctaInner">
             <h2>Ship your first webhook today.</h2>
             <p>
-              Start on the free plan, then upgrade when production traffic is ready. Pro keeps
-              pricing predictable without forcing you into a tier.
+              Start with 10,000 accepted events per month free. Upgrade to Pro when you need more.
             </p>
             <div className="heroActions">
               <a className="btn" href="https://app.axelapp.ai/signup">

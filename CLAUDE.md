@@ -4,21 +4,21 @@ Guidance for AI agents working in this repo (the Axel platform).
 
 ## What this repo is
 
-The Axel webhook platform — and the production source for Axel Cloud. Treat
-every change as production-bound: reviewed commits land on `main`, then a
+This repository contains the Axel platform and runs Axel Cloud. Reviewed
+commits land on `main`, then a
 maintainer manually promotes them through the protected Production environment
 using the deployment workflows in `.github/workflows/`.
 
 ## Working here
 
-- `pnpm install && pnpm build && pnpm test` — build is required before tests
-  (workspace packages resolve from `dist/`).
+- Run `pnpm install --frozen-lockfile && pnpm build && pnpm test`. Workspace
+  packages resolve from `dist/`, so build before testing.
 - Lint with `pnpm lint` (biome), types with `pnpm typecheck`.
 - Postgres migrations are append-only numbered files in
   `infra/postgres/migrations/`; never edit an applied migration.
-- Optional integrations (Stripe, Resend, Sentry, ClickHouse, OpenRouter) must
-  degrade gracefully when unconfigured — self-hosted installs
-  rely on it. The pattern is a `has*Configured()` probe, not a crash.
+- Check whether optional Stripe, Resend, Sentry, ClickHouse, and OpenRouter
+  integrations are configured before using them. Self-hosted installs must
+  start without them and show an unavailable state for dependent features.
 - The dashboard test suite models the cloud deployment; `test/setup-env.ts`
   sets a Stripe fixture key. Self-hosted behavior is tested in
   `apps/dashboard/test/billing-self-hosted.test.ts`.
@@ -31,4 +31,4 @@ using the deployment workflows in `.github/workflows/`.
 
 Public docs are ADRs and runbooks in `docs/`. Internal/business docs
 (cost model, brand voice, go-live records, release ledgers) live in the
-private `rolln-ai/axel-internal` repo — do not recreate them here.
+private `rolln-ai/axel-internal` repo. Do not copy them here.

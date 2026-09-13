@@ -87,9 +87,10 @@ by a no-op migration run. CI runs this command explicitly.
 The strict role model below remains available for installations where an
 administrator can manage cluster-wide roles and privileges. It is not a
 prerequisite for the Render path above.
+
 ## Strict role model
 
-Hosted production does not share one database credential across runtimes. The
+The strict model also gives each runtime a separate credential. The
 checked-in profiles in `scripts/database-service-access-profiles.mjs` are the
 source of truth for table and sequence access.
 
@@ -136,7 +137,7 @@ Keep `PARQUET_DELIVERY_QUEUE_ID` absent. Enabling that loop requires a separate
 profile review and code change. The Render blueprint omits the key so a fresh
 deployment cannot enable the broader path by accident.
 
-## Provisioning
+### Strict-model provisioning
 
 Run `scripts/hosted-database-bootstrap.mjs` before the service-role provisioner.
 Its default and `--prepare`/`--finalize` invocations are read-only unless
@@ -164,7 +165,7 @@ bootstrap superuser, or an equivalent offline provider-admin role, must create
 the migration login and grant the stable owner to it. The checked-in prepare
 mode enforces that authority and hard-stops for an ordinary owner connection.
 
-Hosted production is Render managed PostgreSQL. Render
+Using this strict model on Render requires provider assistance. Render
 [does not give customers PostgreSQL superuser access](https://render.com/docs/postgresql-pg-repack);
 a Render workspace administrator or API token is not the database authority
 required here. Open a Render support request for a bootstrap-superuser session
@@ -203,7 +204,7 @@ The old `scripts/provision-database-access-roles.mjs` command is disabled. It
 used one capability with grants on every current and future table, which is not
 an acceptable hosted production state.
 
-## Protected production configuration
+### Strict-model production configuration
 
 Create one secret per profile:
 
@@ -221,7 +222,7 @@ preflight secrets for the same three login roles:
 - `DATABASE_DELIVERY_WORKERS_PREFLIGHT_URL`
 - `DATABASE_PULL_WORKER_PREFLIGHT_URL`
 
-The bounded sync workflow authenticates the external preflight URL, then writes
+The credential-sync workflow authenticates the external preflight URL, then writes
 only the internal runtime URL to Render. Vercel, Cloudflare, migration, and
 metadata verification use external endpoints.
 
@@ -250,7 +251,7 @@ capability, clear both legacy-login allowlists, and set
 final mode, the verifier rejects the legacy capability or login even when it
 has no remaining grant.
 
-## Rotation order
+### Strict-model rotation order
 
 1. Freeze deploy and secret-sync reruns. Record the exact reviewed commit.
 2. Provision all five new logins while the old credentials remain valid.
@@ -267,7 +268,7 @@ has no remaining grant.
 8. Revoke and retire the broad legacy capability. Switch the protected final
    state flag to `1`, run all five preflights again, and run a no-op migration.
 9. Clear reviewed-old-login variables immediately after retirement. Any
-   credential or deployment mutation restarts the soak clock.
+   credential or deployment mutation restarts the release observation window.
 
 Do not retire the old credential until all five target-specific smoke checks
 pass. Do not start the 72-hour clock until the final-state preflights pass.

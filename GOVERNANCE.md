@@ -1,7 +1,6 @@
 # Governance
 
-Axel is an open-source project stewarded by rolln, Inc., which also operates
-Axel Cloud. The code uses the Apache License 2.0. rolln retains responsibility
+rolln, Inc. maintains Axel and operates Axel Cloud. The code uses the Apache License 2.0. rolln retains responsibility
 for the Axel name, hosted service, releases, and repository administration.
 
 ## Maintainers
@@ -13,14 +12,12 @@ The current maintainer is [@10-01](https://github.com/10-01). Maintainers:
 - Protect compatibility, security, privacy, and production reliability.
 - Moderate community spaces under the code of conduct.
 
-The project currently has one maintainer. That is a practical constraint, not
-a permanent governance model. Contributors who make sustained, sound changes
-and help other contributors may be invited to take on triage or maintainer
-responsibilities.
+The project has one maintainer. Contributors who regularly submit useful
+changes and help others may be invited to triage issues or maintain the project.
 
 ## Decisions and review
 
-Start material changes with an issue. The maintainer will explain the decision
+Open an issue before making a large change. The maintainer will explain the decision
 when a proposal is declined or changed substantially. Pull requests must pass
 the repository's required checks and resolve review conversations.
 

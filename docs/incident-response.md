@@ -1,4 +1,4 @@
-# Incident Response
+# Incident response
 
 ## Severity
 
@@ -6,14 +6,14 @@
 - `SEV-2`: Degraded ingest/delivery for multiple customers.
 - `SEV-3`: Single-customer issue or delayed analytics with no data loss.
 
-## First 15 Minutes
+## First 15 minutes
 
-1. Capture an incident note: severity, customer impact, timeline.
-2. Identify the failing surface: ingest, router, delivery, dashboard,
+1. Record severity, affected customers, and the timeline in a private incident note.
+2. Identify the failing component: ingest, router, delivery, dashboard,
    ClickHouse, Postgres, R2, Vercel, Render, or Cloudflare.
 3. Freeze unrelated deploys.
-4. Decide rollback vs. fix-forward.
-5. Capture timestamps, event ids, workspace ids, and deployment ids.
+4. Decide whether to roll back or deploy a fix.
+5. Record timestamps and event, workspace, and deployment IDs privately.
 
 ## Rollback
 
@@ -31,10 +31,10 @@ Schema rollback:
 3. If rollback is required, write a reviewed SQL migration and run it through
    the `Migrate Postgres` workflow.
 
-## Post-Incident
+## After the incident
 
 Within 24 hours:
 
-- Write a short post-mortem (timeline, root cause, follow-ups).
+- Write a short report with the timeline, cause, and follow-up work.
 - Add missing tests or alerts.
 - Update the runbook if the response was unclear.

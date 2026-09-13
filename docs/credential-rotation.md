@@ -1,6 +1,6 @@
-# Credential Rotation
+# Credential rotation
 
-## Credentials Master Key
+## Credential master key
 
 `CREDENTIALS_MASTER_KEY` is shared by dashboard, delivery-edge, and
 delivery-service. It decrypts destination credentials, so rotate carefully.
@@ -8,7 +8,7 @@ delivery-service. It decrypts destination credentials, so rotate carefully.
 Current storage uses AES-256-GCM under one master key. Until envelope
 encryption is introduced, rotation is a maintenance operation.
 
-## Rotation Plan
+## Planned master-key rotation
 
 1. Freeze destination credential writes.
 2. Add support for `CREDENTIALS_MASTER_KEY_PREVIOUS` and dual-read/new-write
@@ -18,9 +18,9 @@ encryption is introduced, rotation is a maintenance operation.
 5. Verify delivery to each credential-backed destination type.
 6. Remove the previous key from every runtime.
 
-## Emergency Rotation
+## Emergency rotation
 
-If the key is suspected compromised:
+If you suspect the key was compromised:
 
 1. Disable credential-backed deliveries if exposure risk is active.
 2. Rotate the master key.
@@ -71,7 +71,13 @@ rotation boundary.
 
 ## Control-plane PostgreSQL credentials
 
-Axel uses separate PostgreSQL trust levels in hosted production:
+For the managed Render database, use `DATABASE_ACCESS_MODE=render`. The owner
+login remains in the protected migration environment; each application uses a
+separate restricted login. Follow the [Render setup and rotation instructions](database-service-roles.md#render-deployments).
+That path does not require a provider superuser.
+
+The rest of this section covers the optional strict role model. It requires
+cluster-admin access and uses these roles:
 
 - `DATABASE_MIGRATION_URL` is a replaceable, non-owner login available only to
   protected migration and deployment jobs. It can only `SET ROLE` to the
@@ -83,7 +89,7 @@ Axel uses separate PostgreSQL trust levels in hosted production:
   workflow. It cannot read application rows.
 
 The ingest worker receives no PostgreSQL credential. See
-`docs/database-service-roles.md` for the exact profiles, protected variable
+[database service roles](database-service-roles.md) for the exact profiles, protected variable
 names, final-state gate, and target-by-target rotation order.
 
 The stable object owner is a role, not a long-lived application login. Every
@@ -102,7 +108,7 @@ allowlist of reviewed older migration logins that still need access. Clear it as
 soon as those logins are retired; an unlisted child of the owner blocks every
 migration.
 
-### Zero-downtime rotation
+### Strict-model rotation with credential overlap
 
 1. Freeze deploy reruns, broad secret-sync workflows, and Render Blueprint
    syncs. Keep the old credential active throughout validation.

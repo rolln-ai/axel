@@ -1,301 +1,155 @@
 # Self-hosting Axel
 
-Axel has a small-install profile for people who want to run it on a home
-server, lab machine, or existing VM. The public ingest and durable queues still
-use Cloudflare, while the control plane and all destination delivery run in
-Docker on your host.
+Run Axel's dashboard, Postgres database, and delivery service on a Docker host.
+Cloudflare Workers receive and route webhooks; Cloudflare Queues and R2 store
+pending work and raw payloads. This guide uses the `small` profile, which sends
+all deliveries through one Node service.
 
-If you want to use Axel without operating the stack,
-[start on Axel Cloud](https://app.axelapp.ai/signup). Cloud runs the same
-application code with managed infrastructure, updates, delivery monitoring,
-and 30 days of searchable history. The free plan includes 10,000 accepted
-inbound events per month. [Cloud pricing](https://axelapp.ai/pricing) covers
-paid usage. Self-hosting has no Axel subscription or license fee; you pay your
-infrastructure providers and maintain the installation.
-
-Webhook senders can use headers or an opt-in authenticated URL. See
-[webhook authentication](webhook-authentication.md) for setup and logging requirements.
-
-## What can actually be free
-
-Cloudflare Queues became available on the Workers Free plan in February 2026.
-The current free allowances include 100,000 Worker requests per day, 10,000
-Queue operations per day, and the published R2 free allowance. Cloudflare
-counts an HTTP pull as a read even when the Queue is empty. The small profile
-therefore starts at one-second polling while work is active, doubles the delay
-after each empty pull, and caps sustained-idle polling at 60 seconds. At that
-ceiling, an idle installation uses about 1,440 Queue reads per day, plus a few
-reads while the delay ramps up.
-
-Workers Free also limits each HTTP Worker request to 10 ms of CPU time. Network
-wait time does not count, but request validation, hashing, and payload parsing
-do. Cloudflare can terminate a request that repeatedly exceeds the limit with
-error 1102. Test the largest representative synthetic payload before relying
-on this profile. A sender must retry any request that does not receive Axel's
-202 response. Move to Workers Paid if normal ingest traffic cannot stay within
-the Free CPU limit.
-
-Axel normally uses about six additional Queue operations for one event routed
-to one destination. After sustained-idle polling, the remaining daily
-allowance is roughly 8,500 operations, or about 1,400 one-destination events
-with no retries. Multiple destinations, retries, other Queues in the same
-account, and waking from idle lower that number. An event arriving after a
-long idle period can wait up to 60 seconds for the next pull; finding work
-resets polling to one second.
-
-Workers Free Queue messages have a non-configurable 24-hour retention limit.
-If the Docker host or its delivery service stays offline for that long, pending
-delivery and dead-letter messages can expire. Use a paid Queue plan or another
-durable broker when the host cannot reliably recover inside 24 hours.
-
-The Docker services have no license fee. A $0 deployment therefore means you
-already have a machine and network connection. There is no credible option for
-an always-on, fully managed app, database, domain, and backups with a permanent
-$0 guarantee.
-
-Official limits change over time. Check the current
-[Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/),
-[Workers limits](https://developers.cloudflare.com/workers/platform/limits/),
-[Queues pricing](https://developers.cloudflare.com/queues/platform/pricing/),
-[R2 pricing](https://developers.cloudflare.com/r2/pricing/), and
-[`workers.dev` guidance](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/)
-before relying on a specific ceiling or hostname.
-
-## Small-install architecture
-
-| Component | Location | Notes |
-| --- | --- | --- |
-| Ingest Worker | Cloudflare Free | Validates and stores incoming payloads |
-| Router Worker | Cloudflare Free | Reads one ingress queue and fans out routes |
-| Three Queues | Cloudflare Free | Ingress, delivery, and dead letter |
-| Raw payload bucket | Cloudflare R2 | Provisioner installs a 30-day expiry rule |
-| Postgres | Docker host | Private Docker network, no published database port |
-| Dashboard | Docker host | Next.js production server |
-| Delivery service | Docker host | Handles every connector type in this profile |
-| Scheduler | Docker host | Calls the authenticated dashboard cron routes |
-| Caddy | Docker host | TLS and routing for dashboard plus internal APIs |
-
-The full production topology keeps 16 ingress shards and a separate edge
-delivery worker. The small profile binds all 16 code-level producers to one
-queue and maps both delivery bindings to one HTTP-pull queue. This trades peak
-throughput for fewer resources and a much simpler install.
-
-ClickHouse is not part of the default small stack. Webhook ingest, routing, and
-delivery work without it, but event search, usage charts, and parts of CLI
-payload lookup show empty or unavailable states. Add ClickHouse when those
-features matter; the production schema is in `infra/clickhouse`.
-
-The small profile's R2 lifecycle is a fixed 30-day ceiling. Shorter workspace
-or source retention settings, transient-mode early deletion, and the
-subject-to-event index used by data-subject erasure are not automated without
-the full analytics/indexing path. The dashboard disables those controls when
-`AXEL_SELF_HOST_PROFILE=small`; the server actions reject direct submissions
-too. Postgres-only dead-letter, replay-request, and audit-log retention remain
-available. Add ClickHouse and the production retention path when shorter raw
-retention or indexed erasure is required.
+You maintain the host, backups, credentials, and upgrades. There is no Axel
+license or subscription fee. For a managed installation, use
+[Axel Cloud](https://app.axelapp.ai/signup).
 
 ## Requirements
 
-- Docker with the Compose plugin
-- Node 22.13 or newer on the Node 22 LTS line, and pnpm 9, for the pinned
-  Cloudflare provisioning command
-- A Cloudflare account with a `workers.dev` subdomain enabled, or an active
-  Cloudflare zone for a custom ingest domain
-- A provisioning-only Cloudflare API token that can edit Workers scripts,
-  Queues, and R2 storage
-- A separate, account-restricted runtime Cloudflare token with Queues Edit and
-  Workers R2 Storage Write. The latter is currently account-wide because the
-  delivery service uses Cloudflare's REST object API.
-- A public HTTPS URL that reaches this host
-- A domain whose DNS points at the host if Caddy will obtain the certificate
+- Docker with the Compose plugin.
+- Node 22.13 or later on the Node 22 line, and pnpm 9.12.0. CI uses the exact
+  Node version in `.node-version`.
+- A Cloudflare account with a `workers.dev` subdomain or an active zone for a
+  custom ingest domain.
+- Two Cloudflare API tokens: one for provisioning and one for the running
+  application containers. Required permissions are listed below.
+- A public HTTPS URL that reaches your host. If Caddy will obtain the TLS
+  certificate, point your domain's DNS at the host first.
 
-Use the narrowest Cloudflare tokens possible and restrict both to the account
-that will hold this installation. The delivery service needs the separate
-runtime token for Queue pull, acknowledge, enqueue, and consumer-edit operations
-plus R2 object read, write, and delete. Protect `.env.selfhost` and back it up as
-a secret. The broader provisioning token does not enter an application
-container.
+The default stack omits ClickHouse. Ingest, routing, and delivery work without
+it. Event search, usage charts, and some CLI payload lookups need ClickHouse
+and otherwise show empty or unavailable results. See [limits](#limits-of-the-small-profile)
+before choosing this profile.
 
 ## Install
 
-1. Generate the private configuration. Pass the public URL now so it is also
-   embedded into the dashboard build. `AXEL_SITE_ADDRESS` is a Caddy site label,
-   normally the hostname without `https://`.
+### 1. Create the configuration
 
-   ```sh
-   AXEL_PUBLIC_URL=https://axel.example.com \
-   AXEL_SITE_ADDRESS=axel.example.com \
-     ./scripts/axel-self-host init
-   ```
+Clone the repository and generate `.env.selfhost`:
 
-   This writes `.env.selfhost` with mode `0600`. It generates independent
-   256-bit values for credential encryption, internal service authentication,
-   ingest administration, cron authentication, and the three Postgres
-   identities. It also generates a random resource-name suffix and an
-   installation ID so two installs do not silently claim the same Cloudflare
-   resources. It will not overwrite an existing file.
+```sh
+git clone https://github.com/rolln-ai/axel.git
+cd axel
 
-2. Add the operator-supplied Cloudflare values in `.env.selfhost`:
+AXEL_PUBLIC_URL=https://axel.example.com \
+AXEL_SITE_ADDRESS=axel.example.com \
+  ./scripts/axel-self-host init
+```
 
-   ```dotenv
-   CLOUDFLARE_ACCOUNT_ID=your-account-id
-   CLOUDFLARE_API_TOKEN=your-provisioning-token
-   CLOUDFLARE_RUNTIME_API_TOKEN=your-runtime-token
-   ```
+Set `AXEL_PUBLIC_URL` before building: the dashboard includes it in the build.
+`AXEL_SITE_ADDRESS` is the Caddy hostname, without `https://`.
 
-   For a new Cloudflare account, open Workers & Pages in the Cloudflare
-   dashboard once and confirm the account's `workers.dev` subdomain before
-   running `edge`. The non-interactive provisioner cannot accept Cloudflare's
-   first-use subdomain prompt. Cloudflare notes that a new `workers.dev`
-   hostname can return 523 for about a minute while it activates. Wait and
-   retry the health check before treating that first response as a failed
-   deployment.
+The helper creates a private file with mode `0600` and refuses to overwrite it.
+It generates separate 256-bit secrets for encryption and service authentication,
+Postgres credentials, and an installation ID and resource-name suffix. Back up
+this file in a password manager or other secret store. Losing
+`CREDENTIALS_MASTER_KEY` makes stored destination credentials unreadable.
 
-   The default ingest URL uses `workers.dev`, which Cloudflare describes as a
-   personal or hobby endpoint rather than a business-critical production
-   domain. To use a domain in an active Cloudflare zone, set
-   `AXEL_INGEST_DOMAIN=ingest.example.com` before running `edge`. Keep the
-   sender's retry policy enabled in either mode.
+### 2. Configure Cloudflare
 
-   The provisioning token deploys Workers and creates the installation's
-   Queue and R2 bucket. It never enters an application container. The separate
-   account-restricted runtime token needs Queues Edit and Workers R2 Storage
-   Write. It does not need Workers Scripts, Workers Routes, zone, or token-
-   management permissions. Cloudflare's REST API does not accept the bucket-
-   scoped Object Read & Write permission: Workers R2 Storage Write also permits
-   bucket management across the selected account. If that blast radius is not
-   acceptable, use a dedicated Cloudflare account or migrate the delivery
-   runtime to the S3-compatible API before deploying; its credentials can be
-   limited to this bucket.
-   The helper rejects reuse of the provisioning token and verifies Queue edit
-   plus an isolated R2 write/read/delete round trip before starting the stack;
-   it never leases a customer message for this check.
+Add these values to `.env.selfhost`:
 
-   If the delivery service uses a different public origin, set
-   `AXEL_DELIVERY_PUBLIC_URL` too. It must be reachable from Cloudflare and must
-   not point at localhost. It must use HTTPS because edge authentication
-   secrets and webhook source configuration cross this connection.
+```dotenv
+CLOUDFLARE_ACCOUNT_ID=your-account-id
+CLOUDFLARE_API_TOKEN=your-provisioning-token
+CLOUDFLARE_RUNTIME_API_TOKEN=your-runtime-token
+```
 
-   Email is optional. To enable invitations, verification, password reset, and
-   notifications, also set `RESEND_API_KEY` and a verified
-   `RESEND_FROM_EMAIL`. Without them, production email actions fail safely and
-   do not print the recipient or one-shot link into container logs.
+Restrict both tokens to the account for this installation. Use different tokens:
 
-3. Provision the edge resources:
+| Token | Permissions | Used by |
+| --- | --- | --- |
+| Provisioning | Edit Workers scripts, Queues, and R2 storage | The `edge` command; never an application container |
+| Runtime | Queues Edit and Workers R2 Storage Write | Delivery uses Queues and R2; the dashboard uses R2 |
 
-   ```sh
-   ./scripts/axel-self-host edge
-   ```
+The runtime token does not need Workers Scripts, Workers Routes, zone, or token
+management permissions. Its R2 permission is account-wide: Cloudflare's REST
+object API does not accept bucket-scoped Object Read & Write credentials, and
+Workers R2 Storage Write also allows bucket management. Use a dedicated account
+if you need to isolate those permissions. Bucket-scoped credentials would require
+changing the delivery runtime to use the S3-compatible API.
 
-   On its first run, the helper installs the lockfile-pinned workspace tools if
-   they are not present. It does this with package lifecycle scripts disabled
-   and before loading `.env.selfhost`, so install hooks cannot inherit the
-   deployment secrets. It does not use an arbitrary globally installed
-   Wrangler version. The command creates missing resources without deleting
-   existing ones. It creates the ingress, delivery, and dead-letter Queues,
-   enables HTTP pull, creates the private R2 bucket, adds a 30-day raw-payload
-   lifecycle rule, deploys the ingest and router Workers, installs their
-   secrets, and records the Worker URL plus Queue ID in `.env.selfhost`.
-   Before deploying, it verifies that the raw bucket has neither public r2.dev
-   access nor a custom domain and that its expiry rule is enabled, covers every
-   prefix, and is exactly 30 days.
+The helper rejects reuse of the provisioning token as the runtime token. It
+checks Queue edit access and writes, reads, then deletes a test R2 object before
+starting the stack. This check does not lease existing Queue messages.
 
-   Worker updates are staged before they receive traffic. The helper captures
-   both current deployment states before the first upload and requires every
-   existing deployment to have one version serving 100% of traffic. It then
-   activates the two complete code-and-secret versions, applies triggers, and
-   reads the final deployments back. An activation, trigger, or readback failure
-   restores every prior active deployment that may have changed. If a first
-   installation had no prior deployment to restore, or Cloudflare rejects a
-   rollback, the command fails loudly and requires inspection of both Workers
-   before it may be retried.
+For a new Cloudflare account, open **Workers & Pages** in its dashboard and
+confirm a `workers.dev` subdomain before running `edge`. The command cannot
+complete that first-use subdomain prompt. A new hostname can return 523 for about a minute
+while it activates; wait and retry its health check.
 
-   Created resources are recorded in `.selfhost/ownership.env`. If that local
-   proof is missing, the helper refuses to attach to same-named queues or an R2
-   bucket. After inspecting resources from an older install, a one-time explicit
-   adoption is available:
+The default ingest URL uses `workers.dev`. For production, set a custom hostname
+in an active Cloudflare zone:
 
-   ```sh
-   AXEL_ADOPT_EXISTING_RESOURCES=1 ./scripts/axel-self-host edge
-   ```
+```dotenv
+AXEL_INGEST_DOMAIN=ingest.example.com
+```
 
-   Do not put that acknowledgement in `.env.selfhost`; leaving it enabled would
-   defeat collision protection on later runs.
+Cloudflare recommends custom domains for production rather than `workers.dev`.
+Keep sender retries enabled with either hostname.
 
-4. Build and start the private services:
+If delivery uses a different public origin, set `AXEL_DELIVERY_PUBLIC_URL` too.
+It must be reachable from Cloudflare over HTTPS. Internal credentials and source
+configuration travel over this connection, so localhost and plain HTTP are not
+supported.
 
-   ```sh
-   ./scripts/axel-self-host up
-   ./scripts/axel-self-host status
-   ```
+To enable invitations, email verification, password resets, and notifications,
+set `RESEND_API_KEY` and a verified `RESEND_FROM_EMAIL`. Without them, email
+actions return an unavailable result. They do not log recipients or one-use links.
 
-   `up` builds a migration image from this checkout and runs the full database
-   setup before starting the application containers. The bootstrap account
-   creates a stable `NOLOGIN` owner. A separate migration login can use that
-   owner only through `SET ROLE`, and owns no database objects itself. The
-   dashboard and delivery containers receive independent DSNs. Dashboard uses
-   the reviewed `dashboard` profile. The single `DELIVERY_ROLE=all` container
-   uses the exact union of `delivery-native` and `delivery-workers`; the
-   optional Parquet delivery queue remains disabled. Neither login
-   can create tables, use `schema_migrations`, execute database routines, or
-   switch to the owner. The setup job removes the former shared `axel_app` and
-   `axel_runtime` roles after revoking their grants. Existing installations
-   can keep its existing `POSTGRES_PASSWORD` as the admin credential, or rename
-   it to `POSTGRES_ADMIN_PASSWORD`, and must replace
-   `POSTGRES_RUNTIME_PASSWORD` with distinct
-   `POSTGRES_DASHBOARD_PASSWORD` and `POSTGRES_DELIVERY_PASSWORD` values before
-   the first upgrade using this release.
+### 3. Deploy the Workers and start Docker
 
-   Caddy uses ports 80 and 443 for a public hostname. The default localhost
-   configuration uses port 8080 instead and binds it only to `127.0.0.1`.
-   Change `AXEL_HTTP_PORT`, `AXEL_HTTPS_PORT`, or `AXEL_LOCAL_PORT` in
-   `.env.selfhost` when those host ports are already in use. Set
-   `AXEL_LOCAL_BIND_ADDRESS=0.0.0.0` only when you deliberately want the local
-   HTTP listener reachable from other machines; public deployments should use
-   Caddy's HTTPS listener instead.
+```sh
+./scripts/axel-self-host edge
+./scripts/axel-self-host up
+./scripts/axel-self-host status
+```
 
-The generated `AXEL_PUBLISH_PUBLIC_PORTS` is `0` for a loopback site and `1`
-for a public hostname. The helper adds the public-port Compose override only
-in the latter mode, so a local install does not reserve or expose host ports
-80 and 443.
+`edge` installs the repository's pinned tools if needed, with package lifecycle
+scripts disabled and before loading deployment secrets. It creates the ingress,
+delivery, and dead-letter Queues, enables HTTP pull, creates a private R2 bucket
+with 30-day expiry, and deploys the ingest and router Workers. It saves the Worker
+URL and Queue ID in `.env.selfhost`.
 
-The generated `ORDERING_KEY_HMAC_SECRET` is installed only on the ingest
-Worker. It pseudonymizes low-entropy FIFO keys before they enter Queue or
-Durable Object state. Keep it private and stable across Worker releases.
+Before deploying, the helper checks that R2 has no public `r2.dev` access or
+custom domain and that the expiry rule covers every object for exactly 30 days.
+Worker updates are staged before activation. See [failed Worker updates](#failed-worker-updates)
+if the command cannot activate or restore a deployment.
 
-5. Inspect logs or stop the stack without deleting data:
+`up` builds the images from this checkout and runs database setup before starting
+the application containers. It creates separate owner, migration, dashboard,
+and delivery roles. The owner cannot log in. The runtime roles cannot create
+tables, read `schema_migrations`, or become the owner. The dashboard can run
+only the five JSON helper functions required by its privacy triggers; other
+application routines remain denied.
+See [database roles](database-service-roles.md) for the grant lists and role model.
 
-   ```sh
-   ./scripts/axel-self-host logs
-   ./scripts/axel-self-host down
-   ```
+Caddy uses ports 80 and 443 for a public hostname. A localhost installation uses
+port 8080 on `127.0.0.1` and does not publish ports 80 or 443. Change
+`AXEL_HTTP_PORT`, `AXEL_HTTPS_PORT`, or `AXEL_LOCAL_PORT` if a port is occupied.
+`AXEL_PUBLISH_PUBLIC_PORTS` selects the public-port Compose override: `1` for a
+public hostname, `0` for loopback. Set `AXEL_LOCAL_BIND_ADDRESS=0.0.0.0` only to
+expose the local HTTP listener to other machines; use Caddy's HTTPS listener
+for public access.
 
-## Rotate internal service credentials without downtime
+Inspect logs or stop the stack without deleting data:
 
-The delivery container accepts temporary previous values for both internal
-bearers. The Workers receive only the current values; neither previous value is
-uploaded to Cloudflare. To rotate either bearer:
+```sh
+./scripts/axel-self-host logs
+./scripts/axel-self-host down
+```
 
-1. In `.env.selfhost`, move the known old value to the matching
-   `DELIVERY_SHARED_SECRET_PREVIOUS` or
-   `SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS` entry, then replace the current value
-   with a distinct random value of at least 32 characters.
-2. Run `./scripts/axel-self-host up` first so the delivery service accepts both
-   generations.
-3. Run `./scripts/axel-self-host edge`. Stop if activation or its compensating
-   rollback reports a failure, and inspect both Worker deployments before
-   retrying.
-4. Prove ingest, routing, source lookup, and delivery, then clear the previous
-   value and run `./scripts/axel-self-host up` again.
+For sender setup, see [webhook authentication](webhook-authentication.md).
 
-The helper rejects a previous value that is short or equal to its current
-value. Do not reverse steps 2 and 3: an old Worker and a server that accepts only
-the new credential create an avoidable authentication outage.
+## Connect the CLI
 
-When signing the CLI into this installation, keep the PAT on your self-hosted
-origin by passing the dashboard URL explicitly. The npm package is not
-published yet, so build and install the CLI from the same source checkout
-first:
+The CLI npm package is not published yet. Build it from this checkout and pass
+your dashboard URL when signing in:
 
 ```sh
 pnpm --filter @axel/cli build
@@ -303,78 +157,172 @@ npm install -g ./packages/cli
 axel auth login --api-base 'https://axel.example.com'
 ```
 
-The token panel prints this deployment-specific command after minting a PAT.
-The CLI's no-argument default is Axel Cloud, so do not omit `--api-base` for a
-self-hosted token.
+The dashboard's token panel also shows this command after creating a personal
+access token. The CLI defaults to Axel Cloud, so keep `--api-base` when using
+a self-hosted token.
 
-The helper deliberately has no resource-destroy command. Removing Queues or an
-R2 bucket can discard undelivered or retained webhook data, so teardown stays
-an explicit Cloudflare console or Wrangler operation.
+## Costs and capacity
 
-## Security defaults in this profile
+A small installation can fit within Cloudflare's free allowances if you already
+have a host and network connection. Hardware, domains, backups, and any provider
+overages are your costs.
 
-- Postgres is reachable only on the Compose network.
-- Postgres bootstrap and migration credentials are confined to Postgres and the
-  one-shot migration job. The dashboard and delivery containers each receive
-  only their own restricted DSN. The database grants enumerate current tables
-  and sequences explicitly, with no default access to future relations.
-- Schema objects belong to a stable owner that cannot log in. The migration
-  login owns nothing and receives a `SET ROLE` membership with inheritance and
-  administration disabled.
-- The development Compose file binds Postgres and ClickHouse to loopback only.
-- Caddy exposes only dashboard traffic, delivery health, authenticated internal
-  delivery routes, and PAT-authenticated CLI routes.
-- Raw R2 objects expire after 30 days even when ClickHouse is absent; shorter
-  per-source retention requires the full retention path described above.
-- Signed webhook delivery fails closed if its signing credential is missing.
-- Outbound HTTP redirects are checked at every hop, and the Node delivery
-  socket rejects private, loopback, link-local, and metadata addresses.
-- The generated Workers use Cloudflare's `global_fetch_strictly_public` mode.
-- Stripe is not configured, so the billing integration stays inactive.
+| Free-plan limit | Effect on this profile |
+| --- | --- |
+| 100,000 Worker requests per day | Shared with other Workers on the account |
+| 10,000 Queue operations per day | Empty HTTP pulls count as reads |
+| 24-hour Queue message retention | Pending deliveries and dead letters can expire during a long host outage |
+| R2 free allowance | Storage and operations are metered separately; check current R2 pricing |
 
-Use `CONTROL_PLANE_DB_SSL_VERIFY=true` when the control-plane Postgres is moved
-to a remote provider with a publicly trusted certificate. The local Compose
-connection explicitly uses `sslmode=disable` inside the host network.
+Active Queue polling starts at one second. Each empty pull doubles the delay,
+up to 60 seconds. An idle installation therefore uses about 1,440 Queue reads
+per day, plus the reads while polling slows down. A new event may wait up to
+60 seconds after a long idle period. Finding work resets the delay to one second.
 
-## Operations you still own
+One event sent to one destination normally uses about six additional Queue
+operations. After idle polling, roughly 8,500 daily operations remain, enough
+for about 1,400 events without retries. More destinations, retries, other Queues,
+and repeated transitions out of idle reduce that estimate.
 
-- Back up the `selfhost_pgdata` Docker volume and test restoration.
-- Keep `.env.selfhost` in a password manager or secret backup. Losing
-  `CREDENTIALS_MASTER_KEY` makes stored destination credentials unreadable.
-- Back up `.selfhost/ownership.env` with the private configuration. Losing it
-  requires inspecting and explicitly adopting existing Cloudflare resources.
-- Rotate the Cloudflare token and internal shared secrets after suspected
-  exposure.
-- Keep the required `CLOUDFLARE_RUNTIME_API_TOKEN` limited to Queues Edit and
-  Workers R2 Storage Write so a dashboard or delivery compromise does not also
-  expose the Worker-deployment credential. Treat the account-wide R2 bucket-
-  management capability as residual risk unless the runtime is moved to
-  bucket-scoped S3-compatible credentials or a dedicated Cloudflare account.
-- Monitor Queue backlog and the `/health` endpoint.
-- Confirm the R2 lifecycle rule after manual bucket changes.
-- Add ClickHouse if searchable delivery history is required.
-- Add the full retention and erasure-indexing path before promising retention
-  shorter than 30 days or indexed data-subject erasure.
-- Review provider limits before increasing traffic.
+Workers Free limits each HTTP Worker request to 10 ms of CPU time. Validation,
+hashing, and parsing count; network waits do not. Test large representative
+synthetic payloads against this limit. Cloudflare
+may terminate requests that exceed it with error 1102. Senders must retry any
+request without Axel's 202 response. Use Workers Paid if normal traffic exceeds
+the free CPU limit. Use a paid Queue plan or another durable broker if the host
+cannot reliably recover within the free plan's fixed 24-hour retention window.
 
-For a master key outside the helper, the required format is exactly 64 hex
+Check current [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/),
+[Workers limits](https://developers.cloudflare.com/workers/platform/limits/),
+[Queues pricing](https://developers.cloudflare.com/queues/platform/pricing/),
+[R2 pricing](https://developers.cloudflare.com/r2/pricing/), and
+[`workers.dev` guidance](https://developers.cloudflare.com/workers/configuration/routing/workers-dev/)
+before sizing an installation.
+
+## Limits of the small profile
+
+The profile maps all 16 ingest producers to one Queue and both delivery bindings
+to one HTTP-pull Queue. One Node service handles every connector type. Postgres,
+migrations, dashboard, cron, delivery, and Caddy run in Docker. The optional
+Parquet delivery queue is disabled.
+
+Raw R2 payloads expire after 30 days. Shorter source or workspace retention,
+transient-mode early deletion, and the subject-to-event index for erasure need
+the full analytics and retention path. The dashboard disables these controls
+when `AXEL_SELF_HOST_PROFILE=small`, and server actions reject direct submissions.
+Postgres retention for dead letters, replay requests, and audit logs still works.
+Add ClickHouse and the production cleanup and indexing jobs before using shorter
+raw retention or indexed subject erasure.
+
+Other defaults:
+
+- Postgres is accessible only within the private Compose network. Bootstrap and
+  migration credentials stay in Postgres and the migration job. Dashboard and
+  delivery each receive their own restricted connection string, with explicit
+  grants that do not extend to future tables.
+- Caddy exposes dashboard traffic, delivery health, authenticated internal
+  delivery routes, and CLI routes authenticated with personal access tokens.
+- Signed webhook delivery stops if the signing credential is missing.
+- Outbound HTTP redirects are checked at every hop. Node rejects connections
+  to private, loopback, link-local, and metadata addresses. Generated Workers
+  use `global_fetch_strictly_public`.
+- Stripe is not configured, so billing is inactive.
+
+Local Postgres connections use `sslmode=disable` inside the private Compose network. For a
+remote provider with a publicly trusted certificate, set
+`CONTROL_PLANE_DB_SSL_VERIFY=true`.
+
+## Backups and upgrades
+
+Back up the `selfhost_pgdata` Docker volume and test restoration. Store
+`.env.selfhost` and `.selfhost/ownership.env` in a private backup. The ownership
+file identifies the Cloudflare resources created by this installation.
+
+Before upgrades, read the release notes, back up the database and configuration,
+and check out the intended code version. Run `up` to apply database setup and
+start the new containers. Run `edge` to update the Workers. Use the order below
+when rotating internal credentials at the same time.
+
+For installations that used the shared `axel_app` or `axel_runtime` roles, the
+setup job revokes their grants and removes them. Keep `POSTGRES_PASSWORD` as the
+admin credential or rename it to `POSTGRES_ADMIN_PASSWORD`. Replace
+`POSTGRES_RUNTIME_PASSWORD` with separate `POSTGRES_DASHBOARD_PASSWORD` and
+`POSTGRES_DELIVERY_PASSWORD` values before upgrading. The dashboard uses the
+`dashboard` grant profile. Delivery uses the union of `delivery-native` and
+`delivery-workers` because this profile runs one `DELIVERY_ROLE=all` container.
+
+Monitor Queue backlog and `/health`. Check the R2 expiry rule after manual bucket
+changes. Rotate Cloudflare and internal credentials after suspected exposure.
+Keep `ORDERING_KEY_HMAC_SECRET` private and stable across Worker releases. It is
+installed only on the ingest Worker and hashes FIFO keys before they enter Queue
+or Durable Object state.
+
+### Rotate internal credentials
+
+The delivery service can accept a previous value temporarily while Workers
+switch to a new value. The previous value is never uploaded to Cloudflare.
+
+1. Move the current value in `.env.selfhost` to
+   `DELIVERY_SHARED_SECRET_PREVIOUS` or `SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS`.
+   Set the current value to a different random value of at least 32 characters.
+2. Run `./scripts/axel-self-host up` so delivery accepts both values.
+3. Run `./scripts/axel-self-host edge`. If activation or rollback fails, inspect
+   both Worker deployments before retrying.
+4. Verify ingest, routing, source lookup, and delivery. Clear the previous value
+   and run `./scripts/axel-self-host up` again.
+
+The helper rejects a previous value that is short or matches the current value.
+Keep this order: updating Workers first would send new credentials to a service
+that still accepts only the old ones.
+
+For a credential master key generated outside the helper, use exactly 64 hex
 characters:
 
 ```sh
 openssl rand -hex 32
 ```
 
-The rotation procedure is in [`credential-rotation.md`](credential-rotation.md).
+See [credential rotation](credential-rotation.md) before changing an encryption key.
 
-## Manual and production deployments
+## Troubleshooting edge setup
 
-The checked-in `wrangler.toml` files and `render.yaml` describe Axel Cloud's
-production topology. They include Axel-owned domains, resource IDs, service
-URLs, autoscaling, and a high-capacity ClickHouse service. Do not treat them as
-a cheap starter template.
+### Existing resource names
 
-For higher traffic, keep the 16 ingress queues, run the delivery web role with
-multiple replicas, run exactly one singleton worker role, add ClickHouse, and
-use a managed Postgres or pooler with verified TLS. See
-[`production-scale.md`](production-scale.md) and
-[`adr-0001-architecture.md`](adr-0001-architecture.md).
+`edge` records created resources in `.selfhost/ownership.env`. Without that
+file, it refuses to attach to same-named Queues or buckets. After inspecting
+resources from an older installation, you can adopt them once:
+
+```sh
+AXEL_ADOPT_EXISTING_RESOURCES=1 ./scripts/axel-self-host edge
+```
+
+Do not save this flag in `.env.selfhost`. Leaving it enabled would allow later
+runs to adopt resources without another check.
+
+### Failed Worker updates
+
+The helper records both current deployments before uploading code. An existing
+Worker must have one version serving 100% of traffic. The helper activates the
+new code and secrets, applies triggers, then reads back both deployments.
+
+If activation, triggers, or readback fail, it restores every prior deployment
+that may have changed. A first installation has no earlier version to restore.
+If rollback is unavailable or fails, inspect both Workers before retrying.
+
+### Removing Cloudflare resources
+
+`down` stops Docker services. It does not delete Queues or R2 data. The helper has
+no destroy command; remove resources explicitly through Cloudflare or Wrangler
+after checking for pending deliveries and retained payloads.
+
+## Higher-volume deployments
+
+The checked-in `wrangler.toml` files and `render.yaml` describe Axel Cloud. They
+contain Axel-owned domains and resource IDs, 16 ingress shards, separate edge
+and Node delivery, autoscaling, and a larger ClickHouse service. Use the
+self-host helper for this small profile rather than deploying those files.
+
+For higher traffic, retain the 16 ingress Queues, scale the delivery web role,
+keep exactly one periodic worker, add ClickHouse, and use managed Postgres or a
+pooler with verified TLS. See [production scale](production-scale.md) and the
+[current runtime](adr-0002-current-runtime.md).

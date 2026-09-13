@@ -1,8 +1,8 @@
 # Contributing to Axel
 
-Thanks for your interest. Axel is maintained by a very small team (mostly one
-person) that also operates [Axel Cloud](https://axelapp.ai) from this repo, so
-please read this before opening a PR.
+Axel has one maintainer and runs [Axel Cloud](https://axelapp.ai) from this
+repository. Small fixes can go straight to a pull request. Open an issue first
+for changes to behavior, schemas, or public APIs.
 
 By submitting a contribution, you agree that it is licensed under the
 repository's [Apache License 2.0](LICENSE). You retain copyright in your contribution.
@@ -17,16 +17,16 @@ Participation in this project follows the
   This repo deploys a production service, and some constraints (queue
   semantics, migration ordering, credential crypto) are not obvious from the
   code alone.
-- **Optional integrations need a graceful fallback.** A self-hosted or local
-  install must keep working when Stripe, Resend, Sentry, ClickHouse,
-  or OpenRouter is not configured. Required base-infrastructure variables must
-  be documented and validated at startup.
+- **Handle missing optional integrations.** Self-hosted and local installs must
+  start without Stripe, Resend, Sentry, ClickHouse, or OpenRouter. Show an
+  unavailable state for features that need them. Document required infrastructure
+  variables and validate them at startup.
 - **Migrations are append-only.** Add a uniquely numbered file under
   `infra/postgres/migrations/`; never edit an applied one. The two `0025_*`
   files are a frozen historical collision. CI rejects any new duplicate and
   the production runner rejects changed checksums.
 - **UI changes follow [`DESIGN.md`](DESIGN.md).** It documents the existing
-  tokens, type scale, composites, and the anti-patterns we reject in review.
+  tokens, type scale, shared components, and review checklist.
   Build from the components in `apps/dashboard/app/_components/` before
   adding new ones, and check both themes.
 
@@ -48,19 +48,18 @@ pnpm typecheck
 `docker compose up -d` starts raw Postgres and ClickHouse services for
 database-specific development. It does not create Axel's protected database
 roles or application schema. Use the self-host profile in
-[`README.md`](README.md#self-hosting) when you need a migrated Postgres database
-with the dashboard and delivery service. The unit test suite is hermetic. It
-needs no cloud resources.
+[self-hosting guide](docs/self-hosting.md) when you need a migrated Postgres database
+with the dashboard and delivery service. The unit tests use local fixtures and need no cloud resources.
 
 Running the full pipeline locally requires a Cloudflare account for the edge
 workers (`wrangler dev`); see [`docs/self-hosting.md`](docs/self-hosting.md).
 
 ## Pull requests
 
-- Keep PRs focused; one change per PR.
+- Keep each PR focused on one change. Use a descriptive title without deployment
+  flags. Put any temporary deploy-skip instruction in the commit body.
 - Add or update tests for behavior changes. CI runs build, tests, lint,
-  typecheck, dependency audit, and secret scanning. CodeQL and native dependency
-  review activate automatically when the repository becomes public.
+  typecheck, dependency audit, secret scanning, CodeQL, and dependency review.
 - CI must be green. Forks receive no repository or deployment secrets. Their
   required preview check compiles the dashboard and marketing app without
   deploying them.

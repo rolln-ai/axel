@@ -1,16 +1,17 @@
-# Production Scale Target
+# Production scale targets
 
-Target: millions of accepted webhooks per hour with p95 ingest acknowledgement
-under 250ms and p95 end-to-end delivery under 5s for healthy destinations.
+The design targets millions of accepted webhooks per hour, p95 ingest
+acknowledgement below 250 ms, and p95 delivery below 5 seconds for healthy
+destinations. These are targets, not published benchmark results.
 
-## Load Model
+## Load model
 
 - 1 million/hour = 278 events/second sustained.
 - 10 million/hour = 2,778 events/second sustained.
 - Burst target remains higher than sustained target; ingest must absorb bursts
   by writing raw payloads and queueing compact messages before returning.
 
-## Required Runtime Controls
+## Runtime requirements
 
 - Keep ingest CPU bounded: token validation, byte/depth caps, R2 put, queue send.
 - Keep declarative route evaluation off the ingest hot path.
@@ -22,19 +23,19 @@ under 250ms and p95 end-to-end delivery under 5s for healthy destinations.
 - ClickHouse receives append-only logs; Postgres handles config and small
   mutable state only.
 
-## Scaling Knobs
+## Scaling
 
 - Increase queue shard count and worker replica count together.
 - Increase router batch concurrency only after measuring RSS, CPU, and queue lag
   on the router instance size.
-- Scale delivery workers independently by connector class. HTTP can scale
-  broadest; database connectors need per-destination connection caps.
+- Scale delivery capacity by connector type. Limit database connections per
+  destination, and keep the periodic worker at one instance.
 - Keep raw payload retention short enough that replay cost stays bounded.
 
-## Deployment Requirements
+## Deployment requirements
 
-- Source config must be cached at the edge with short TTL and explicit purge on
-  source/token changes.
+- Fence source authority before source or credential changes, then publish the
+  committed configuration. A short cache TTL alone cannot revoke credentials.
 - Route/destination config must be cached in router workers and invalidated on
   control-plane writes.
 - Postgres must use partial indexes for active route lookups and TTL cleanup for

@@ -1,21 +1,21 @@
-# Alerts
+# Infrastructure alerts
 
-Axel emits operational alerts via a generic webhook. This directory documents
-which alert rules exist, what their thresholds are, and how to wire a receiver.
+Axel reports service failures and queue lag to Sentry, with an optional webhook
+receiver. This guide covers infrastructure alerts. For source gaps and delivery
+incident emails, see [data flow alerts](../../docs/incident-alerts.md).
 
-## Status (read this first)
+## Configured monitoring
 
-What is live today:
-
-- **Sentry exception reporting** — wired in every deployed service (see "Sentry
+- **Sentry exception reporting.** Configured in each deployed service (see "Sentry
   exception reporting" below).
-- **Delivery Queue lag** — the delivery service reads Cloudflare's realtime
+- **Delivery queue lag.** The delivery service reads Cloudflare's realtime
   backlog count and oldest-message timestamp every minute without leasing a
   message, with pulled-message timestamps as a second signal. Warn/critical
   events go to Sentry. The generic webhook is an optional second sink.
-- **Production delivery canary** — the pinned-candidate GitHub workflow proves
-  ingest-to-destination delivery every 15 minutes and reports missed, failed,
-  and recovered runs through Sentry Cron Monitoring.
+- **Production delivery canary.** The singleton delivery worker checks
+  ingest-to-destination delivery every 15 minutes. A GitHub workflow provides
+  a fallback. Sentry Cron Monitoring reports missed, failed, and recovered runs.
+  See the [canary runbook](../../docs/runbook-delivery-canary.md).
 
 The other aggregate threshold evaluators in `apps/router/src/alerts.ts`
 (`retry_rate`, `dead_letter_count`, `engine_error_rate`, and
@@ -30,15 +30,15 @@ does not route `warn` and `critical` events to different destinations. Treat
 the receiver recipes below as optional operator configuration until a synthetic
 alert proves authentication, payload compatibility, delivery, and paging.
 
-## How it works
+## Webhook configuration
 
 The delivery service combines its Sentry sink with the optional sink returned
 by `alertSinkFromEnv()`:
 
-- `ALERT_WEBHOOK_URL` — optional receiver URL. When unset, the sink is a no-op
+- `ALERT_WEBHOOK_URL` is the optional receiver URL. When unset, the sink is a no-op
   so the service never fails to start. Setting it sends every severity to the
   same URL; receiver compatibility and downstream routing must be tested.
-- `ALERT_WEBHOOK_TOKEN` — optional shared secret added as `x-axel-alert-token`
+- `ALERT_WEBHOOK_TOKEN` is an optional shared secret sent as `x-axel-alert-token`
   on every POST.
 
 The receiver gets a JSON body of the shape:
@@ -57,8 +57,8 @@ The receiver gets a JSON body of the shape:
 }
 ```
 
-The top-level `text` field is Slack-friendly; the structured `event` body is
-useful for dashboards / Sentry / PagerDuty-style consumers.
+The `text` field provides a readable summary. Receivers can use the structured
+`event` fields to route and deduplicate notifications.
 
 Non-success webhook responses are treated as failed delivery and logged by
 status code without reading the receiver body. Alert transport failures remain
@@ -92,10 +92,10 @@ This file is the operator-facing summary.
 Dashboard and service exceptions are reported through `@axel/observability`.
 Set these environment variables everywhere code runs:
 
-- `SENTRY_DSN` — project DSN. When unset, reporting is disabled and startup
+- `SENTRY_DSN` is the project DSN. When unset, reporting is disabled and startup
   still succeeds.
-- `SENTRY_ENVIRONMENT` — `production`, `preview`, or `development`.
-- `SENTRY_RELEASE` — deploy SHA or release name. Render and Vercel commit envs
+- `SENTRY_ENVIRONMENT` is `production`, `preview`, or `development`.
+- `SENTRY_RELEASE` is the deploy SHA or release name. Render and Vercel commit envs
   are used as fallback release values.
 
 Current coverage:
@@ -127,8 +127,7 @@ The route returns 404 when `OPS_TEST_TOKEN` is unset or wrong.
 
 ### PagerDuty (optional, not production-verified)
 
-PagerDuty's API v2 expects `routing_key` and an `event_action`. Wrap our
-webhook with a tiny relay (e.g. a Cloudflare Worker) that translates our
+PagerDuty's API v2 expects `routing_key` and an `event_action`. Use a relay such as a Cloudflare Worker to translate Axel's
 `event.severity` to PagerDuty `severity`. Test the relay with a synthetic
 critical event and confirm an on-call notification before relying on it.
 
@@ -151,24 +150,24 @@ pnpm --filter @axel/router test test/alerts.test.ts
 pnpm --filter @axel/observability test
 ```
 
-The router test suite covers the threshold evaluators end-to-end with a
+The router test suite covers the threshold evaluators with a
 mocked `fetch` for the webhook sink. The observability tests verify Sentry
-envelope formatting and failure swallowing. These tests do not prove external
+envelope formatting and transport-error handling. These tests do not prove external
 receiver authentication, payload compatibility, severity routing, or paging.
 Operators must test those paths end-to-end before counting them as production
 controls.
 
-## Operational notes
+## Failure handling and deduplication
 
-- **Alerts must never page the service itself.** The webhook sink swallows
-  fetch errors; a noisy alert receiver cannot take down the router.
-- **Severity is payload data, not a route.** The built-in sink sends `info`,
+- The webhook sink catches fetch errors so an unavailable receiver does not
+  stop delivery.
+- The built-in sink sends `info`,
   `warn`, and `critical` events to the same optional URL. A tested receiver or
   relay must decide which events notify a channel or page on-call.
-- **De-duplication is the receiver's job.** Axel re-emits an alert every
+- Axel re-emits an alert every
   evaluation tick if the threshold remains breached. Set Slack-side or
   PagerDuty-side suppression to avoid notification storms.
-- **There is no default external route.** Slack channels, PagerDuty escalation,
+- Slack channels, PagerDuty escalation,
   and other receiver behavior remain optional and unproven until synthetic
   tests confirm them. Sentry exception issues retain `service` and
   `environment` tags for project-side rules.
