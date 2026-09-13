@@ -79,6 +79,8 @@ TypeScript checks reject unused local code.
   error codes can preserve recovery behavior without retaining raw responses.
 - Land reviewed commits through a PR. CI must pass. Production promotions use
   the existing manual workflows, with migrations before application code.
+  Only @10-01 merges PRs. Leave changes ready for the maintainer to merge;
+  do not use their credentials to merge or enable auto-merge on their behalf.
   Use descriptive commit and PR titles. Render Git auto-deploys must remain off.
   If a skip guard is needed while verifying that setting, put `[skip render]`
   on its own line in the commit body, including the squash-merge body. Do not

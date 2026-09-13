@@ -21,7 +21,7 @@ describe("sentry client", () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe("https://example.sentry.io/api/12345/envelope/");
-    expect((calls[0]?.init.headers as Record<string, string>)["content-type"]).toBe("application/x-sentry-envelope");
+    expect((calls[0]?.init.headers as Record<string, string> | undefined)?.["content-type"]).toBe("application/x-sentry-envelope");
     expect(calls[0]?.init.body).toContain("\"service\":\"test-service\"");
     expect(calls[0]?.init.body).toContain("\"value\":\"application_error\"");
   });

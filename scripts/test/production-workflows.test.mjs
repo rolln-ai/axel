@@ -786,7 +786,6 @@ test("production mutations and provider requests have finite deadlines", () => {
 
 test("write-capable pull_request_target automations reject forks", () => {
   for (const file of [
-    ".github/workflows/auto-merge-linear.yml",
     ".github/workflows/linear-pr-sync.yml",
   ]) {
     const workflow = read(file);
@@ -795,16 +794,15 @@ test("write-capable pull_request_target automations reject forks", () => {
   }
 });
 
-test("auto-merge only grants its write token to the current maintainer", () => {
-  const workflow = read(".github/workflows/auto-merge-linear.yml");
-  assert.match(workflow, /github\.event\.pull_request\.user\.login == '10-01'/);
-  assert.match(workflow, /PR_AUTHOR: \$\{\{ github\.event\.pull_request\.user\.login \}\}/);
-  assert.match(workflow, /if \[ "\$PR_AUTHOR" != "10-01" \]; then/);
-});
-
 test("Linear sync only grants its private workspace key to the current maintainer", () => {
   const workflow = read(".github/workflows/linear-pr-sync.yml");
   assert.match(workflow, /github\.event\.pull_request\.user\.login == '10-01'/);
+});
+
+test("workflows cannot merge pull requests for the maintainer", () => {
+  for (const file of listWorkflowFiles()) {
+    assert.doesNotMatch(read(file), /gh\s+pr\s+merge|enablePullRequestAutoMerge|AUTOMERGE_TOKEN|pulls\/[^\s]+\/merge/, file);
+  }
 });
 
 test("release verification is bounded, auditable, and matches the CI audit floor", () => {

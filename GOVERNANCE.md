@@ -21,6 +21,11 @@ Open an issue before making a large change. The maintainer will explain the deci
 when a proposal is declined or changed substantially. Pull requests must pass
 the repository's required checks and resolve review conversations.
 
+Only [@10-01](https://github.com/10-01) merges pull requests into `main`.
+Contributors and automation can propose changes, but cannot merge them.
+GitHub restricts updates to `main` to that account, applies branch protection
+to administrators, and has auto-merge disabled.
+
 Until a second maintainer is appointed, GitHub cannot require an independent
 approval without blocking the sole maintainer's work. High-risk changes still
 go through a pull request and must document their risk, verification, deploy
