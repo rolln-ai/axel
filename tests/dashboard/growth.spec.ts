@@ -35,7 +35,8 @@ test("cloud adoption requires admin MFA and makes missing analytics explicit", a
   await page.getByLabel("Authenticator code", { exact: true }).fill(authenticatorCode((await secret.textContent())!));
   await page.getByRole("button", { name: "Continue to admin", exact: true }).click();
   await expect(page).toHaveURL(/\/admin(?:\/overview)?$/);
-  await page.goto("/admin/growth");
+  await page.getByRole("link", { name: "Cloud adoption", exact: true }).click();
+  await expect(page).toHaveURL(/\/admin\/growth$/);
   await expect(page.getByRole("heading", { name: "Cloud adoption", exact: true })).toBeVisible();
   await expect(page.getByRole("status").filter({ hasText: "Event analytics are unavailable" })).toBeVisible();
   await expect(page.getByRole("rowheader", { name: "GitHub", exact: true })).toBeVisible();
