@@ -5,7 +5,7 @@
  */
 export const SOURCE_LOOKUP_FAILURE_REASONS = [
   "lookup_failed", "lookup_not_configured", "lookup_timeout", "lookup_network",
-  "lookup_http", "lookup_invalid_response", "authority_unavailable", "source_fenced",
+  "lookup_http", "lookup_invalid_response", "authority_unavailable", "source_fenced", "authorization_changed",
 ] as const;
 export type SourceLookupFailureReason = typeof SOURCE_LOOKUP_FAILURE_REASONS[number];
 

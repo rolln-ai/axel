@@ -86,7 +86,6 @@ MOCK_DOCKER_LOG="$TEST_DIR/public-docker.log" \
 grep -Fq -- "-f $ROOT_DIR/infra/self-host/docker-compose.public.yml ps" \
   "$TEST_DIR/public-docker.log"
 
-grep -Fq "FROM workspace AS migration" "$ROOT_DIR/Dockerfile"
 grep -Fq "postgresql-client" "$ROOT_DIR/Dockerfile"
 grep -Fq 'CMD ["bash", "/app/scripts/self-host/run-database-setup.sh"]' \
   "$ROOT_DIR/Dockerfile"

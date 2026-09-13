@@ -37,6 +37,13 @@ exception is an explicit source-scoped [migration window](ingest-auth-migration.
 of at most 72 hours; mixing legacy and new credentials is always rejected.
 A credential from another source or a revoked URL cannot authorize a request.
 
+Hosted ingest refreshes cached source configuration after five minutes. If the
+configuration is unchanged, a request can finish across that refresh without
+being rejected. A credential change or explicit source fence still revokes
+earlier authorization. If an expired configuration cannot be checked against
+the origin, ingest returns a retryable failure instead of accepting stale
+credentials. Keep sender retries enabled.
+
 ## Keeping the URL private
 
 An authenticated webhook URL is a bearer credential. Anyone with it can submit

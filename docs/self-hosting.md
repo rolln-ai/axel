@@ -150,6 +150,11 @@ Each release attaches `self-host-images.json` with the commit and image digests.
 Images include build provenance and an SBOM. An unset `AXEL_IMAGE_TAG` keeps the
 local build path, including when testing an unreleased checkout.
 
+Runtime images omit development dependencies and build caches. The dashboard
+uses Next.js standalone output, the delivery image contains its production
+dependency graph, and the migration image contains the database setup scripts,
+schema, and Postgres client. All three run as an unprivileged user.
+
 Caddy uses ports 80 and 443 for a public hostname. A localhost installation uses
 port 8080 on `127.0.0.1` and does not publish ports 80 or 443. Change
 `AXEL_HTTP_PORT`, `AXEL_HTTPS_PORT`, or `AXEL_LOCAL_PORT` if a port is occupied.

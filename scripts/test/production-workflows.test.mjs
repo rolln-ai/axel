@@ -21,11 +21,11 @@ test("the supported Node runtime is pinned consistently", () => {
 
   const dockerPins = Array.from(
     read("Dockerfile").matchAll(
-      /^FROM node:([^@]+)@sha256:([a-f0-9]{64}) AS (workspace|dashboard|delivery)$/gm,
+      /^FROM node:([^@]+)@sha256:([a-f0-9]{64}) AS (base)$/gm,
     ),
     (match) => ({ image: match[1], digest: match[2], stage: match[3] }),
   );
-  assert.equal(dockerPins.length, 3);
+  assert.equal(dockerPins.length, 1);
   assert.deepEqual(
     new Set(dockerPins.map(({ image }) => image)),
     new Set([`${nodeVersion}-bookworm-slim`]),
@@ -36,8 +36,11 @@ test("the supported Node runtime is pinned consistently", () => {
   );
   assert.deepEqual(
     new Set(dockerPins.map(({ stage }) => stage)),
-    new Set(["workspace", "dashboard", "delivery"]),
+    new Set(["base"]),
   );
+  for (const stage of ["workspace", "migration", "dashboard", "delivery"]) {
+    assert.match(read("Dockerfile"), new RegExp(`^FROM base AS ${stage}$`, "m"));
+  }
 
   const renderPins = Array.from(
     read("render.yaml").matchAll(/^\s+- key: NODE_VERSION\n\s+value: "([^"]+)"$/gm),

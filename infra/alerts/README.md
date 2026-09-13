@@ -12,6 +12,15 @@ incident emails, see [data flow alerts](../../docs/incident-alerts.md).
   backlog count and oldest-message timestamp every minute without leasing a
   message, with pulled-message timestamps as a second signal. Warn/critical
   events go to Sentry. The generic webhook is an optional second sink.
+  Cloudflare can return zero for an unknown oldest-message timestamp. Axel
+  keeps the backlog count and reports the age as unavailable in that case.
+  It does not emit an exception, report zero lag, or reset the alert throttle.
+  The authenticated delivery `/metrics` endpoint exports
+  `axel_delivery_queue_metrics_available` and
+  `axel_delivery_queue_oldest_age_available` per queue. Unknown ages are omitted
+  from `axel_delivery_queue_oldest_unacked_age_seconds`; stale or failed samples
+  also omit the backlog gauge. Pulled-message timestamps continue to trigger
+  queue-lag alerts while provider ages are unavailable.
 - **Production delivery canary.** The singleton delivery worker checks
   ingest-to-destination delivery every 15 minutes. A GitHub workflow provides
   a fallback. Sentry Cron Monitoring reports missed, failed, and recovered runs.

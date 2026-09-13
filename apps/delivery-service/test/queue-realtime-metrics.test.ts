@@ -141,12 +141,12 @@ describe("Queue realtime metrics snapshot conversion", () => {
     });
   });
 
-  it("reports degraded telemetry when a nonempty backlog has no oldest timestamp", () => {
-    expect(() => queueRealtimeMetricsToLagSnapshot({
+  it("preserves the backlog with an unknown age when the oldest timestamp is zero", () => {
+    expect(queueRealtimeMetricsToLagSnapshot({
       backlogCount: 1,
       backlogBytes: 10,
       oldestMessageTimestampMs: 0,
-    }, NOW)).toThrow("cloudflare_queue_metrics_oldest_timestamp_missing");
+    }, NOW)).toEqual({ oldest_unacked_age_seconds: null, backlog: 1 });
   });
 
   it("reports degraded telemetry instead of masking a future timestamp as healthy", () => {
@@ -164,7 +164,10 @@ describe("Queue realtime metrics runner", () => {
     const first = new Promise<void>((resolve) => {
       releaseFirst = resolve;
     });
-    const observe = vi.fn((queueId: string) => queueId === "queue-a" ? first : Promise.resolve());
+    const observe = vi.fn(async (queueId: string) => {
+      if (queueId === "queue-a") await first;
+      return { oldest_unacked_age_seconds: 0, backlog: 0 };
+    });
     const onError = vi.fn();
     const runner = createQueueRealtimeMetricsRunner({ observe, onError });
 
@@ -178,6 +181,52 @@ describe("Queue realtime metrics runner", () => {
     await vi.waitFor(() => expect(runner.isInFlight("queue-a")).toBe(false));
     expect(runner.start("queue-a")).toBe(true);
     expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("exports unknown age without an exception, a fake zero, or losing the backlog", async () => {
+    const onError = vi.fn();
+    const runner = createQueueRealtimeMetricsRunner({
+      observe: async () => queueRealtimeMetricsToLagSnapshot({
+        backlogCount: 12, backlogBytes: 4096, oldestMessageTimestampMs: 0,
+      }, 1_700_000_000_000),
+      onError,
+      now: () => 1_700_000_000_000,
+    });
+    runner.start("queue-a");
+    await vi.waitFor(() => expect(runner.isInFlight("queue-a")).toBe(false));
+    expect(onError).not.toHaveBeenCalled();
+    const metrics = runner.renderPrometheus().join("\n");
+    expect(metrics).toContain('axel_delivery_queue_metrics_available{queue="queue-a"} 1');
+    expect(metrics).toContain('axel_delivery_queue_oldest_age_available{queue="queue-a"} 0');
+    expect(metrics).toContain('axel_delivery_queue_backlog{queue="queue-a"} 12');
+    expect(metrics).not.toContain('axel_delivery_queue_oldest_unacked_age_seconds{queue="queue-a"}');
+  });
+
+  it("marks stale and failed observations unavailable until a successful refresh", async () => {
+    let now = 1_700_000_000_000;
+    const observe = vi.fn(async () => ({ oldest_unacked_age_seconds: 90, backlog: 12 }));
+    const onError = vi.fn();
+    const runner = createQueueRealtimeMetricsRunner({ observe, onError, now: () => now, maxAgeMs: 2_000 });
+    const refresh = async () => {
+      runner.start("queue-a");
+      await vi.waitFor(() => expect(runner.isInFlight("queue-a")).toBe(false));
+      return runner.renderPrometheus().join("\n");
+    };
+    expect(await refresh()).toContain('axel_delivery_queue_oldest_unacked_age_seconds{queue="queue-a"} 90');
+    now += 2_001;
+    expect(runner.renderPrometheus().join("\n")).toContain('axel_delivery_queue_metrics_available{queue="queue-a"} 0');
+    expect(runner.renderPrometheus().join("\n")).not.toContain('axel_delivery_queue_backlog{queue="queue-a"}');
+
+    observe.mockRejectedValueOnce(new Error("provider unavailable"));
+    const failed = await refresh();
+    expect(onError).toHaveBeenCalledOnce();
+    expect(failed).toContain('axel_delivery_queue_oldest_age_available{queue="queue-a"} 0');
+    expect(failed).not.toContain('axel_delivery_queue_oldest_unacked_age_seconds{queue="queue-a"}');
+    observe.mockResolvedValueOnce({ oldest_unacked_age_seconds: 0, backlog: 0 });
+    const recovered = await refresh();
+    expect(recovered).toContain('axel_delivery_queue_metrics_available{queue="queue-a"} 1');
+    expect(recovered).toContain('axel_delivery_queue_oldest_age_available{queue="queue-a"} 1');
+    expect(recovered).toContain('axel_delivery_queue_backlog{queue="queue-a"} 0');
   });
 
   it("consumes synchronous observation and error-reporter failures, then permits a retry", async () => {
