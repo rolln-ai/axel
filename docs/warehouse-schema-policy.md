@@ -28,7 +28,7 @@ Postgres and Databricks bindings use the same property without `dataset`.
 Neither setting authorizes changing existing column types. Postgres no longer
 widens a column automatically when a later event has a different value type.
 
-## Why additions need a decision
+## Check downstream queries
 
 A nullable field added to one BigQuery RECORD changes the corresponding STRUCT
 type. A view that unions whole records from historical and current tables can
@@ -43,9 +43,8 @@ See [BigQuery conversion rules](https://docs.cloud.google.com/bigquery/docs/refe
 
 ## Upgrade existing installations
 
-This is a deliberate behavior change. Do not enable additions globally to preserve
-the old behavior. Inventory saved route bindings, their table schemas and downstream
-consumers first. Provision reviewed missing fields, use a stable JSON column, or
+This replaces automatic column additions with an explicit per-route setting.
+Check saved bindings, table schemas, and downstream queries before upgrading. Provision reviewed missing fields, use a stable JSON column, or
 explicitly allow additions on each appropriate route.
 
 Deploy the connector before the dashboard controls. The previous connector ignores

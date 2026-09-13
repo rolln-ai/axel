@@ -61,7 +61,7 @@ export function softwareApplicationLd() {
       "Store original webhook payloads before returning 202",
       "Delivery to Postgres, MongoDB, BigQuery, Databricks, S3/R2 object storage, and HTTP endpoints",
       "Replay retained original payloads",
-      "Dead-letter inbox with operator-friendly actions",
+      "Failed-deliveries inbox with retry and mute controls",
       "Declarative routing and field transforms",
       "Stable event IDs for receiver-side deduplication",
       "Queryable event timelines",

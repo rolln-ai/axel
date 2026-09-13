@@ -3,9 +3,9 @@
 Date: 2026-09-04
 Status: Accepted. Supersedes the deployment topology in ADR-0001.
 
-Axel keeps ingestion, routing, and delivery asynchronous. This split is worth
-keeping: a slow destination must not hold a webhook sender's connection open,
-and database connectors need Node libraries that edge workers cannot run.
+Axel runs routing and delivery asynchronously so a slow destination does not
+hold a webhook sender's connection open. Database connectors run in Node because
+they need libraries that edge workers cannot run.
 The repository contains shared libraries under `apps/` as well as deployable
 services. A folder under `apps/` does not imply another service to operate.
 

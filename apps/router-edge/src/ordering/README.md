@@ -1,55 +1,41 @@
-# Ordered delivery — Durable Object (Phase 2 scaffold)
+# Ordered delivery implementation notes
 
-This directory holds the **first Durable Object in the codebase**: the per-key
-serializer for FIFO/ordered delivery. It is a deliberate, reviewable scaffold —
-the DO class, its binding, and its unit-tested core exist, but the **call sites
-are not yet wired**. Nothing reaches the DO until the wiring below ships *and* a
-source sets `ordering_enabled`, so this is inert in production.
+This directory contains a Durable Object and queue state machine for per-key
+ordering. The router does not yet enqueue work through this object, and delivery
+runtimes do not report results to it. Its presence in the repository does not
+provide end-to-end ordered delivery.
 
-## What's here
-- `@axel/shared` `OrderingQueueCore` — the runtime-agnostic state machine (one
-  in-flight per key; advance only on terminal success/dead; `retry` = no-op
-  head-of-line block; dead = unblock + record gap; idempotent `report`). Fully
-  unit-tested in `apps/ingest-worker/test/ordering-core.test.ts` against a fake
-  storage, because router-edge has no test runner and a DO needs workerd.
-- `durable-object.ts` — thin CF wrapper: `state.storage` + a `dispatch` that
-  sends the head delivery to `DELIVERY_QUEUE` stamped with `ordering_token`.
-- `wrangler.toml` — `ORDERING` binding + `v1-ordering-do` migration tag.
-- `DestinationQueueMessage.ordering_token?` — the echo-back token (additive).
-- Phase 1 (already on main): ingest extracts `ordering_key`, shards by it.
+Ingest already extracts `ordering_key` and uses it to choose a queue shard.
+That alone does not serialize destination delivery.
 
-## Remaining wiring (must land together)
-Enqueue without report would **stall a key** (the in-flight slot never clears),
-so these ship as one unit, behind `ordering_key` presence (inert otherwise):
+## Components
 
-1. **Router enqueue** (`apps/router-edge/src/index.ts`, leaf loop ~329–428):
-   for a message with `ordering_key`, instead of `DELIVERY_QUEUE.send` / native
-   HTTP, call the DO: `env.ORDERING.get(env.ORDERING.idFromName(ordering_key))`
-   `.fetch(..., {op:"enqueue", leaf:{event_id, message: destinationMessage}})`.
-   Unordered messages keep the existing path verbatim.
+- `OrderingQueueCore` in `@axel/shared` allows one delivery per key at a time.
+  Success or terminal failure advances the queue. A retry keeps the current
+  delivery in place; failure records a gap. Duplicate reports are harmless.
+  Tests use fake storage in `apps/ingest-worker/test/ordering-core.test.ts`.
+- `durable-object.ts` adapts the core to Cloudflare storage and sends the next
+  message to `DELIVERY_QUEUE` with an `ordering_token`.
+- `wrangler.toml` declares the `ORDERING` binding and `v1-ordering-do` migration.
+- `DestinationQueueMessage.ordering_token` carries the result-report token.
 
-2. **Delivery report** — on terminal outcome, echo `ordering_token` back:
-   - `apps/delivery-edge` (queue path): in the `success`/`dead`/`retry` switch,
-     if `ordering_token` is set, call the DO `{op:"report", seq, outcome}`.
-     delivery-edge binds the same DO namespace via `script_name`.
-   - **Native path** (`router-edge` direct-HTTP `mongodb`/`databricks`, and the
-     Node `delivery-service`): the Node service can't bind a DO. Options: a tiny
-     report-forwarder route on an edge worker, or a Cloudflare RPC binding.
-     Until resolved, **ordered + native destination is unsupported** — guard it
-     at config time rather than silently reordering.
+## Work required before enabling delivery ordering
 
-3. **Spill keys**: ordered leaves still spill oversize bodies to R2 before
-   enqueue; the DO stores the spilled message as-is.
+Enqueue and result reporting must ship together. Without a terminal result,
+a key stays blocked indefinitely.
 
-## Open questions (carried from the design)
-- Report-loss watchdog via DO `alarm()` (re-probe `delivery_idempotency.state`).
-- Ordering scope: per `(key, route, destination, leaf)` vs. across a route.
-- DO regional placement / latency; key cardinality vs. DO count + `alarm()` GC.
-- Replay of an ordered event must get a fresh `ordering_token` (not jump the
-  live key's queue).
+1. Route messages with `ordering_key` through the Durable Object's `enqueue`
+   operation. Keep unordered messages on the existing path.
+2. Have edge delivery report success, failure, and retry outcomes with the token.
+   Bind it to the router's Durable Object namespace.
+3. Provide an authenticated report path for Node delivery, which cannot bind a
+   Durable Object directly. Reject unsupported ordered/native configurations
+   until this path is implemented.
+4. Preserve R2 spill handling for oversized messages. The object should store
+   the message that references the spilled payload.
+5. Give replayed events a new ordering token and place them in the queue normally.
 
-## Why this isn't deployed yet
-Introducing DOs adds a new deploy/local-dev (`wrangler dev`)/on-call surface.
-Per the design, socialize that before enabling Phase 2 in production. This
-branch is for review of the DO approach and its invariants; it is intentionally
-unpushed.
+Decide the ordering scope before integration: per key, per route, or per
+route/destination/leaf. Also resolve lost-report recovery, alarm cleanup, and
+placement latency. Test the complete path in Cloudflare before enabling it
+for production sources.

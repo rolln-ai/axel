@@ -31,7 +31,9 @@ describes receipt patterns; it cannot prove that a sender had nothing to send.
 Recent unresolved dead letters, destination pauses and retries older than 30 minutes
 open delivery incidents. First detection looks for failures from the last seven days
 so deployment does not re-email months of historical failures. Once open, an incident
-continues to track all unresolved failures for that route and destination. Unconditional declarative routes also check for accepted
+continues to track all unresolved failures for that route and destination.
+
+Unconditional declarative routes also check for accepted
 events with no delivery attempt in the last seven days. Filtered or transformed
 routes use actual failures and retries, because a missing delivery may be an
 intentional filter result. This monitor is not proof of complete historical delivery.

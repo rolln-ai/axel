@@ -1,6 +1,11 @@
 # Webhook data security review
 
-Date: 2026-08-27
+Review started: 2026-08-27
+
+This record includes follow-up fixes made before the public launch. It is a
+historical review, not a live security status page. For current runtime and
+operation instructions, use [ADR-0002](adr-0002-current-runtime.md) and the
+[docs index](README.md).
 
 This review followed webhook data from the public ingest endpoint through raw
 R2 storage, routing, delivery, dashboard inspection, CLI payload retrieval, and
@@ -29,12 +34,12 @@ The most sensitive boundaries are the source lookup service, R2 read
 credentials, personal access tokens, destination egress, and any optional AI
 feature that receives event examples.
 
-## Findings and remediations in this sweep
+## Findings and fixes
 
 | Severity | Finding | Resolution |
 | --- | --- | --- |
 | Critical | A personal access token survived removal of its user from a workspace. The removed user could continue using CLI raw-payload reads, and an ordinary member's PAT inherited write and replay abilities. | PAT authentication now joins the current membership on every request, derives scopes from the current role, and a composite foreign key deletes tokens when membership ends. |
-| Critical | Data Contract patch approval trusted browser-supplied replay tuples. An admin who knew another workspace's R2 object key could pair it with local source and route IDs, causing the account-privileged replay worker to read that foreign raw body and send it to the attacker's destination. | Patch approval now resolves every tuple from an unresolved dead letter joined to the authenticated workspace, source, route, and Data Contract before any write. The shared enqueue tail independently rejects foreign key prefixes, a database constraint quarantines invalid active rows and blocks new ones, and the replay consumer validates workspace ownership before hints or R2 access. |
+| Critical | Data Contract patch approval trusted browser-supplied replay tuples. An admin who knew another workspace's R2 object key could pair it with local source and route IDs, causing the account-privileged replay worker to read that foreign raw body and send it to the attacker's destination. | Patch approval now resolves every tuple from an unresolved dead letter joined to the authenticated workspace, source, route, and Data Contract before any write. The shared enqueue function independently rejects foreign key prefixes, a database constraint quarantines invalid active rows and blocks new ones, and the replay consumer validates workspace ownership before hints or R2 access. |
 | Critical | The self-host dashboard told operators to run `axel auth login` without a base URL. The CLI defaults to Axel Cloud, so following that instruction sent the newly pasted self-host PAT to the hosted service for validation. | The token panel now emits a copy-safe command with the configured deployment origin. The CLI validates before reading or sending a token, permits plaintext only for exact loopback development hosts, stores only a normalized origin, and refuses authenticated redirects. |
 | High privacy | The dashboard and marketing site loaded browser analytics and advertising scripts that could derive page URLs, DOM text, element attributes, referrers, and campaign values. Password-reset, verification, and invitation URLs contain one-shot credentials. | PostHog, Umami, GTM, gtag, conversion cookies, browser analytics providers, and their proxy routes were removed from both applications. A regression scan fails if those tracker entry points return. Hosted and self-hosted responses also set `Referrer-Policy: no-referrer`. |
 | High privacy | When production email was not configured, the development fallback printed the full recipient, message, and one-shot password-reset, verification, or invitation link to process logs while reporting success. The default self-host profile did not pass email configuration through to the dashboard. | Full-message logging is now development-only. Production returns a safe delivery error without logging the recipient or body, and the self-host environment exposes optional Resend settings explicitly. |
@@ -49,7 +54,7 @@ feature that receives event examples.
 | Medium | Cloudflare Worker secrets were applied one at a time, so a failed multi-key rotation could leave a live version with only part of a coupled credential set. | The protected workflow now verifies that the newest uploaded Worker version is the sole active production version, creates one inactive version with the complete allowlisted secret set, activates that version at 100% only after staging succeeds, and reads deployment state back. A simulated staging failure proves no deployment command runs and no subset becomes active. |
 | High | Stripe, GitHub, Shopify, or Chargebee sources could silently fall back to token-only authentication if the decrypted provider signing secret was missing at the edge. | Named providers now fail closed with a retryable service error before any R2 or Queue write. Custom sources retain their documented token-only mode. |
 | High | Dashboard onboarding and source pages built copyable ingest URLs containing the one-shot source token. The edge also accepted that legacy query credential, exposing it to CDN, proxy, provider, and browser URL logs. | The edge rejects `token` query parameters by default with `401 query_token_not_allowed`. Existing custom sources can receive an explicit, source-scoped migration window of at most 72 hours; see [migration requirements](ingest-auth-migration.md). Normal authentication and authority fencing still apply. Custom-source copy actions show the clean URL and one-time token separately and send the token through `x-axel-token`. Named providers use provider authentication. Headerless senders can opt into a separate, independently revocable URL credential; see [webhook authentication](webhook-authentication.md) for its upstream logging tradeoff. |
-| High | Positive source config in Cloudflare KV could authorize a rotated token, disabled or deleted source, or suspended workspace for up to five minutes. An authorization already in flight could also race the invalidation. | Hosted ingest now resolves every request through a per-source SQLite Durable Object and confirms the same authorization revision immediately before its first durable write. Mutations fence before the database write and release only with freshly loaded committed config; a failed sync stays closed. SQLite stores one-way source/config digests, presence, expiry, and authorization state, never plaintext identifiers or source credentials. A mixed-version legacy invalidation enters a fail-closed origin-refresh state and self-repairs without overriding an explicit mutation fence. The self-host profile deliberately omits the binding and performs an authenticated direct-origin lookup on every request. |
+| High | Positive source config in Cloudflare KV could authorize a rotated token, disabled or deleted source, or suspended workspace for up to five minutes. An authorization already in flight could also race the invalidation. | Hosted ingest now resolves every request through a per-source SQLite Durable Object and confirms the same authorization revision immediately before its first durable write. Mutations fence before the database write and release only with freshly loaded committed config; a failed sync stays closed. SQLite stores one-way source/config digests, presence, expiry, and authorization state, never plaintext identifiers or source credentials. A mixed-version legacy invalidation enters a fail-closed origin-refresh state and self-repairs without overriding an explicit mutation fence. The self-host profile omits the binding and performs an authenticated direct-origin lookup on every request. |
 | High | A captured valid provider request could be submitted repeatedly. GitHub, Shopify, and Chargebee do not all provide a signed timestamp, and each retry previously received a new Axel event ID. | Signed requests now derive a source-bound deterministic event ID and stable raw-object key from the provider delivery or event identity. The raw body uses an atomic create condition, so concurrent copies cannot overwrite or create another retained payload. Retries remain safe to enqueue after a partial failure because the 30-day delivery claim sees the same event ID and suppresses duplicate external effects. Regression tests cover sequential duplicates, concurrent copies, and queue-failure recovery. |
 | Critical | Oversized delivery messages trusted an embedded R2 spill key. A malformed or cross-tenant message could point a privileged consumer at another workspace's object, and retry cleanup could delete that object. | Hydration and deletion now require the exact canonical key derived from workspace, event, destination, and attempt before any R2 access. Parsed spill bodies are shape-validated, and retries write a new canonical attempt key before removing the prior object. |
 | High | Delivery-edge performed R2 and Postgres work before validating the queue contract, and a failed terminal dead-letter insert could still acknowledge the last durable message and delete its spill. | Both delivery runtimes now accept only the versioned contract plus the explicit legacy-v0 rolling-upgrade shape. Malformed or future versions fail before storage access, and failed dead-letter persistence retries without ACKing or deleting spill data. Metadata-only quarantine records hashes and sizes, never queue bodies. |
@@ -97,31 +102,15 @@ feature that receives event examples.
 | High privacy | Data Contract inference and failure investigation sent example webhook values through an incomplete masker. Credentials, arbitrary free text, and raw event-type values could reach OpenRouter. | AI requests now contain only field-name summaries, object and array shape, primitive type markers, allowlisted operational enums, and literal-withheld filter or transform structure. Primitive values, event-type values, destination names, connector text, provider responses, custom separators, and raw payload excerpts are excluded before prompt construction. Requests are capped at 64 KiB, reject prompt-injection-shaped field names, and never follow redirects. |
 | High privacy | The event-type backfill script reread historical raw payloads and promoted payload values into long-lived indexed metadata. | The script now exits without reading data and explains that historical payload values cannot cross the raw-retention boundary. Any replacement must derive metadata prospectively under the current type-only contract. |
 
-Regression tests cover removed-member tokens, role-derived PAT permissions,
-foreign-workspace patch-approval selectors, replay enqueue validation, database
-replay-key binding, and consumer-side rejection before any R2 or hint lookup,
-provider-secret failure, provider replay suppression, canonical spill ownership,
-queue-contract rejection before storage access, durable dead-letter failure,
-Data Contract persistence scrubbing, administrator MFA enrollment ownership,
-Chargebee verification, retained metadata, redirect
-SSRF, IPv6 edge cases, connected-socket blocking, unsigned webhook failure,
-Cloudflare HTTP Pull decoding, literal-slash R2 object paths, database TLS
-selection, required cache invalidation, workspace/source lock ordering,
-shared edge/native fenced delivery claims, Parquet shutdown drain, browser
-tracker absence and referrer controls, production email and diagnostic-log
-suppression, spill-error and destination-response redaction,
-dead-letter, replay-status, backfill-status, pull-history, and immediate-email diagnostic redaction,
-config-export redaction, public test-marker isolation, auth/API rate-limit failure handling,
-database-enforced billing-journal payload minimization across rolling writers,
-OpenRouter prompt, redirect, and long-lived fixture credential controls, Sentry
-envelope sanitization, destination and pull credential-reference binding, dashboard probe
-role and socket gates, Chargebee host and redirect restrictions,
-timing-safe internal auth, Docker context and Compose exposure, migration
-ledger fail-closed behavior, and self-host URL fail-closed behavior.
+Regression tests cover the findings above, including membership revocation,
+workspace ownership, credential handling, delivery persistence, and self-host
+setup. The tests check both application guards and database constraints where
+applicable. Passing tests do not replace live deployment checks or independent
+review.
 
-## Residual risks
+## Limitations recorded during the review
 
-These items remain open and should be treated as the next hardening backlog.
+Check the current implementation before relying on or extending these controls.
 
 ### Medium: rate limiting is per Worker isolate
 
@@ -149,14 +138,14 @@ can list Queues or Worker scripts. Delivery uses a different runtime token for
 Queue and R2 operations, while the Worker-deployment/provisioning token remains
 in protected workflows. Source configuration still contains decrypted signing
 material at the edge, and internal edge APIs use deployment-wide shared
-secrets. A runtime credential compromise therefore has a wider tenant blast
-radius than the application authorization model.
+secrets. A compromised runtime credential can therefore reach data across
+workspaces even though the application checks workspace access.
 
 The self-host profile requires a separate `CLOUDFLARE_RUNTIME_API_TOKEN`; its
 startup verifier proves Queue/R2 operations and rejects Worker Scripts access,
 so the provisioning permission cannot silently enter application containers.
 For simpler installation, that profile
-maps the same Queue/R2 runtime value to isolated dashboard and delivery
+uses the same Queue/R2 runtime token in separate dashboard and delivery
 containers; operators can split those credentials further in a customized
 deployment. The runtime still remains broader than Axel's workspace-level
 authorization boundaries.
@@ -235,14 +224,14 @@ Keep digest updates behind review, generate pruned runtime bundles, and
 evaluate an unprivileged high-port Caddy configuration. Continue scanning the
 finished images as well as source and dependency manifests.
 
-## Current conclusion
+## Review result
 
-The review found no intended unauthenticated raw-payload read surface. The most
+The reviewed raw-payload read endpoints require authentication. The most
 direct cross-membership data-access paths found were the removed-member PAT and
 the patch-approval replay confused deputy. Both are now closed at the
 application boundary and reinforced in the database; replay also fails closed
 again at the privileged consumer. The remaining webhook confidentiality risks
-are chiefly infrastructure-credential blast radius and upstream logging of the
+are chiefly broad infrastructure credentials and upstream logging of the
 first request for token-bearing auth links. AI requests contain schema and type
 markers rather than webhook values. Replay and distributed source rate limiting
 remain integrity and cost risks. The residual items above should stay visible

@@ -79,7 +79,10 @@ TypeScript checks reject unused local code.
   error codes can preserve recovery behavior without retaining raw responses.
 - Land reviewed commits through a PR. CI must pass. Production promotions use
   the existing manual workflows, with migrations before application code.
-  Keep `[skip render]` in merge titles so a merge cannot trigger an unrelated
-  native-service rollout. Verify exact deployment URLs, then production domains.
+  Use descriptive commit and PR titles. Render Git auto-deploys must remain off.
+  If a skip guard is needed while verifying that setting, put `[skip render]`
+  on its own line in the commit body, including the squash-merge body. Do not
+  put deployment flags in titles. Verify exact deployment URLs, then production
+  domains.
 - Internal release ledgers and business documents belong in the private
   `axel-internal` repository. Do not publish them here.

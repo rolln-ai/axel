@@ -1,4 +1,4 @@
-# DESIGN.md
+# UI design
 
 How to build UI in this repo that matches what's already here. Read this
 before you create or change anything a user sees. It covers both Next.js
@@ -9,9 +9,8 @@ apps:
 - `apps/marketing` is axelapp.ai (hand-written CSS, no Tailwind). See
   "Marketing app" near the end; its rules differ.
 
-This file documents the existing style; it does not propose a new one. The
-tokens and components it points at are the source of truth. When this file
-and the code disagree, the code wins; fix this file.
+Use the tokens and components linked below. If these instructions disagree
+with the code, check the implementation and update this file.
 
 ## Ground rules
 
@@ -45,9 +44,7 @@ and the code disagree, the code wins; fix this file.
 
 ## Brand
 
-Axel is a webhook ingestion and delivery platform. The UI should feel like a
-dense, well-lit tool for operators: warm neutrals, one orange accent, mono
-numbers, no decoration.
+Axel is a webhook ingestion and delivery platform. Use compact layouts, warm neutrals, one orange accent, and monospace numbers.
 
 - The mark is a hub-and-spoke wheel: six spokes at 60°, segmented rim, copper
   gradient. In the dashboard, render it with `app/_brand/Logo.tsx`
@@ -74,10 +71,9 @@ Reach for tokens by role:
   in that order
 
 The palettes are deliberate. Light is warm ivory (`#f7f7f4` base); dark is
-warm espresso (`#1a1814` base, meant to read as a dim study at dusk, not pure
-black). Dark-mode borders are white at 10% alpha, not grey hexes.
+warm espresso (`#1a1814` base, rather than pure black). Dark-mode borders are white at 10% alpha, not grey hexes.
 
-Contrast is load-bearing. `--muted-foreground` in light was darkened from
+Check text contrast. `--muted-foreground` in light was darkened from
 `#7a7974` to `#6a6964` to clear WCAG AA 4.5:1 on the ivory background. Never
 lighten a grey to make it "subtler"; check contrast instead.
 
@@ -149,8 +145,7 @@ Build pages from the existing composites:
   `X` to close, optional `bg-muted/30` footer with "Open full page". Use it
   for previews; anything that needs its own URL gets a route.
 - `AppShell` owns page geometry (sticky `md:w-64` sidebar on `bg-sidebar`,
-  main content `px-4 py-4 pt-14 md:px-8 md:py-6 md:pt-6`). Pages should not
-  fight it.
+  main content `px-4 py-4 pt-14 md:px-8 md:py-6 md:pt-6`). Keep page spacing consistent with it.
 - `OverviewChart.tsx` is server-rendered inline SVG. `EdaPanel.tsx` is the sole
   Recharts chart. Series colors come from the chart tokens; migrate the legacy
   hex values in `EdaPanel.tsx` to `var(--chart-n)` when touching that chart.
@@ -183,9 +178,9 @@ a component's dimensions, change its skeleton in the same commit.
 - No emoji in product copy. No exclamation points in errors.
 - State what happened and what the user can do. No cheerleading.
 
-## Anti-patterns
+## Review checklist
 
-Named so reviews can point at them. Never:
+Reject these changes:
 
 1. **New raw color.** Hex, oklch, or arbitrary-value color classes added to components.
 2. **Palette drift.** Any Tailwind color family other than the emerald/amber
@@ -194,7 +189,7 @@ Named so reviews can point at them. Never:
    never a filled red block.
 4. **Stock-shadcn sizing.** Upstream shadcn markup pasted in with `h-9`/`h-10`
    controls, oversized for this compact UI.
-5. **Title Case Anything.** Headings, buttons, and labels are sentence case.
+5. **Title case labels.** Headings, buttons, and labels are sentence case.
 6. **Duplicated status mapping.** Entity, replay, delivery, or severity colors
    reimplemented outside `StatusBadges.tsx`.
 7. **Mismatched skeletons.** Loading states with different dimensions than
@@ -209,10 +204,10 @@ Named so reviews can point at them. Never:
 
 ## Marketing app
 
-`apps/marketing` is a different world, on purpose:
+`apps/marketing` uses a separate styling system:
 
 - No Tailwind, no shadcn. One hand-written stylesheet at
-  `apps/marketing/app/globals.css` with BEM-ish class names. Extend it in
+  `apps/marketing/app/globals.css` with component-based class names. Extend it in
   place; do not introduce Tailwind or component libraries.
 - Its own token names (`--bg`, `--surface`, `--ink`, `--muted`, `--primary`),
   dark-only, values mirroring the dashboard's dark palette. If you change a

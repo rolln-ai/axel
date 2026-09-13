@@ -4,10 +4,11 @@ The delivery canary sends a synthetic event through the production ingest,
 router, native queue, and Postgres destination. It does not use customer
 webhooks or a customer destination.
 
-For the hotfix merge, the PR squash title or merge commit message must contain
-`[skip render]`. The worker-only save also refuses to proceed unless Render
-reports that git auto-deploy is disabled. These controls keep the merge and the
-settings update separate from the later manual, exact-commit worker deploy.
+Keep Render Git auto-deploys off. The worker-only settings command checks this
+before saving changes. Deploy the selected commit afterward through the manual
+workflow. If live auto-deploy settings cannot be verified, put `[skip render]`
+on its own line in the commit body and preserve it when squash-merging. Commit
+and PR titles should describe the change.
 
 ## Provision the isolated canary
 

@@ -1,8 +1,8 @@
 # Axel CLI
 
-Talk to your Axel webhook pipeline from the terminal. Mint a Personal
-Access Token from the dashboard → Settings → Personal access tokens, then
-sign in.
+Send test events, forward incoming webhooks to a local handler, and replay
+retained payloads from the terminal. Create a personal access token in the
+dashboard under **Settings**, then **Personal access tokens**.
 
 The npm package is not published yet. Build and install it from a source
 checkout:
@@ -13,21 +13,31 @@ npm install -g ./packages/cli
 axel auth login
 ```
 
+For a self-hosted installation, include the dashboard URL when signing in:
+
+```sh
+axel auth login --api-base https://axel.example.com
+```
+
+Without `--api-base`, the CLI connects to Axel Cloud. Use the interactive token
+prompt to keep your PAT out of shell history.
+
 ## Commands
 
 | Command                                                   | What it does                                                                                              |
 | --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `axel auth login`                                         | Paste a PAT (or pass `--token`), validates via `/v1/cli/me`, writes `~/.axel/config.json`.               |
-| `axel auth status`                                        | Re-validates the saved PAT and prints workspace + token info.                                            |
+| `axel auth login`                                         | Validates a PAT entered at the prompt and saves it in `~/.axel/config.json`.               |
+| `axel auth status`                                        | Checks the saved PAT and prints workspace and token information.                                            |
 | `axel auth logout`                                        | Deletes `~/.axel/config.json`.                                                                            |
-| `axel trigger <provider> <event_type> --source <id>`      | Sends a canned (or `--payload`-overridden) event through the source's ingest path.                       |
-| `axel send <provider> <event_type> --to <url>`            | Offline smoke test: POSTs a canned payload straight to `<url>`. Bypasses Axel — no signin/source/PAT.    |
-| `axel listen --source <id> --forward-to <url>`            | Polls for new events on the source (~1s) and forwards each to your local handler.                        |
+| `axel trigger <provider> <event_type> --source <id>`      | Sends a sample event through a source. Use `--payload` for your own JSON.                       |
+| `axel send <provider> <event_type> --to <url>`            | Sends a sample payload directly to `<url>` without signing into Axel or creating a source.    |
+| `axel listen --source <id> --forward-to <url>`            | Polls for new events on the source once a second and forwards each to your local handler.                        |
 | `axel replay <event_id> --forward-to <url>`               | Pulls the raw bytes Axel stored for `event_id` and POSTs them to your local handler.                     |
 
-`trigger`, `listen`, and `send` strip stale provider signature headers
-(e.g. `Stripe-Signature`) by default so your local handler doesn't 401 a
-replayed event — pass `--keep-signature` to forward them as-is.
+`listen`, `replay`, and `send` strip supported provider signature headers such
+as `Stripe-Signature` by default. `--keep-signature` preserves headers that are
+still present; it cannot recover signatures removed at ingestion or make an
+expired signature valid. `trigger` uses the authenticated test-event API.
 
 Run `axel <command> --help` for command-specific options.
 
@@ -46,7 +56,7 @@ axel listen --source src_01H... --forward-to http://localhost:3000/webhooks
 # 4. Re-run a real production event against your localhost handler.
 axel replay evt_018... --forward-to http://localhost:3000/webhooks
 
-# No source set up yet? Smoke-test a handler with a canned payload, offline.
+# Send a sample payload directly to a local handler.
 axel send stripe charge.succeeded --to http://localhost:3000/webhooks
 ```
 
@@ -55,10 +65,11 @@ does not accept a source token or build a credential-bearing ingest URL. A
 custom producer that calls ingest directly must send its one-time source token
 in the `x-axel-token` request header.
 
-## Notes
+## Polling and local forwarding
 
-`axel listen` polls `/v1/cli/events` once a second rather than holding a
-socket open. At ~1s lag it's indistinguishable from "live" for a terminal
-dev loop, and it avoids the ingest-worker → delivery-service WebSocket
-fanout the original AXE-26 spec called for. A `--ws` mode can layer on
-later as `axel listen --ws` without breaking this path.
+`axel listen` polls `/v1/cli/events` once a second. Forwarding includes that
+polling delay plus request time; it does not use a WebSocket.
+
+`listen` and `replay` send requests directly from your machine to the forwarding
+URL. They do not create a new Axel event or a dashboard delivery record. The
+small self-host profile needs ClickHouse for the event lookups these commands use.

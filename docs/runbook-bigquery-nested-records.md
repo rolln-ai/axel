@@ -27,7 +27,7 @@ and would otherwise write the selected table name into the destination's
 default dataset. After the connector rollout, deploy the dashboard and verify
 one route in a non-default dataset before enabling the rest.
 
-## Safe rollout order
+## Rollout order
 
 1. Merge and deploy the backend/shared-contract release that understands
    `nested_records`.
@@ -54,14 +54,13 @@ one route in a non-default dataset before enabling the rest.
    ```
 
 The script keeps each existing target unchanged and points the route at a new
-table whose name ends in `_nested`. The connector creates that table from the
+table with the supplied suffix, `_nested_v2` in this example. The connector creates that table from the
 first event. Migration metadata is stored in the binding so rollback is
 transactional and idempotent.
 
-The bulk workflow migrates legacy `columns` bindings only. `json_column`
+The script migrates legacy `columns` bindings by default. `json_column`
 bindings may accept non-object payloads that `nested_records` correctly rejects,
-so they require a separate payload-eligibility review and explicit script
-opt-in instead of being converted blindly.
+so check their payloads and explicitly opt in before converting them.
 
 Messages queued before the binding change retain the old binding and finish in
 the old table. Router-edge also caches route bindings for up to 30 seconds, so

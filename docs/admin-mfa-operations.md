@@ -11,7 +11,7 @@ returning to privileged pages. Pending seeds are not disclosed to other
 sessions. Privileged access then requires a fresh TOTP verification every 15
 minutes.
 
-Treat the master key as recovery-critical. Losing it makes destination
+Back up the master key securely. Losing it makes destination
 credentials and enrolled TOTP seeds unreadable. A suspected exposure requires
 rotating destination credentials and forcing new super-admin MFA enrollment as
 part of the master-key rotation plan.

@@ -29,7 +29,7 @@ const homeFaqs: FaqItem[] = [
   },
   {
     q: "Does Axel deliver each event exactly once?",
-    a: "No distributed webhook system can promise exactly-once delivery to an external destination. Axel uses at-least-once delivery with a stable event ID across retries. Signed HTTP receivers should deduplicate on X-Axel-Event-Id. A replay creates a new event ID because it is an intentional new delivery.",
+    a: "Axel uses at-least-once delivery with a stable event ID across retries. Signed HTTP receivers should deduplicate on X-Axel-Event-Id. Dashboard replays create a new event ID and deliver the event again.",
   },
   {
     q: "Is there a free tier?",
@@ -51,23 +51,23 @@ const features: Array<{ title: string; body: string; icon: string }> = [
   },
   {
     icon: "↺",
-    title: "Replay any event from the dashboard or CLI",
-    body: "`axel replay evt_…` pulls the exact bytes we stored and sends them to your dev server. Debug with the real payload, not a made-up test event.",
+    title: "Replay retained events",
+    body: "Replay an event through your routes from the dashboard, or use the CLI to send its stored payload to a local handler.",
   },
   {
     icon: "◉",
-    title: "Data Contracts from your real traffic",
-    body: "Point Axel at a source and it learns the schema for each event type from real events. Drift detection flags new fields, type changes, and sensitive data before they break your database.",
+    title: "Schemas from incoming events",
+    body: "Axel infers event schemas from source traffic. Data Contracts flag new fields, type changes, and fields that may contain sensitive data.",
   },
   {
     icon: "↦",
     title: "Filters and transforms with declarative rules",
-    body: "Routing is configuration, not code: match event types, pick and reshape fields, or pass the raw payload straight through. The same rules behave the same way everywhere they run.",
+    body: "Match event types, rename or remove fields, or pass the payload through. Configure each route to send the result to one or more destinations.",
   },
   {
     icon: "▤",
     title: "An inbox for failed deliveries",
-    body: "Failed deliveries land in an inbox with one-click Retry and Mute. No digging through database tables or juggling extra dashboards during an incident.",
+    body: "Review terminal failures in the Inbox. Open a delivery to see its history, retry it after a fix, or mute a failure you have already investigated.",
   },
   {
     icon: "◐",
@@ -86,9 +86,9 @@ const destinationIntegrations: Array<{ name: string; detail: string; kind: strin
   { name: "MongoDB", detail: "Write each event into Atlas or self-hosted collections.", kind: "Database" },
   { name: "Postgres", detail: "Insert payloads into JSONB or column-mapped tables.", kind: "Database" },
   { name: "S3", detail: "Write JSON objects or batched Parquet with route-level key templates.", kind: "Storage" },
-  { name: "Cloudflare R2", detail: "Land payloads in Axel-managed R2 storage — no credentials needed.", kind: "Storage" },
+  { name: "Cloudflare R2", detail: "Write payloads to Axel-managed R2 storage without adding destination credentials.", kind: "Storage" },
   { name: "Databricks", detail: "Drop JSON files into Unity Catalog Volumes for Auto Loader.", kind: "Lakehouse" },
-  { name: "BigQuery", detail: "Stream events into warehouse-native nested RECORD schemas by default.", kind: "Warehouse" },
+  { name: "BigQuery", detail: "Stream JSON into tables with nested RECORD fields.", kind: "Warehouse" },
 ];
 
 export default function Page() {
@@ -189,9 +189,9 @@ export default function Page() {
             <span className="kicker">Product overview</span>
             <h2>See the webhook pipeline in one dashboard.</h2>
             <p className="lede">
-              Live stats, delivery attempts, source breakdowns, and replay controls sit in one
-              workspace. See when a source starts sending unexpected data, spot retries before
-              they become permanent failures, and replay any event without leaving the dashboard.
+              Check source traffic, delivery outcomes, and retry activity in your workspace.
+              Open a failed delivery to inspect its history and replay it while the payload
+              is still retained.
             </p>
           </div>
           <DashboardMock variant="standalone" />
@@ -207,7 +207,7 @@ export default function Page() {
             <p className="lede">
               Open any event to see when it arrived, how it was stored, routed, and reshaped, and
               every delivery attempt. Then replay it from the dashboard, or pull the same bytes to
-              your laptop with <code>axel replay evt_… --forward-to localhost:3000</code>.
+              your laptop with <code>axel replay evt_… --forward-to http://localhost:3000</code>.
             </p>
             <ul>
               <li>Inspect retained raw payloads and headers during the replay window</li>
@@ -232,8 +232,8 @@ export default function Page() {
               <strong>Retries reuse a stable event ID so destinations have a key for deduplication.</strong>
             </p>
             <ul>
-              <li>Filter and reshape with declarative rules — no custom code to run</li>
-              <li>The same rules behave the same way everywhere they run</li>
+              <li>Configure filters and field transforms per route</li>
+              <li>Preview a transform before saving it</li>
               <li>Fan one accepted event out to multiple configured destinations</li>
               <li>Per-route metrics and failure reasons in the dashboard</li>
             </ul>
@@ -247,9 +247,10 @@ export default function Page() {
             <span className="kicker">Data Contracts</span>
             <h2>Webhook schemas discovered from real traffic.</h2>
             <p className="lede">
-              Point Axel at a webhook source and it learns the event types, fields, and data types
-              from real traffic — and spots fields that look sensitive. When a provider changes its
-              payloads, Axel flags it before your database breaks.
+              Axel infers event types and field types from source traffic, then checks for
+              changes every five minutes. Review new fields, type changes, and possible sensitive
+              fields in Data Contracts. These checks do not block delivery or guarantee that a
+              destination will accept the payload.
             </p>
             <ul>
               <li>Auto-discovered schemas per source, versioned and exportable</li>
@@ -266,10 +267,10 @@ export default function Page() {
         <div className="container">
           <div className="sectionHead">
             <span className="kicker">Integrations</span>
-            <h2>One endpoint in. Your configured destinations out.</h2>
+            <h2>Connect webhook senders to your destinations.</h2>
             <p className="lede">
-              Send webhooks from any product to a single endpoint. Use token auth or your own HMAC
-              signatures, then deliver to the databases, storage, warehouses, and HTTP services your team already runs.
+              Create an endpoint for each source. Authenticate its sender, then route events to
+              the databases, warehouses, storage, and HTTP services you use.
             </p>
           </div>
 
@@ -358,11 +359,11 @@ export default function Page() {
       <section className="feature" id="why">
         <div className="container">
           <div className="sectionHead">
-            <span className="kicker">Why teams build on Axel</span>
-            <h2>Webhook intake, routing, and recovery in one product.</h2>
+            <span className="kicker">Features</span>
+            <h2>Keep the payload. Follow the delivery.</h2>
             <p className="lede">
-              Axel brings event capture, routing, transforms, monitoring, replay, and failure
-              handling into one product for engineering, platform, and data teams.
+              Store accepted webhooks before delivery. When a destination fails, use the
+              event history to investigate and the retained payload to try again.
             </p>
           </div>
 
@@ -382,7 +383,7 @@ export default function Page() {
         <div className="container">
           <div className="sectionHead">
             <span className="kicker">FAQ</span>
-            <h2>What is Axel, and how does it sync webhooks?</h2>
+            <h2>Common questions</h2>
           </div>
           <div className="faqGrid">
             {homeFaqs.map((item) => (

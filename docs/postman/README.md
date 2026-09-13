@@ -12,7 +12,7 @@ credentials. Use a disposable source that receives only synthetic data. Do not
 reuse a production source, share or export a populated environment, or paste
 real webhook bodies into a request.
 
-## Setup (90 seconds)
+## Setup
 
 1. **Sign up.** Open <https://app.axelapp.ai/signup> and create your workspace.
 2. **Create a disposable custom source.** Go to <https://app.axelapp.ai/sources> →
@@ -33,7 +33,7 @@ Do not switch this synthetic collection to a named-provider source. Stripe,
 GitHub, and Shopify require a valid provider signature. Chargebee requires its
 configured webhook Basic Auth. Named-provider sources do not use an Axel source token.
 
-## What's in each folder
+## Collection folders
 
 ### Hello
 
@@ -85,7 +85,8 @@ Each request intentionally violates the ingest contract and asserts the expected
 | Body too large (1.1 MB) | 413 | `payload_too_large` |
 | Body too deep (200-level nesting) | 413 | `payload_too_deep` |
 
-If any of these stop returning the right code, something's broken on the worker.
+If a test fails, check the source configuration and Worker version before
+reporting the unexpected response.
 
 ### Replay & inspect
 
