@@ -1081,17 +1081,20 @@ async function pullBatch(queueId: string = QUEUE_ID): Promise<PulledMessage[]> {
   return parsePulledBatchResponse(data);
 }
 
-async function observeRealtimeQueueLag(queueId: string): Promise<void> {
+async function observeRealtimeQueueLag(queueId: string) {
   const metrics = await fetchQueueRealtimeMetrics({
     accountId: ACCOUNT_ID,
     queueId,
     token: API_TOKEN,
   });
-  await queueLagMonitor.observeSnapshot(queueRealtimeMetricsToLagSnapshot(metrics, Date.now()));
+  const snapshot = queueRealtimeMetricsToLagSnapshot(metrics, Date.now());
+  await queueLagMonitor.observeSnapshot(snapshot);
+  return snapshot;
 }
 
 const queueRealtimeMetricsRunner = createQueueRealtimeMetricsRunner({
   observe: observeRealtimeQueueLag,
+  maxAgeMs: Math.max(QUEUE_METRICS_INTERVAL_MS, MAX_IDLE_INTERVAL_MS) * 2 + 15_000,
   onError: (err, queueId) => captureException(sentry, err, {
     tags: { component: "delivery_queue_realtime_metrics", queue: queueId },
   }),
@@ -1573,7 +1576,7 @@ const server = http.createServer((req, res) => {
     }
     void (async () => {
       try {
-        const snapshot = await renderMetrics(pool, queueConsumerMetrics);
+        const snapshot = await renderMetrics(pool, queueConsumerMetrics, queueRealtimeMetricsRunner);
         res.writeHead(200, { "content-type": "text/plain; version=0.0.4" });
         res.end(snapshot.text);
       } catch {

@@ -72,6 +72,7 @@ describe("threshold evaluators", () => {
   });
 
   it("queue lag evaluator escalates by age bucket", () => {
+    expect(evaluateQueueLag({ oldest_unacked_age_seconds: null, backlog: 100 })).toEqual([]);
     expect(evaluateQueueLag({ oldest_unacked_age_seconds: 30, backlog: 100 })).toEqual([]);
     expect(evaluateQueueLag({ oldest_unacked_age_seconds: 90, backlog: 100 })[0]?.severity).toBe("warn");
     expect(evaluateQueueLag({ oldest_unacked_age_seconds: 600, backlog: 100 })[0]?.severity).toBe("critical");

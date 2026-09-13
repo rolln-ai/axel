@@ -152,6 +152,20 @@ async function authorityRequest(
   });
 }
 
+async function authorityUnavailableError(response: Response): Promise<SourceLookupUnavailableError> {
+  let diagnostic: unknown;
+  try {
+    diagnostic = await readBoundedJsonResponse(response, 1024);
+  } catch { /* Only fixed diagnostic codes may cross the authority boundary. */ }
+  if (diagnostic && typeof diagnostic === "object" && "reason" in diagnostic
+    && isSourceLookupFailureReason(diagnostic.reason)) {
+    const status = "http_status" in diagnostic ? diagnostic.http_status : undefined;
+    return new SourceLookupUnavailableError("source authority lookup failed", diagnostic.reason,
+      typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined);
+  }
+  return new SourceLookupUnavailableError("source authority unavailable", "authority_unavailable");
+}
+
 /**
  * Resolve source authorization through the per-source Durable Object. The
  * worker calls this for every hosted ingest request. A missing binding uses the
@@ -195,17 +209,7 @@ export async function beginSourceAuthorizationWithAuthority(
     throw new SourceLookupUnavailableError("source authorization is temporarily fenced", "source_fenced");
   }
   if (response.status === 503) {
-    let diagnostic: unknown;
-    try {
-      diagnostic = await readBoundedJsonResponse(response, 1024);
-    } catch { /* Only fixed diagnostic codes may cross the authority boundary. */ }
-    if (diagnostic && typeof diagnostic === "object" && "reason" in diagnostic
-      && isSourceLookupFailureReason(diagnostic.reason)) {
-      const status = "http_status" in diagnostic ? diagnostic.http_status : undefined;
-      throw new SourceLookupUnavailableError("source authority lookup failed", diagnostic.reason,
-        typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined);
-    }
-    throw new SourceLookupUnavailableError("source authority unavailable", "authority_unavailable");
+    throw await authorityUnavailableError(response);
   }
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
@@ -245,7 +249,7 @@ export async function confirmSourceAuthorizationWithAuthority(
 ): Promise<void> {
   if (!authorizationVersion) return;
   if (!env.SOURCE_AUTHORITY || env.DEV_MODE === "true") {
-    throw new SourceLookupUnavailableError("source authority confirmation is unavailable");
+    throw new SourceLookupUnavailableError("source authority confirmation is unavailable", "authority_unavailable");
   }
   let response: Response;
   try {
@@ -255,11 +259,15 @@ export async function confirmSourceAuthorizationWithAuthority(
       authorization_version: authorizationVersion,
     });
   } catch {
-    throw new SourceLookupUnavailableError("source authority confirmation failed");
+    throw new SourceLookupUnavailableError("source authority confirmation failed", "authority_unavailable");
+  }
+  if (response.status === 503) {
+    throw await authorityUnavailableError(response);
   }
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
-    throw new SourceLookupUnavailableError("source authorization changed during request verification");
+    throw new SourceLookupUnavailableError("source authorization changed during request verification",
+      response.status === 423 ? "authorization_changed" : "authority_unavailable", response.status);
   }
   await response.body?.cancel().catch(() => undefined);
 }
@@ -426,6 +434,7 @@ export class SourceAuthorityDurableObject {
       });
     }
 
+    this.hotSource = undefined;
     const source = await lookupSourceFromDeliveryService(this.env, sourceId);
     const fingerprint = await sourceFingerprint(source);
     if (
@@ -443,9 +452,13 @@ export class SourceAuthorityDurableObject {
       return json({ error: "source_config_drift" }, 423);
     }
 
-    const ready = stored?.status === "ready" && stored.expiresAt > Date.now()
+    // Refreshing identical committed config must not revoke an in-flight
+    // request. Fences, syncs, and legacy invalidation still issue new versions.
+    const unchanged = stored?.status === "ready" && stored.sourceFingerprint === fingerprint;
+    const ready = unchanged && stored.expiresAt > Date.now()
       ? stored
-      : await this.storeReady(sourceId, source, fingerprint);
+      : await this.storeReady(sourceId, source, fingerprint,
+        unchanged ? stored.authorizationVersion : undefined);
     this.hotSource = {
       source,
       sourceFingerprint: fingerprint,
@@ -459,14 +472,27 @@ export class SourceAuthorityDurableObject {
     if (!validFenceToken(authorizationVersion)) {
       return json({ error: "invalid_authorization_version" }, 400);
     }
-    const stored = await this.readState(sourceId);
+    let stored = await this.readState(sourceId);
     if (
       stored?.status !== "ready"
       || !stored.sourcePresent
-      || stored.expiresAt <= Date.now()
       || stored.authorizationVersion !== authorizationVersion
     ) {
       return json({ error: "authorization_changed" }, 423);
+    }
+    if (stored.expiresAt <= Date.now()) {
+      // This runs inside the same serialized operation as the final decision.
+      // Origin outages and config drift stay closed; expiry alone is not a
+      // credential change. A queued fence cannot acknowledge before this ends.
+      const refreshed = await this.resolve(sourceId);
+      if (!refreshed.ok) return refreshed;
+      await refreshed.body?.cancel();
+      stored = await this.readState(sourceId);
+      if (stored?.status !== "ready" || !stored.sourcePresent
+        || stored.authorizationVersion !== authorizationVersion
+        || stored.expiresAt <= Date.now()) {
+        return json({ error: "authorization_changed" }, 423);
+      }
     }
     return new Response(null, { status: 204 });
   }
@@ -578,6 +604,7 @@ export class SourceAuthorityDurableObject {
     sourceId: string,
     source: Source | null,
     fingerprint?: string,
+    authorizationVersion = crypto.randomUUID().replaceAll("-", ""),
   ): Promise<Extract<AuthorityState, { status: "ready" }>> {
     const sourceConfigFingerprint = fingerprint ?? await sourceFingerprint(source);
     const expiresAt = Date.now() + (source ? POSITIVE_REFRESH_MS : NEGATIVE_REFRESH_MS);
@@ -588,7 +615,7 @@ export class SourceAuthorityDurableObject {
       sourceFingerprint: sourceConfigFingerprint,
       sourcePresent: source !== null,
       expiresAt,
-      authorizationVersion: crypto.randomUUID().replaceAll("-", ""),
+      authorizationVersion,
     };
     await this.state.storage.put<AuthorityState>(STATE_KEY, ready);
     this.hotSource = {

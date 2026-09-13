@@ -1,4 +1,5 @@
 import { withSentryConfig } from "@sentry/nextjs";
+import { fileURLToPath } from "node:url";
 
 // Match the server/edge runtime precedence. The selected value is injected as
 // NEXT_PUBLIC_SENTRY_DSN below so all three runtimes report to one project even
@@ -24,6 +25,10 @@ if (isVercelProductionBuild && !sentryAuthToken) {
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  ...(process.env.AXEL_STANDALONE_BUILD === "1" ? {
+    output: "standalone",
+    outputFileTracingRoot: fileURLToPath(new URL("../..", import.meta.url)),
+  } : {}),
   poweredByHeader: false,
   reactStrictMode: true,
   // A DSN is intentionally public. Reuse the existing server-side setting so

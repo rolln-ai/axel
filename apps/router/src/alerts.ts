@@ -275,8 +275,8 @@ export function evaluateDeliveryHealth(
 }
 
 export interface QueueLagSnapshot {
-  /** Age of the oldest un-acked queue message in seconds. */
-  oldest_unacked_age_seconds: number;
+  /** Age of the oldest un-acked queue message, or null when the provider cannot report it. */
+  oldest_unacked_age_seconds: number | null;
   /** Total messages waiting across all shards. */
   backlog: number;
 }
@@ -287,6 +287,7 @@ export function evaluateQueueLag(
   source = "router",
 ): AlertEvent[] {
   const out: AlertEvent[] = [];
+  if (snapshot.oldest_unacked_age_seconds === null) return out;
   const now = new Date().toISOString();
 
   if (snapshot.oldest_unacked_age_seconds >= thresholds.queue_lag_seconds_critical) {

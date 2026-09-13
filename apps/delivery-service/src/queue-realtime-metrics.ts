@@ -16,14 +16,18 @@ export interface FetchQueueRealtimeMetricsOptions {
 }
 
 export interface QueueRealtimeMetricsRunnerOptions {
-  observe(queueId: string): Promise<void>;
+  observe(queueId: string): Promise<QueueLagSnapshot>;
   onError(error: unknown, queueId: string): void | Promise<void>;
+  now?: () => number;
+  /** Samples older than this are unavailable, not a current healthy reading. */
+  maxAgeMs?: number;
 }
 
 export interface QueueRealtimeMetricsRunner {
   /** Start a detached observation. Returns false while this queue is already observed. */
   start(queueId: string): boolean;
   isInFlight(queueId: string): boolean;
+  renderPrometheus(): string[];
 }
 
 function nonNegativeNumber(value: unknown, field: string): number {
@@ -42,7 +46,8 @@ export function queueRealtimeMetricsToLagSnapshot(
     throw new Error("cloudflare_queue_metrics_oldest_timestamp_future");
   }
   if (metrics.backlogCount > 0 && metrics.oldestMessageTimestampMs === 0) {
-    throw new Error("cloudflare_queue_metrics_oldest_timestamp_missing");
+    // Cloudflare documents zero as unknown, even when messages are waiting.
+    return { oldest_unacked_age_seconds: null, backlog: metrics.backlogCount };
   }
   if (metrics.backlogCount === 0) {
     return { oldest_unacked_age_seconds: 0, backlog: 0 };
@@ -129,20 +134,56 @@ export function createQueueRealtimeMetricsRunner(
   options: QueueRealtimeMetricsRunnerOptions,
 ): QueueRealtimeMetricsRunner {
   const inFlight = new Set<string>();
+  const observations = new Map<string, { snapshot: QueueLagSnapshot | null; observedAt: number }>();
+  const now = options.now ?? Date.now;
 
   return {
     start(queueId) {
       if (inFlight.has(queueId)) return false;
       inFlight.add(queueId);
+      if (!observations.has(queueId)) observations.set(queueId, { snapshot: null, observedAt: 0 });
       void Promise.resolve()
         .then(() => options.observe(queueId))
-        .catch((error) => options.onError(error, queueId))
+        .then((snapshot) => observations.set(queueId, { snapshot, observedAt: now() }))
+        .catch((error) => {
+          observations.set(queueId, { snapshot: null, observedAt: observations.get(queueId)?.observedAt ?? 0 });
+          return options.onError(error, queueId);
+        })
         .catch(() => undefined)
         .finally(() => inFlight.delete(queueId));
       return true;
     },
     isInFlight(queueId) {
       return inFlight.has(queueId);
+    },
+    renderPrometheus() {
+      const lines = [
+        "# HELP axel_delivery_queue_metrics_available Whether this queue has a recent successful provider sample.",
+        "# TYPE axel_delivery_queue_metrics_available gauge",
+        "# HELP axel_delivery_queue_oldest_age_available Whether the recent sample includes the oldest message age.",
+        "# TYPE axel_delivery_queue_oldest_age_available gauge",
+        "# HELP axel_delivery_queue_backlog Unacknowledged messages in the recent provider sample.",
+        "# TYPE axel_delivery_queue_backlog gauge",
+        "# HELP axel_delivery_queue_oldest_unacked_age_seconds Oldest message age at the last observation, omitted when unknown.",
+        "# TYPE axel_delivery_queue_oldest_unacked_age_seconds gauge",
+        "# HELP axel_delivery_queue_metrics_observed_timestamp_seconds Unix timestamp of the last successful provider sample.",
+        "# TYPE axel_delivery_queue_metrics_observed_timestamp_seconds gauge",
+      ];
+      const nowMs = now();
+      for (const [queueId, observation] of observations) {
+        const label = JSON.stringify(queueId);
+        const elapsed = nowMs - observation.observedAt;
+        const snapshot = elapsed >= 0 && elapsed <= (options.maxAgeMs ?? 120_000) ? observation.snapshot : null;
+        const ageKnown = snapshot !== null && snapshot.oldest_unacked_age_seconds !== null;
+        lines.push(
+          `axel_delivery_queue_metrics_available{queue=${label}} ${snapshot !== null ? 1 : 0}`,
+          `axel_delivery_queue_oldest_age_available{queue=${label}} ${ageKnown ? 1 : 0}`,
+          `axel_delivery_queue_metrics_observed_timestamp_seconds{queue=${label}} ${observation.observedAt / 1000}`,
+        );
+        if (snapshot !== null) lines.push(`axel_delivery_queue_backlog{queue=${label}} ${snapshot.backlog}`);
+        if (ageKnown) lines.push(`axel_delivery_queue_oldest_unacked_age_seconds{queue=${label}} ${snapshot.oldest_unacked_age_seconds}`);
+      }
+      return lines;
     },
   };
 }

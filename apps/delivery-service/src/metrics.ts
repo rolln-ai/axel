@@ -20,6 +20,7 @@
 import type pg from "pg";
 import { sanitizeConnectorDiagnosticForStorage } from "@axel/shared";
 import type { QueueConsumerMetrics } from "./queue-consumer-metrics.js";
+import type { QueueRealtimeMetricsRunner } from "./queue-realtime-metrics.js";
 
 const SAFE_CIRCUIT_STATES = new Set([
   "closed",
@@ -45,6 +46,7 @@ export interface MetricsSnapshot {
 export async function renderMetrics(
   pool: pg.Pool,
   queueMetrics?: QueueConsumerMetrics,
+  queueRealtimeMetrics?: QueueRealtimeMetricsRunner,
 ): Promise<MetricsSnapshot> {
   const lines: string[] = [];
   const now = new Date().toISOString();
@@ -154,6 +156,7 @@ export async function renderMetrics(
   }
 
   if (queueMetrics) lines.push(...queueMetrics.renderPrometheus());
+  if (queueRealtimeMetrics) lines.push(...queueRealtimeMetrics.renderPrometheus());
 
   lines.push(`# Generated at ${now}`);
   return { text: lines.join("\n") + "\n", generatedAt: now };

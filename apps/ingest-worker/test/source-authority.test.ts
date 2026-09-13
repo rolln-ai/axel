@@ -126,6 +126,118 @@ describe("SourceAuthorityDurableObject", () => {
     expect(origin).toHaveBeenCalledTimes(2);
   });
 
+  it.each([false, true])("confirms unchanged credentials across cache expiry, cold object: %s", async (cold) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const startedAt = Date.parse("2026-09-13T00:00:00Z");
+    vi.setSystemTime(startedAt);
+    const origin = vi.fn(async () => Response.json({ source: OLD_SOURCE }));
+    vi.stubGlobal("fetch", origin);
+    const storage = new FakeStorage();
+    let object = durableObject(storage);
+    await operation(object, { op: "resolve", source_id: "src_1" });
+    vi.setSystemTime(startedAt + 299_999);
+    const begun = await (await operation(object, { op: "resolve", source_id: "src_1" })).json() as { authorization_version: string };
+    if (cold) object = durableObject(storage);
+    vi.setSystemTime(startedAt + 300_001);
+
+    expect((await operation(object, { op: "confirm", source_id: "src_1",
+      authorization_version: begun.authorization_version })).status).toBe(204);
+    const refreshed = await (await operation(object, { op: "resolve", source_id: "src_1" })).json() as { authorization_version: string };
+    expect(refreshed.authorization_version).toBe(begun.authorization_version);
+    expect(origin).toHaveBeenCalledTimes(2);
+    expect(storage.snapshot()).not.toContain(OLD_SOURCE.secret_token);
+  });
+
+  it("keeps an in-flight authorization valid when another request refreshes the cache", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const startedAt = Date.parse("2026-09-13T00:00:00Z");
+    vi.setSystemTime(startedAt);
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ source: OLD_SOURCE })));
+    const object = durableObject();
+    const begun = await (await operation(object, { op: "resolve", source_id: "src_1" })).json() as { authorization_version: string };
+    vi.setSystemTime(startedAt + 300_001);
+    await operation(object, { op: "resolve", source_id: "src_1" });
+    expect((await operation(object, { op: "confirm", source_id: "src_1",
+      authorization_version: begun.authorization_version })).status).toBe(204);
+  });
+
+  it.each([NEW_SOURCE, { ...OLD_SOURCE, status: "disabled" }, null])(
+    "fences changed or deleted config discovered by an expired confirmation: %j", async (changedSource) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const startedAt = Date.parse("2026-09-13T00:00:00Z");
+      vi.setSystemTime(startedAt);
+      const origin = vi.fn().mockResolvedValueOnce(Response.json({ source: OLD_SOURCE }))
+        .mockResolvedValueOnce(Response.json({ source: changedSource }));
+      vi.stubGlobal("fetch", origin);
+      const object = durableObject();
+      const begun = await (await operation(object, { op: "resolve", source_id: "src_1" })).json() as { authorization_version: string };
+      vi.setSystemTime(startedAt + 300_001);
+      expect((await operation(object, { op: "confirm", source_id: "src_1",
+        authorization_version: begun.authorization_version })).status).toBe(423);
+      expect((await operation(object, { op: "resolve", source_id: "src_1" })).status).toBe(423);
+      expect(origin).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("does not confirm expired credentials during an origin outage and recovers on refresh", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const startedAt = Date.parse("2026-09-13T00:00:00Z");
+    vi.setSystemTime(startedAt);
+    const origin = vi.fn(async () => Response.json({ source: OLD_SOURCE }));
+    vi.stubGlobal("fetch", origin);
+    const object = durableObject();
+    const begun = await (await operation(object, { op: "resolve", source_id: "src_1" })).json() as { authorization_version: string };
+    vi.setSystemTime(startedAt + 300_001);
+    origin.mockImplementation(async () => new Response("private upstream error", { status: 503 }));
+    const confirm = { op: "confirm", source_id: "src_1", authorization_version: begun.authorization_version };
+    const unavailable = await operation(object, confirm);
+    expect(unavailable.status).toBe(503);
+    expect(await unavailable.json()).toEqual({ error: "source_lookup_unavailable", reason: "lookup_http", http_status: 503 });
+    expect(origin).toHaveBeenCalledTimes(3);
+    origin.mockImplementation(async () => Response.json({ source: OLD_SOURCE }));
+    expect((await operation(object, confirm)).status).toBe(204);
+    expect(origin).toHaveBeenCalledTimes(4);
+  });
+
+  it("revokes an old version after a fence even when the committed config is unchanged", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ source: OLD_SOURCE })));
+    const object = durableObject();
+    const begun = await (await operation(object, { op: "resolve", source_id: "src_1" })).json() as { authorization_version: string };
+    const fence = { source_id: "src_1", fence_token: "fence_token_00000001" };
+    await operation(object, { op: "fence", ...fence });
+    await operation(object, { op: "sync", ...fence, source: OLD_SOURCE });
+    expect((await operation(object, { op: "confirm", source_id: "src_1",
+      authorization_version: begun.authorization_version })).status).toBe(423);
+  });
+
+  it("serializes an expiry refresh before a queued fence acknowledges", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const startedAt = Date.parse("2026-09-13T00:00:00Z");
+    vi.setSystemTime(startedAt);
+    const origin = vi.fn(async () => Response.json({ source: OLD_SOURCE }));
+    vi.stubGlobal("fetch", origin);
+    const object = durableObject();
+    const begun = await (await operation(object, { op: "resolve", source_id: "src_1" })).json() as { authorization_version: string };
+    vi.setSystemTime(startedAt + 300_001);
+    let releaseOrigin!: () => void;
+    let markRefreshStarted!: () => void;
+    const waiting = new Promise<void>((resolve) => { releaseOrigin = resolve; });
+    const started = new Promise<void>((resolve) => { markRefreshStarted = resolve; });
+    origin.mockImplementation(async () => { markRefreshStarted(); await waiting; return Response.json({ source: OLD_SOURCE }); });
+    const confirm = { op: "confirm", source_id: "src_1", authorization_version: begun.authorization_version };
+    const confirming = operation(object, confirm);
+    await started;
+    let fenceFinished = false;
+    const fencing = operation(object, { op: "fence", source_id: "src_1", fence_token: "fence_token_00000001" })
+      .then((response) => { fenceFinished = true; return response; });
+    await Promise.resolve();
+    expect(fenceFinished).toBe(false);
+    releaseOrigin();
+    expect((await confirming).status).toBe(204);
+    expect((await fencing).status).toBe(204);
+    expect((await operation(object, confirm)).status).toBe(423);
+  });
+
   it("persists only a digest, never source credentials or signing secrets", async () => {
     const secretSource = {
       ...OLD_SOURCE,
@@ -361,6 +473,11 @@ describe("resolveSourceWithAuthority", () => {
     call.mockResolvedValueOnce(new Response(JSON.stringify({ reason: "secret-invalid-code" }), { status: 503 }));
     await expect(resolveSourceWithAuthority({ SOURCE_AUTHORITY: namespace }, "src_1", direct))
       .rejects.toMatchObject({ reason: "authority_unavailable" });
+    await expect(confirmSourceAuthorizationWithAuthority({ SOURCE_AUTHORITY: namespace }, "src_1", "authorization_version_0001"))
+      .rejects.toMatchObject({ reason: "lookup_timeout", httpStatus: 504, message: "source authority lookup failed" });
+    call.mockResolvedValueOnce(new Response(JSON.stringify({ reason: "secret-invalid-code" }), { status: 503 }));
+    await expect(confirmSourceAuthorizationWithAuthority({ SOURCE_AUTHORITY: namespace }, "src_1", "authorization_version_0001"))
+      .rejects.toMatchObject({ reason: "authority_unavailable" });
     expect(direct).not.toHaveBeenCalled();
   });
 
@@ -389,6 +506,6 @@ describe("resolveSourceWithAuthority", () => {
       env,
       "src_1",
       begun.authorizationVersion,
-    )).rejects.toThrow(/changed during request verification/);
+    )).rejects.toMatchObject({ reason: "authorization_changed", httpStatus: 423 });
   });
 });

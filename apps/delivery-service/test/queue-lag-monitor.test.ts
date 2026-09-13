@@ -70,6 +70,25 @@ describe("createQueueLagMonitor", () => {
     expect(notify).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps pulled-message alerts and their throttle working through unknown provider ages", async () => {
+    let now = NOW;
+    const notify = vi.fn<(e: AlertEvent) => Promise<void>>(async () => {});
+    const mon = createQueueLagMonitor({ sink: { notify }, now: () => now });
+    const unknown = { oldest_unacked_age_seconds: null, backlog: 75 };
+    await mon.observeSnapshot(unknown);
+    expect(notify).not.toHaveBeenCalled();
+    await mon.observe([{ enqueued_at: isoAgo(now, 400) }]);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0]?.[0]).toMatchObject({ rule: "queue_lag", severity: "critical" });
+    now += 30_000;
+    await mon.observeSnapshot(unknown);
+    await mon.observe([{ enqueued_at: isoAgo(now, 400) }]);
+    expect(notify).toHaveBeenCalledTimes(1);
+    now += 31_000;
+    await mon.observeSnapshot({ oldest_unacked_age_seconds: 400, backlog: 75 });
+    expect(notify).toHaveBeenCalledTimes(2);
+  });
+
   it("ignores empty batches and missing timestamps", async () => {
     const notify = vi.fn<(e: AlertEvent) => Promise<void>>(async () => {});
     const mon = createQueueLagMonitor({ sink: { notify } as AlertSink, now: () => NOW });
