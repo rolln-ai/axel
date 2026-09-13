@@ -74,7 +74,7 @@ export function SiteHeader() {
             <a className="btn subtle" href="https://app.axelapp.ai/login">
               Sign in
             </a>
-            <a className="btn" href="https://app.axelapp.ai/signup">
+            <a className="btn" href="https://app.axelapp.ai/signup?ref=website">
               Start on Cloud <span className="arrow">→</span>
             </a>
           </div>

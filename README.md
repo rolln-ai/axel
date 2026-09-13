@@ -5,7 +5,7 @@ endpoints, Postgres, MongoDB, BigQuery, Databricks, or object storage. Routes
 filter and reshape events. Failed deliveries retry automatically and can be
 inspected or replayed from the dashboard.
 
-Use [Axel Cloud](https://app.axelapp.ai/signup) for a managed installation, or
+Use [Axel Cloud](https://app.axelapp.ai/signup?ref=github) for a managed installation, or
 [self-host](docs/self-hosting.md) the same code under Apache-2.0.
 
 | | Axel Cloud | Self-hosted |

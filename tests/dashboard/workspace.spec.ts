@@ -97,7 +97,7 @@ test("sign-in, workspace changes, source isolation, and sign-out", async ({ page
   await testInfo.attach("webhook-setup", { path: setupScreenshot, contentType: "image/png" });
 
   await page.reload();
-  await expect(page.getByText(/URL authentication is enabled/)).toBeVisible();
+  await expect(page.getByRole("main").getByText(/URL authentication is enabled/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Copy authenticated URL", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Copy header value", exact: true })).toHaveCount(0);
   expect(await page.locator("body").innerText()).not.toContain(headerToken);

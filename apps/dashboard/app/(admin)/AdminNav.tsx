@@ -14,6 +14,7 @@ interface AdminNavLink {
 
 const LINKS: ReadonlyArray<AdminNavLink> = [
   { href: "/admin/overview", label: "Overview", Icon: LayoutGrid },
+  { href: "/admin/growth", label: "Cloud adoption", Icon: Activity },
   { href: "/admin/health", label: "Health", Icon: Activity },
   { href: "/admin/billing", label: "Billing", Icon: CreditCard },
   { href: "/admin/workspaces", label: "Workspaces", Icon: Building2 },

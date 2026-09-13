@@ -89,7 +89,7 @@ export default function DocsPage() {
             routing, delivery, and recovery. You can also self-host the Apache-2.0 application.
           </p>
           <div className="heroActions">
-            <a className="btn" href="https://app.axelapp.ai/signup">
+            <a className="btn" href="https://app.axelapp.ai/signup?ref=website">
               Start on Axel Cloud <span className="arrow">→</span>
             </a>
             <Link className="btn ghost" href="#self-hosting">

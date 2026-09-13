@@ -7,7 +7,7 @@ all deliveries through one Node service.
 
 You maintain the host, backups, credentials, and upgrades. There is no Axel
 license or subscription fee. For a managed installation, use
-[Axel Cloud](https://app.axelapp.ai/signup).
+[Axel Cloud](https://app.axelapp.ai/signup?ref=github).
 
 ## Requirements
 

@@ -204,7 +204,7 @@ test("open-source and cloud paths are available on desktop and mobile", async ({
   await expect(page.getByRole("heading", { level: 1 })).toContainText("Open-source webhook delivery");
   const hero = page.locator(".hero").first();
   await expect(hero.getByRole("link", { name: "View source", exact: false })).toHaveAttribute("href", "https://github.com/rolln-ai/axel");
-  await expect(hero.getByRole("link", { name: /Start on Axel Cloud/ })).toHaveAttribute("href", "https://app.axelapp.ai/signup");
+  await expect(hero.getByRole("link", { name: /Start on Axel Cloud/ })).toHaveAttribute("href", "https://app.axelapp.ai/signup?ref=website");
   await expect(page.locator("#open-source").getByRole("heading", { name: "Self-host Axel", exact: true })).toBeVisible();
   await expect(page.locator("#open-source").getByRole("heading", { name: "Axel Cloud", exact: true })).toBeVisible();
   if (testInfo.project.name === "mobile") {
