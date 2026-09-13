@@ -47,6 +47,26 @@ printf '%s\n' "$*" > "$MOCK_DOCKER_LOG"
 EOF
 chmod 700 "$TEST_DIR/bin/docker"
 
+cp "$ENV_FILE" "$TEST_DIR/images.env"
+printf '\nAXEL_IMAGE_TAG=%s\n' "$(cat "$ROOT_DIR/VERSION")" >> "$TEST_DIR/images.env"
+MOCK_DOCKER_LOG="$TEST_DIR/images-docker.log" \
+  PATH="$TEST_DIR/bin:$PATH" \
+  AXEL_SELF_HOST_ENV="$TEST_DIR/images.env" \
+  "$ROOT_DIR/scripts/axel-self-host" status
+grep -Fq -- "-f $ROOT_DIR/infra/self-host/docker-compose.images.yml ps" \
+  "$TEST_DIR/images-docker.log"
+
+sed 's/^AXEL_IMAGE_TAG=.*/AXEL_IMAGE_TAG=999.0.0/' "$TEST_DIR/images.env" \
+  > "$TEST_DIR/mismatch.env"
+if MOCK_DOCKER_LOG="$TEST_DIR/mismatch-docker.log" \
+  PATH="$TEST_DIR/bin:$PATH" AXEL_SELF_HOST_ENV="$TEST_DIR/mismatch.env" \
+  "$ROOT_DIR/scripts/axel-self-host" up > "$TEST_DIR/mismatch.log" 2>&1; then
+  echo "mismatched release image version was accepted" >&2
+  exit 1
+fi
+grep -Fq 'AXEL_IMAGE_TAG must match VERSION' "$TEST_DIR/mismatch.log"
+test ! -e "$TEST_DIR/mismatch-docker.log"
+
 MOCK_DOCKER_LOG="$TEST_DIR/local-docker.log" \
   PATH="$TEST_DIR/bin:$PATH" \
   AXEL_SELF_HOST_ENV="$ENV_FILE" \
@@ -227,3 +247,25 @@ if (!local.services.caddy.cap_add?.includes("NET_BIND_SERVICE")) {
 EOF
 
 echo "self-host Compose tests passed"
+
+docker compose --env-file "$TEST_DIR/images.env" \
+  -f "$ROOT_DIR/docker-compose.selfhost.yml" \
+  -f "$ROOT_DIR/infra/self-host/docker-compose.images.yml" \
+  config --format json > "$TEST_DIR/images.json"
+node - "$TEST_DIR/local.json" "$TEST_DIR/images.json" "$(cat "$ROOT_DIR/VERSION")" <<'EOF'
+const assert = require("node:assert/strict");
+const { readFileSync } = require("node:fs");
+const [localPath, imagesPath, version] = process.argv.slice(2);
+const local = JSON.parse(readFileSync(localPath, "utf8"));
+const images = JSON.parse(readFileSync(imagesPath, "utf8"));
+for (const [service, target] of Object.entries({ migrate: "migration", dashboard: "dashboard", delivery: "delivery", cron: "delivery" })) {
+  assert.equal(images.services[service].build, undefined);
+  assert.equal(images.services[service].image, `ghcr.io/rolln-ai/axel-${target}:${version}`);
+  assert.deepEqual(images.services[service].environment, local.services[service].environment);
+}
+assert.equal(images.services.dashboard.environment.AXEL_APP_URL, "http://localhost:8080");
+assert.equal(images.services.dashboard.environment.AXEL_INGEST_URL, "https://ingest.example.test");
+assert.equal(images.services.dashboard.environment.AXEL_DELIVERY_URL, "http://localhost:8080");
+assert.deepEqual(images.services.caddy.ports, local.services.caddy.ports);
+console.log("release image Compose tests passed");
+EOF

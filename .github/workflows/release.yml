@@ -13,6 +13,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: public-release
+  cancel-in-progress: false
+
 jobs:
   verify:
     name: Verify release
@@ -42,13 +46,13 @@ jobs:
         run: |
           set -euo pipefail
           RAW="$RAW_VERSION"
-          if [[ ! "$RAW" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+          if [[ ! "$RAW" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::dispatch version must be a semantic version such as v1.2.3"
             exit 1
           fi
           VER="${RAW#v}"
           FILE="$(cat VERSION)"
-          if [[ ! "$FILE" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+          if [[ ! "$FILE" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::VERSION contains an invalid semantic version"
             exit 1
           fi
@@ -57,6 +61,21 @@ jobs:
             exit 1
           fi
           echo "ver=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse to overwrite a published version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.ver.outputs.ver }}
+        run: |
+          node --input-type=module <<'JS'
+          const response = await fetch(`https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}/git/ref/tags/v${process.env.RELEASE_VERSION}`, {
+            headers: { Authorization: `Bearer ${process.env.GH_TOKEN}` },
+            signal: AbortSignal.timeout(10000),
+          });
+          if (response.status !== 404) {
+            throw new Error(response.ok ? 'Release tag already exists; choose a new version.' : 'Could not verify release tag availability.');
+          }
+          JS
 
       # Runs the full deterministic suite per workspace and exits 1 if the
       # ledger is red. The runner-only ledger is retained as workflow evidence;
@@ -79,20 +98,94 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-  tag:
-    name: Tag release
-    if: ${{ github.ref == 'refs/heads/main' && needs.verify.result == 'success' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+  images:
+    name: Build ${{ matrix.target }} for ${{ matrix.arch }}
     needs: verify
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     environment: Production
     permissions:
-      contents: write
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [migration, dashboard, delivery]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.verify.outputs.sha }}
           persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          platforms: linux/${{ matrix.arch }}
+          push: true
+          tags: ghcr.io/${{ github.repository }}-${{ matrix.target }}:build-${{ needs.verify.outputs.sha }}-${{ github.run_id }}-${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.verify.outputs.sha }}
+            org.opencontainers.image.version=${{ needs.verify.outputs.version }}
+            org.opencontainers.image.licenses=Apache-2.0
+          cache-from: type=gha,scope=release-${{ matrix.target }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.target }}-${{ matrix.arch }}
+          provenance: mode=max
+          sbom: true
+
+  tag:
+    name: Tag release
+    if: ${{ github.ref == 'refs/heads/main' && needs.verify.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [verify, images]
+    environment: Production
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.verify.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: .node-version
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assemble versioned multi-platform images
+        env:
+          RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+          RELEASE_SHA: ${{ needs.verify.outputs.sha }}
+        run: |
+          set -euo pipefail
+          for target in migration dashboard delivery; do
+            image="ghcr.io/${GITHUB_REPOSITORY}-${target}"
+            docker buildx imagetools create --tag "${image}:${RELEASE_VERSION}" \
+              "${image}:build-${RELEASE_SHA}-${GITHUB_RUN_ID}-amd64" \
+              "${image}:build-${RELEASE_SHA}-${GITHUB_RUN_ID}-arm64"
+          done
+      - name: Verify anonymous pulls and save image digests
+        env:
+          RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+          RELEASE_SHA: ${{ needs.verify.outputs.sha }}
+        run: node scripts/verify-public-release-images.mjs "$RUNNER_TEMP/self-host-images.json"
       - name: Create GitHub release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
@@ -100,3 +193,4 @@ jobs:
           name: v${{ needs.verify.outputs.version }}
           target_commitish: ${{ needs.verify.outputs.sha }}
           body: ${{ inputs.notes }}
+          files: ${{ runner.temp }}/self-host-images.json

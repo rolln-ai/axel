@@ -1,0 +1,13 @@
+# Use with docker-compose.selfhost.yml. Requires Docker Compose 2.24.4+.
+services:
+  migrate:
+    image: ghcr.io/rolln-ai/axel-migration:${AXEL_IMAGE_TAG:?AXEL_IMAGE_TAG is required}
+    build: !reset null
+  dashboard:
+    image: ghcr.io/rolln-ai/axel-dashboard:${AXEL_IMAGE_TAG:?AXEL_IMAGE_TAG is required}
+    build: !reset null
+  delivery:
+    image: ghcr.io/rolln-ai/axel-delivery:${AXEL_IMAGE_TAG:?AXEL_IMAGE_TAG is required}
+    build: !reset null
+  cron:
+    image: ghcr.io/rolln-ai/axel-delivery:${AXEL_IMAGE_TAG:?AXEL_IMAGE_TAG is required}

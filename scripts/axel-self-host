@@ -8,6 +8,7 @@ STATE_DIR="${AXEL_SELF_HOST_STATE_DIR:-$ROOT_DIR/.selfhost}"
 OWNERSHIP_FILE="$STATE_DIR/ownership.env"
 COMPOSE_FILE="$ROOT_DIR/docker-compose.selfhost.yml"
 PUBLIC_COMPOSE_FILE="$ROOT_DIR/infra/self-host/docker-compose.public.yml"
+IMAGES_COMPOSE_FILE="$ROOT_DIR/infra/self-host/docker-compose.images.yml"
 WRANGLER_BIN="${AXEL_WRANGLER_BIN:-$ROOT_DIR/node_modules/.bin/wrangler}"
 # Capture this one-shot operator acknowledgement before loading the env file so
 # it cannot be made persistent accidentally inside .env.selfhost.
@@ -19,7 +20,7 @@ Usage: ./scripts/axel-self-host <command>
 
   init       Generate .env.selfhost with strong local secrets
   edge       Provision/deploy the Cloudflare Free-tier edge profile
-  up         Build and start the private Docker stack
+  up         Start release images when AXEL_IMAGE_TAG is set, or build locally
   status     Show container status
   logs       Follow container logs
   down       Stop containers without deleting data
@@ -61,7 +62,7 @@ load_env_file() {
     case "$path" in
       "$ENV_FILE")
         case "$name" in
-          AXEL_DEPLOYMENT_MODE|AXEL_INSTALLATION_ID|AXEL_SITE_ADDRESS|AXEL_PUBLIC_URL|AXEL_DELIVERY_PUBLIC_URL|AXEL_RESOURCE_PREFIX|AXEL_HTTP_PORT|AXEL_HTTPS_PORT|AXEL_PUBLISH_PUBLIC_PORTS|AXEL_LOCAL_BIND_ADDRESS|AXEL_LOCAL_PORT|AXEL_INGEST_DOMAIN|CLOUDFLARE_ACCOUNT_ID|CLOUDFLARE_API_TOKEN|CLOUDFLARE_RUNTIME_API_TOKEN|DELIVERY_QUEUE_ID|RAW_PAYLOAD_BUCKET|NEXT_PUBLIC_AXEL_INGEST_URL|POSTGRES_PASSWORD|POSTGRES_ADMIN_PASSWORD|POSTGRES_MIGRATION_PASSWORD|POSTGRES_DASHBOARD_PASSWORD|POSTGRES_DELIVERY_PASSWORD|CREDENTIALS_MASTER_KEY|DELIVERY_SHARED_SECRET|DELIVERY_SHARED_SECRET_PREVIOUS|SOURCE_LOOKUP_SHARED_SECRET|SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS|ORDERING_KEY_HMAC_SECRET|INGEST_ADMIN_TOKEN|CRON_SECRET|RESEND_API_KEY|RESEND_FROM_EMAIL) ;;
+          AXEL_DEPLOYMENT_MODE|AXEL_IMAGE_TAG|AXEL_INSTALLATION_ID|AXEL_SITE_ADDRESS|AXEL_PUBLIC_URL|AXEL_DELIVERY_PUBLIC_URL|AXEL_RESOURCE_PREFIX|AXEL_HTTP_PORT|AXEL_HTTPS_PORT|AXEL_PUBLISH_PUBLIC_PORTS|AXEL_LOCAL_BIND_ADDRESS|AXEL_LOCAL_PORT|AXEL_INGEST_DOMAIN|CLOUDFLARE_ACCOUNT_ID|CLOUDFLARE_API_TOKEN|CLOUDFLARE_RUNTIME_API_TOKEN|DELIVERY_QUEUE_ID|RAW_PAYLOAD_BUCKET|NEXT_PUBLIC_AXEL_INGEST_URL|POSTGRES_PASSWORD|POSTGRES_ADMIN_PASSWORD|POSTGRES_MIGRATION_PASSWORD|POSTGRES_DASHBOARD_PASSWORD|POSTGRES_DELIVERY_PASSWORD|CREDENTIALS_MASTER_KEY|DELIVERY_SHARED_SECRET|DELIVERY_SHARED_SECRET_PREVIOUS|SOURCE_LOOKUP_SHARED_SECRET|SOURCE_LOOKUP_SHARED_SECRET_PREVIOUS|ORDERING_KEY_HMAC_SECRET|INGEST_ADMIN_TOKEN|CRON_SECRET|RESEND_API_KEY|RESEND_FROM_EMAIL) ;;
           *)
             echo "[self-host] unapproved environment key in $path: $name" >&2
             exit 1
@@ -150,6 +151,9 @@ require_distinct_database_passwords() {
 
 compose() {
   local files=(--env-file "$ENV_FILE" -f "$COMPOSE_FILE")
+  if [ -n "${AXEL_IMAGE_TAG:-}" ]; then
+    files+=(-f "$IMAGES_COMPOSE_FILE")
+  fi
   if publish_public_ports; then
     files+=(-f "$PUBLIC_COMPOSE_FILE")
   fi
@@ -744,6 +748,13 @@ command_up() {
   need_command docker
   need_command node
   load_env
+  if [ -n "${AXEL_IMAGE_TAG:-}" ]; then
+    if [[ ! "$AXEL_IMAGE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] \
+      || [ "$AXEL_IMAGE_TAG" != "$(cat "$ROOT_DIR/VERSION")" ]; then
+      echo "[self-host] AXEL_IMAGE_TAG must match VERSION; check out the matching release tag first" >&2
+      exit 1
+    fi
+  fi
   for name in DELIVERY_QUEUE_ID RAW_PAYLOAD_BUCKET NEXT_PUBLIC_AXEL_INGEST_URL CREDENTIALS_MASTER_KEY CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_API_TOKEN CLOUDFLARE_RUNTIME_API_TOKEN AXEL_PUBLIC_URL AXEL_DELIVERY_PUBLIC_URL; do
     require_value "$name"
   done
@@ -775,7 +786,12 @@ command_up() {
   require_strong_secret INGEST_ADMIN_TOKEN
   require_strong_secret CRON_SECRET
   node "$ROOT_DIR/scripts/self-host/verify-runtime-token.mjs"
-  compose up -d --build
+  if [ -n "${AXEL_IMAGE_TAG:-}" ]; then
+    compose pull
+    compose up -d --no-build
+  else
+    compose up -d --build
+  fi
   echo "[self-host] Axel is starting at $AXEL_PUBLIC_URL"
   echo "[self-host] run './scripts/axel-self-host status' to check health"
 }
