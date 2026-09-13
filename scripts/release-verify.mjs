@@ -251,7 +251,9 @@ function makeCheck(name, workspace, kind, command) {
 
 function runWorkspaceScript(ws, kind, opts = {}) {
   const cmd = ws.scripts[kind];
-  const check = makeCheck(`${ws.name}:${kind}`, ws.name, kind, `pnpm --filter ${ws.name} run ${kind}`);
+  // Include dependencies so pnpm builds them first on a clean checkout.
+  const filter = kind === "build" ? `${ws.name}...` : ws.name;
+  const check = makeCheck(`${ws.name}:${kind}`, ws.name, kind, `pnpm --filter ${filter} run ${kind}`);
   if (cmd === undefined) {
     check.status = "skipped";
     check.real = false;
@@ -270,7 +272,7 @@ function runWorkspaceScript(ws, kind, opts = {}) {
     return check;
   }
   log(`  → ${check.name}`);
-  const { res, durationMs } = exec("pnpm", ["--filter", ws.name, "run", kind], { timeout: opts.timeout });
+  const { res, durationMs } = exec("pnpm", ["--filter", filter, "run", kind], { timeout: opts.timeout });
   check.durationMs = durationMs;
   check.status = res.status === 0 ? "pass" : "fail";
   if (check.status === "fail") check.errorExcerpt = excerpt(res);
