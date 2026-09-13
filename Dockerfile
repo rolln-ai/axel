@@ -22,13 +22,14 @@ CMD ["bash", "/app/scripts/self-host/run-database-setup.sh"]
 
 FROM workspace AS dashboard-build
 ARG NEXT_PUBLIC_AXEL_APP_URL=http://localhost:8080
-ARG NEXT_PUBLIC_AXEL_INGEST_URL
-ARG NEXT_PUBLIC_AXEL_DELIVERY_URL
+ARG NEXT_PUBLIC_AXEL_INGEST_URL=https://ingest.example.invalid
+ARG NEXT_PUBLIC_AXEL_DELIVERY_URL=http://localhost:8080
 ENV NEXT_PUBLIC_AXEL_APP_URL=$NEXT_PUBLIC_AXEL_APP_URL
 ENV NEXT_PUBLIC_AXEL_INGEST_URL=$NEXT_PUBLIC_AXEL_INGEST_URL
 ENV NEXT_PUBLIC_AXEL_DELIVERY_URL=$NEXT_PUBLIC_AXEL_DELIVERY_URL
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN node scripts/self-host/render-openapi.mjs \
+RUN cp apps/dashboard/public/openapi.yaml infra/self-host/openapi.template.yaml \
+    && node scripts/self-host/render-openapi.mjs \
       apps/dashboard/public/openapi.yaml \
       "$NEXT_PUBLIC_AXEL_APP_URL" \
       "$NEXT_PUBLIC_AXEL_INGEST_URL" \
@@ -42,6 +43,7 @@ COPY --from=dashboard-build --chown=node:node /app /app
 WORKDIR /app/apps/dashboard
 USER node
 EXPOSE 3000
+ENTRYPOINT ["bash", "/app/scripts/self-host/start-dashboard.sh"]
 CMD ["node", "node_modules/next/dist/bin/next", "start", "--hostname", "0.0.0.0"]
 
 FROM workspace AS delivery-build

@@ -11,7 +11,7 @@ license or subscription fee. For a managed installation, use
 
 ## Requirements
 
-- Docker with the Compose plugin.
+- Docker with Compose 2.24.4 or later.
 - Node 22.13 or later on the Node 22 line, and pnpm 9.12.0. CI uses the exact
   Node version in `.node-version`.
 - A Cloudflare account with a `workers.dev` subdomain or an active zone for a
@@ -41,7 +41,7 @@ AXEL_SITE_ADDRESS=axel.example.com \
   ./scripts/axel-self-host init
 ```
 
-Set `AXEL_PUBLIC_URL` before building: the dashboard includes it in the build.
+Set `AXEL_PUBLIC_URL` before starting the dashboard.
 `AXEL_SITE_ADDRESS` is the Caddy hostname, without `https://`.
 
 The helper creates a private file with mode `0600` and refuses to overwrite it.
@@ -128,6 +128,27 @@ tables, read `schema_migrations`, or become the owner. The dashboard can run
 only the five JSON helper functions required by its privacy triggers; other
 application routines remain denied.
 See [database roles](database-service-roles.md) for the grant lists and role model.
+
+### Use a published release
+
+When a version appears on [GitHub Releases](https://github.com/rolln-ai/axel/releases),
+you can use its prebuilt Linux images on x86-64 or ARM64. Check out that release
+so its migrations, Workers, and container configuration match the images:
+
+```sh
+git fetch --tags
+git checkout v0.1.0
+```
+
+Set `AXEL_IMAGE_TAG=0.1.0` in `.env.selfhost`, using the version you checked out,
+then run `edge` and `up` as above. `up` pulls the dashboard, delivery, and migration
+images from `ghcr.io/rolln-ai` and starts them without a local Docker build.
+The dashboard reads your public URLs at startup. Changing a hostname does not
+require rebuilding the image. Cloudflare Workers still deploy from the checkout.
+
+Each release attaches `self-host-images.json` with the commit and image digests.
+Images include build provenance and an SBOM. An unset `AXEL_IMAGE_TAG` keeps the
+local build path, including when testing an unreleased checkout.
 
 Caddy uses ports 80 and 443 for a public hostname. A localhost installation uses
 port 8080 on `127.0.0.1` and does not publish ports 80 or 443. Change
@@ -239,7 +260,8 @@ Back up the `selfhost_pgdata` Docker volume and test restoration. Store
 file identifies the Cloudflare resources created by this installation.
 
 Before upgrades, read the release notes, back up the database and configuration,
-and check out the intended code version. Run `up` to apply database setup and
+and check out the intended code version. If using release images, update
+`AXEL_IMAGE_TAG` to match `VERSION`. Run `up` to apply database setup and
 start the new containers. Run `edge` to update the Workers. Use the order below
 when rotating internal credentials at the same time.
 
