@@ -19,7 +19,7 @@ export function FlowMonitoringEditor({ sourceId, enabled, minutes, canMutate }: 
       <span>Maximum expected gap in minutes</span>
       <Input name="alert_after_minutes" type="number" min={15} max={10080} step={1} defaultValue={minutes ?? ""} placeholder="Automatic" disabled={!canMutate} className="max-w-xs" />
     </label>
-    <p className="max-w-2xl text-xs text-muted-foreground">Automatic monitoring starts after 20 events and allows three times the usual gap, with a minimum of 30 minutes. Set an explicit gap for scheduled, new, or infrequent feeds. Checks run every 15 minutes. Test events do not count.</p>
+    <p className="max-w-2xl text-xs text-muted-foreground">Automatic monitoring starts after 20 events and checks recent cadence plus recurring quiet periods in up to 30 days of history. It needs at least three comparable quiet periods to extend the window. An explicit gap overrides this history. Checks run every 15 minutes. Test events do not count.</p>
     {state.error ? <p role="alert" className="text-sm text-destructive">{state.error}</p> : null}
     {state.notice ? <p role="status" className="text-sm">{state.notice}</p> : null}
     {canMutate ? <Button type="submit" size="sm" disabled={pending}>{pending ? "Saving…" : "Save monitoring"}</Button> : null}

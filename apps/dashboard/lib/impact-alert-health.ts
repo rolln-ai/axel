@@ -1,8 +1,9 @@
 import "server-only";
 import { db } from "./db";
 import { clickhouse } from "./clickhouse";
-import { DEAD_LETTER_COUNTS_SQL, DELIVERY_ACTIVITY_SQL, FLOW_ACTIVITY_SQL, UNATTEMPTED_SQL } from "./impact-alert-queries";
+import { DEAD_LETTER_COUNTS_SQL, DELIVERY_ACTIVITY_SQL, FLOW_ACTIVITY_SQL, FLOW_HISTORY_SQL, UNATTEMPTED_SQL } from "./impact-alert-queries";
 import { sourceSilenceObservation, timestamp, type FlowActivity, type FlowSource, type ImpactObservation, type ImpactSnapshot } from "./impact-alert-policy";
+import type { FlowHistoryBucket } from "./source-gap-history";
 
 interface RouteRow {
   id: string; source_id: string; destination_id: string; destination_name: string;
@@ -32,6 +33,8 @@ export async function loadImpactObservations(workspaceId: string): Promise<Impac
   // Analytics errors propagate. An unavailable monitor must never resolve an incident.
   const ch = clickhouse({ unbounded: true, mergeJoins: true, timeoutMs: 20_000, retryTimeouts: false });
   const activity = (await ch.query<FlowActivity>(FLOW_ACTIVITY_SQL, { workspace_id: workspaceId })).rows;
+  const history = new Map((await ch.query<{ source_id: string; buckets: FlowHistoryBucket[] }>(FLOW_HISTORY_SQL,
+    { workspace_id: workspaceId })).rows.map(row => [row.source_id, row.buckets]));
   const delivery = (await ch.query<DeliveryActivity>(DELIVERY_ACTIVITY_SQL, { workspace_id: workspaceId })).rows;
   const open = (await client.query<{incident_key: string; snapshot: ImpactSnapshot; opened_at: string}>(
     `SELECT incident_key, snapshot, opened_at::text FROM pipeline_incidents WHERE workspace_id = $1 AND resolved_at IS NULL`, [workspaceId])).rows;
@@ -39,6 +42,7 @@ export async function loadImpactObservations(workspaceId: string): Promise<Impac
   const observations: ImpactObservation[] = [];
   for (const source of sources) {
     let flow = activity.find(a => a.source_id === source.id);
+    if (flow) flow = { ...flow, history: history.get(source.id) };
     const priorSilence = open.find(i => i.incident_key === `source:${source.id}`);
     const previous = priorSilence?.snapshot;
     // Retention expiry cannot make an already-silent source healthy/unmonitored.
@@ -47,7 +51,13 @@ export async function loadImpactObservations(workspaceId: string): Promise<Impac
     const successful = delivery.filter(d => routes.some(r => r.id === d.route_id && r.source_id === source.id))
       .map(d => timestamp(d.last_delivered)).filter((t): t is number => t !== null);
     if (silence) {
-      if (priorSilence && (timestamp(flow?.last_received ?? null) ?? 0) <= (timestamp(priorSilence.opened_at) ?? now)) silence.unhealthy = true;
+      if (priorSilence && (timestamp(flow?.last_received ?? null) ?? 0) <= (timestamp(priorSilence.opened_at) ?? now)) {
+        silence.unhealthy = true;
+        // Relearning or retention expiry cannot move the goalposts of an open
+        // incident. Keep its original window until new traffic is accepted.
+        silence.snapshot.thresholdMinutes = priorSilence.snapshot.thresholdMinutes;
+        silence.snapshot.thresholdBasis = priorSilence.snapshot.thresholdBasis;
+      }
       silence.snapshot.lastDelivered = successful.length ? new Date(Math.max(...successful)).toISOString() : null;
       observations.push(silence);
     }
