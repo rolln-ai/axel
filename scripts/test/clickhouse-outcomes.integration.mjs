@@ -1,6 +1,7 @@
 import { FLOW_ACTIVITY_SQL, FLOW_HISTORY_SQL, DELIVERY_ACTIVITY_SQL, UNATTEMPTED_SQL } from "../../apps/dashboard/lib/impact-alert-queries.ts";
 import { historicalGapAllowance } from "../../apps/dashboard/lib/source-gap-history.ts";
 import { SOURCE_EVENT_COUNTS_SQL } from "../../apps/dashboard/lib/source-event-counts-query.ts";
+import { GROWTH_ACTIVITY_SQL } from "../../apps/dashboard/lib/admin-growth-queries.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -79,6 +80,32 @@ test("delivery rollup preserves outcomes before background merges", { timeout: 1
   // Separate inserts force different parts. FINAL must work before merges run.
   for (const row of rows) await query(`INSERT INTO delivery_base_latest_outcomes FORMAT JSONCompactEachRow\n${JSON.stringify(row)}`);
   await query(schema.match(/CREATE TABLE IF NOT EXISTS events\b[\s\S]*?;/)[0]);
+  await query(schema.match(/CREATE TABLE IF NOT EXISTS delivery_attempts\b[\s\S]*?;/)[0]);
+  await t.test("adoption uses signup-relative weeks, real receipts and actual successful attempts", async () => {
+    const joined = at(-20);
+    const event = (workspace_id, event_id, day, is_test = false) => ({ workspace_id, event_id, received_at: at(day), is_test });
+    await query(`INSERT INTO events FORMAT JSONEachRow\n${[
+      event("ws_growth", "early", -21), event("ws_growth", "first", -19),
+      event("ws_growth", "first", -19), event("ws_growth", "second", -13),
+      event("ws_growth_test", "test", -19, true), event("ws_growth_late", "late", -6),
+      event("ws_growth_boundary", "boundary", -13), event("ws_foreign_growth", "foreign", -19),
+    ].map(row => JSON.stringify(row)).join("\n")}`);
+    await query(`INSERT INTO delivery_attempts FORMAT JSONEachRow\n${[
+      { workspace_id: "ws_growth", event_id: "first", status: "success", created_at: at(-19) },
+      { workspace_id: "ws_growth", event_id: "first", status: "dead", created_at: at(-1) },
+      { workspace_id: "ws_growth_test", event_id: "test", status: "success", is_test: true, created_at: at(-19) },
+      { workspace_id: "ws_growth_boundary", event_id: "boundary", status: "success", created_at: at(-13) },
+      { workspace_id: "ws_foreign_growth", event_id: "foreign", status: "success", created_at: at(-19) },
+    ].map(row => JSON.stringify(row)).join("\n")}`);
+    const ids = ["ws_growth", "ws_growth_test", "ws_growth_late", "ws_growth_boundary"];
+    const result = await query(GROWTH_ACTIVITY_SQL, { since: at(-28), until: at(0),
+      workspace_ids: JSON.stringify(ids), signup_times: JSON.stringify(ids.map(() => joined)) });
+    assert.deepEqual(result.data.sort((a,b) => a.workspace_id.localeCompare(b.workspace_id)), [
+      { workspace_id: "ws_growth", received_first_week: 1, received_second_week: 1, delivered_first_week: 1 },
+      { workspace_id: "ws_growth_boundary", received_first_week: 0, received_second_week: 1, delivered_first_week: 0 },
+      { workspace_id: "ws_growth_late", received_first_week: 0, received_second_week: 0, delivered_first_week: 0 },
+    ]);
+  });
   await t.test("source counts preserve exact deduplication and time windows within the memory cap", async () => {
     const eventRows = [
       ["ws_counts", "source_a", "duplicate", at(-0.5)],

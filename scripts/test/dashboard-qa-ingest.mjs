@@ -9,7 +9,7 @@ import { createServer } from "node:http";
  * memory. No auth code is mocked or bypassed; credentials come from the same
  * disposable database as the dashboard. Never accepts a production database.
  */
-export async function startDashboardQaIngest(databaseUrl) {
+export async function startDashboardQaIngest(databaseUrl, masterKey) {
   const database = new URL(databaseUrl);
   assert.equal(database.hostname, "127.0.0.1");
   assert.equal(database.username, "postgres");
@@ -18,6 +18,8 @@ export async function startDashboardQaIngest(databaseUrl) {
   const adminToken = randomBytes(32).toString("hex");
   const objects = new Map();
   const messages = [];
+  const { startDashboardQaDelivery } = await import("./dashboard-qa-delivery.mjs");
+  const delivery = await startDashboardQaDelivery(databaseUrl, objects, messages, masterKey);
   const background = new Set();
   const env = {
     DEV_MODE: "true",
@@ -45,6 +47,15 @@ export async function startDashboardQaIngest(databaseUrl) {
     try {
       const chunks = [];
       for await (const chunk of incoming) chunks.push(chunk);
+      if (incoming.method === "POST" && incoming.url === "/__qa/drain") {
+        assert.equal(incoming.headers.authorization, `Bearer ${adminToken}`);
+        const { workspaceId } = JSON.parse(Buffer.concat(chunks).toString());
+        assert.equal(typeof workspaceId, "string");
+        const result = await delivery.drain(workspaceId);
+        outgoing.writeHead(200, { "content-type": "application/json" });
+        outgoing.end(JSON.stringify(result));
+        return;
+      }
       const request = new Request(new URL(incoming.url, origin), {
         method: incoming.method,
         headers: incoming.headers,
@@ -74,6 +85,7 @@ export async function startDashboardQaIngest(databaseUrl) {
       server.closeAllConnections();
       await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
       await Promise.allSettled(background);
+      await delivery.close();
       objects.clear();
       messages.length = 0;
     },

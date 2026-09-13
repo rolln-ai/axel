@@ -70,6 +70,19 @@ afterEach(() => {
 });
 
 describe("SourceAuthorityDurableObject", () => {
+  it("preserves safe origin diagnostics and does not cache an outage as a missing source", async () => {
+    const origin = vi.fn().mockImplementation(async () => new Response("private provider response", { status: 503 }));
+    vi.stubGlobal("fetch", origin);
+    const object = durableObject();
+    const result = await operation(object, { op: "resolve", source_id: "src_1" });
+    expect(result.status).toBe(503);
+    expect(await result.json()).toEqual({ error: "source_lookup_unavailable", reason: "lookup_http", http_status: 503 });
+    expect(origin).toHaveBeenCalledTimes(2);
+    origin.mockImplementation(async () => new Response(JSON.stringify({ source: OLD_SOURCE })));
+    expect(await (await operation(object, { op: "resolve", source_id: "src_1" })).json())
+      .toMatchObject({ source: OLD_SOURCE });
+    expect(origin).toHaveBeenCalledTimes(3);
+  });
   it("loads cold state from the authenticated origin and reuses committed state", async () => {
     const origin = vi.fn(async () => new Response(JSON.stringify({ source: OLD_SOURCE }), {
       headers: { "content-type": "application/json" },
@@ -256,6 +269,7 @@ describe("SourceAuthorityDurableObject", () => {
     const origin = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ source: OLD_SOURCE })))
       .mockRejectedValueOnce(new Error("origin temporarily unavailable"))
+      .mockRejectedValueOnce(new Error("origin still unavailable"))
       .mockResolvedValueOnce(new Response(JSON.stringify({ source: NEW_SOURCE })));
     vi.stubGlobal("fetch", origin);
     const object = durableObject();
@@ -267,7 +281,7 @@ describe("SourceAuthorityDurableObject", () => {
     })).status).toBe(503);
     const repaired = await operation(object, { op: "resolve", source_id: "src_1" });
     expect(await repaired.json()).toMatchObject({ source: NEW_SOURCE });
-    expect(origin).toHaveBeenCalledTimes(3);
+    expect(origin).toHaveBeenCalledTimes(4);
   });
 
   it("never lets a legacy invalidation override an explicit mutation fence", async () => {
@@ -329,6 +343,24 @@ describe("resolveSourceWithAuthority", () => {
 
     await expect(resolveSourceWithAuthority({ SOURCE_AUTHORITY: namespace }, "src_1", direct))
       .rejects.toThrow(/temporarily fenced/);
+    expect(direct).not.toHaveBeenCalled();
+  });
+
+  it("carries only validated failure codes across the authority boundary", async () => {
+    const call = vi.fn(async () => new Response(JSON.stringify({
+      error: "source_lookup_unavailable", reason: "lookup_timeout", http_status: 504,
+      message: "upstream secret", source: OLD_SOURCE,
+    }), { status: 503 }));
+    const namespace = {
+      idFromName: vi.fn(() => ({}) as DurableObjectId),
+      get: vi.fn(() => ({ fetch: call })),
+    } satisfies SourceAuthorityNamespaceLike;
+    const direct = vi.fn();
+    await expect(resolveSourceWithAuthority({ SOURCE_AUTHORITY: namespace }, "src_1", direct))
+      .rejects.toMatchObject({ reason: "lookup_timeout", httpStatus: 504, message: "source authority lookup failed" });
+    call.mockResolvedValueOnce(new Response(JSON.stringify({ reason: "secret-invalid-code" }), { status: 503 }));
+    await expect(resolveSourceWithAuthority({ SOURCE_AUTHORITY: namespace }, "src_1", direct))
+      .rejects.toMatchObject({ reason: "authority_unavailable" });
     expect(direct).not.toHaveBeenCalled();
   });
 

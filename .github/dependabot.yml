@@ -9,24 +9,31 @@ updates:
       timezone: America/Denver
     groups:
       next:
+        update-types: [minor, patch]
         patterns:
           - next
           - react
           - react-dom
           - "@types/react*"
       cloudflare:
+        update-types: [minor, patch]
         patterns:
           - wrangler
           - "@cloudflare/workers-types"
       aws:
+        update-types: [minor, patch]
         patterns:
           - "@aws-sdk/*"
       lint-and-test:
+        update-types: [minor, patch]
         patterns:
           - "@biomejs/*"
           - vitest
           - typescript
-    open-pull-requests-limit: 10
+      other-compatible:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    open-pull-requests-limit: 5
     labels:
       - area/infra
       - type/chore

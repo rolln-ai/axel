@@ -4,6 +4,7 @@ import { lookupSourceUncached, type Env } from "../src/index.js";
 import { SourceLookupUnavailableError } from "../src/source-lookup-error.js";
 import {
   lookupSourceFromDeliveryService,
+  SOURCE_LOOKUP_TIMEOUT_MS,
   type SourceLookupFetch,
 } from "../src/source-lookup-http.js";
 
@@ -43,7 +44,58 @@ function response(body: unknown, status: number = 200): Response {
 
 describe("delivery-service source lookup client", () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it.each([500, 502, 503, 504])("retries an HTTP %s once and returns freshly loaded authorization", async (status) => {
+    const fetchMock = vi.fn<SourceLookupFetch>()
+      .mockResolvedValueOnce(response({ error: "temporary" }, status))
+      .mockResolvedValueOnce(response({ source: SOURCE }));
+    await expect(lookupSourceFromDeliveryService(ENV, "src_1", fetchMock)).resolves.toEqual(SOURCE);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1]?.[1].body).toBe(fetchMock.mock.calls[0]?.[1].body);
+  });
+
+  it.each([401, 403, 404, 429])("does not retry HTTP %s", async (status) => {
+    const fetchMock = vi.fn<SourceLookupFetch>().mockResolvedValue(response({ error: "rejected" }, status));
+    await expect(lookupSourceFromDeliveryService(ENV, "src_1", fetchMock))
+      .rejects.toMatchObject({ reason: "lookup_http", httpStatus: status });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("recovers when the first request times out", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn<SourceLookupFetch>()
+      .mockImplementationOnce(async () => new Promise<Response>(() => {}))
+      .mockResolvedValueOnce(response({ source: SOURCE }));
+    const result = lookupSourceFromDeliveryService(ENV, "src_1", fetchMock);
+    const assertion = expect(result).resolves.toEqual(SOURCE);
+    await vi.advanceTimersByTimeAsync(SOURCE_LOOKUP_TIMEOUT_MS + 100);
+    await assertion;
+    expect(fetchMock.mock.calls[0]?.[1].signal?.aborted).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("bounds a stalled response body as well as response headers", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn<SourceLookupFetch>().mockImplementation(async () =>
+      new Response(new ReadableStream({ start() {} })));
+    const result = lookupSourceFromDeliveryService(ENV, "src_1", fetchMock);
+    const assertion = expect(result).rejects.toMatchObject({ reason: "lookup_timeout" });
+    await vi.advanceTimersByTimeAsync(SOURCE_LOOKUP_TIMEOUT_MS * 2 + 100);
+    await assertion;
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.every(([, init]) => init.signal?.aborted)).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not retry invalid JSON or expose its contents", async () => {
+    const fetchMock = vi.fn<SourceLookupFetch>().mockResolvedValue(response("secret upstream response"));
+    await expect(lookupSourceFromDeliveryService(ENV, "src_1", fetchMock))
+      .rejects.toMatchObject({ reason: "lookup_invalid_response", message: "delivery-service source lookup returned invalid JSON" });
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it("authenticates the request and preserves every Source field", async () => {

@@ -37,7 +37,7 @@ const tiers: Tier[] = [
       "30-day event search in ClickHouse",
       "Community support",
     ],
-    cta: { label: "Sign up free", href: "https://app.axelapp.ai/signup" },
+    cta: { label: "Sign up free", href: "https://app.axelapp.ai/signup?ref=website" },
     badge: "start here",
   },
   {
@@ -53,7 +53,7 @@ const tiers: Tier[] = [
       "Per-source rate limits, body & depth caps",
       "p95 ingest < 250ms SLO",
     ],
-    cta: { label: "Start on Pro", href: "https://app.axelapp.ai/signup" },
+    cta: { label: "Start on Pro", href: "https://app.axelapp.ai/signup?ref=website" },
     featured: true,
     badge: "usage credit",
   },
@@ -146,7 +146,7 @@ export default function PricingPage() {
               Self-hosting has no Axel license fee; you operate the stack and pay your providers.
             </p>
             <div className="heroActions">
-              <a className="btn" href="https://app.axelapp.ai/signup">Start on Axel Cloud <span className="arrow">→</span></a>
+              <a className="btn" href="https://app.axelapp.ai/signup?ref=website">Start on Axel Cloud <span className="arrow">→</span></a>
               <Link className="btn ghost" href="/docs#self-hosting">Self-hosting guide</Link>
             </div>
           </div>
@@ -209,7 +209,7 @@ export default function PricingPage() {
               Start with 10,000 accepted events per month free. Upgrade to Pro when you need more.
             </p>
             <div className="heroActions">
-              <a className="btn" href="https://app.axelapp.ai/signup">
+              <a className="btn" href="https://app.axelapp.ai/signup?ref=website">
                 Sign up free <span className="arrow">→</span>
               </a>
               <Link className="btn ghost" href="/docs">

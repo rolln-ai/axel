@@ -34,8 +34,8 @@ interface ComponentStatus {
 
 // AXE-audit-Sev2 — explicit env reads so a misconfigured deploy
 // renders "unconfigured" instead of probing a stale prod default.
-const INGEST_URL = process.env.NEXT_PUBLIC_AXEL_INGEST_URL ?? null;
-const DELIVERY_URL = process.env.NEXT_PUBLIC_AXEL_DELIVERY_URL ?? null;
+const INGEST_URL = process.env.AXEL_INGEST_URL ?? process.env.NEXT_PUBLIC_AXEL_INGEST_URL ?? null;
+const DELIVERY_URL = process.env.AXEL_DELIVERY_URL ?? process.env.NEXT_PUBLIC_AXEL_DELIVERY_URL ?? null;
 
 const COMPONENTS: ReadonlyArray<{ name: string; url: string | null }> = [
   { name: "Ingest (CF Worker)", url: INGEST_URL },

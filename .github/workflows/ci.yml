@@ -81,6 +81,7 @@ jobs:
             --build-arg NEXT_PUBLIC_AXEL_INGEST_URL=https://ingest.example.test \
             --build-arg NEXT_PUBLIC_AXEL_DELIVERY_URL=http://localhost:10000 .
           docker build --target delivery --tag axel-delivery:ci .
+          bash scripts/test/self-host-dashboard-image.test.sh axel-dashboard:ci
 
   visual-smoke:
     name: Visual smoke

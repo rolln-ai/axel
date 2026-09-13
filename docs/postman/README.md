@@ -14,7 +14,7 @@ real webhook bodies into a request.
 
 ## Setup
 
-1. **Sign up.** Open <https://app.axelapp.ai/signup> and create your workspace.
+1. **Sign up.** Open <https://app.axelapp.ai/signup?ref=github> and create your workspace.
 2. **Create a disposable custom source.** Go to <https://app.axelapp.ai/sources> →
    **Create source**, leave the inbound provider set to **Custom / other service**, and save the
    plaintext token shown once. The collection sends that value only in the

@@ -53,14 +53,14 @@ describe("verifyProviderSignatureWithSecrets — rotation window", () => {
 const SECRET = "whsec_test_super_secret";
 const BODY = new TextEncoder().encode(JSON.stringify({ type: "invoice.paid", id: "evt_1" }));
 
-function hex(bytes: Buffer): string {
-  return bytes.toString("hex");
+function hex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
-function b64(bytes: Buffer): string {
-  return bytes.toString("base64");
+function b64(bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...bytes));
 }
 
-function sign(secret: string, payload: string | Uint8Array): Buffer {
+function sign(secret: string, payload: string | Uint8Array): Uint8Array {
   return createHmac("sha256", secret).update(payload).digest();
 }
 
@@ -166,7 +166,7 @@ describe("signature verifier — Shopify", () => {
 
 describe("signature verifier — Chargebee (Basic Auth)", () => {
   const CB_SECRET = "cb_user:cb_password";
-  const authHeader = `Basic ${Buffer.from(CB_SECRET).toString("base64")}`;
+  const authHeader = `Basic ${btoa(CB_SECRET)}`;
 
   it("accepts a matching Basic Auth header", () => {
     expect(verifyChargebeeBasicAuth(CB_SECRET, { authorization: authHeader })).toEqual({
@@ -176,7 +176,7 @@ describe("signature verifier — Chargebee (Basic Auth)", () => {
   });
 
   it("rejects a wrong credential", () => {
-    const wrong = `Basic ${Buffer.from("cb_user:nope").toString("base64")}`;
+    const wrong = `Basic ${btoa("cb_user:nope")}`;
     expect(verifyChargebeeBasicAuth(CB_SECRET, { authorization: wrong })).toEqual({
       ok: false,
       reason: "invalid_signature",

@@ -19,9 +19,9 @@
     "postgres": "^3.4.4"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260616.1",
+    "@cloudflare/workers-types": "^5.20260907.1",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.11",
-    "wrangler": "^4.100.0"
+    "vitest": "^5.0.0",
+    "wrangler": "^4.129.1"
   }
 }

@@ -41,6 +41,7 @@ import { requestIpFromHeaders } from "./request-ip";
 import { normalizeEmail, tokenHash, detectWorkspaceTimezone } from "./account-shared";
 import type { ActionState } from "./action-data";
 import { sendVerificationEmail } from "./email-verification-resend";
+import { signupSource } from "./signup-source";
 
 /**
  * Returned for EVERY non-invite signup submission — whether the address was
@@ -211,6 +212,7 @@ export async function signUp(_state: ActionState, formData: FormData): Promise<A
           action: "workspace.created",
           targetType: "workspace",
           targetId: workspaceId,
+          metadata: { signup_source: signupSource(formData.get("signupSource")) },
         });
       }
 

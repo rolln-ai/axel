@@ -1,5 +1,6 @@
 "use server";
 
+import { refresh } from "next/cache";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import type { ActionState } from "./action-data";
@@ -196,5 +197,8 @@ export async function verifyAdminMfaAction(
     return { error: "Could not verify the authenticator code." };
   }
 
+  // MFA changes the session in Postgres without changing its cookie. Discard
+  // cached redirects from before verification before navigating back to admin.
+  refresh();
   redirect(completionPath(returnTo));
 }

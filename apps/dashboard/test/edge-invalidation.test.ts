@@ -77,7 +77,7 @@ describe("invalidateEdgeSourceCache", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe("https://ingest.example.com/admin/source-cache/invalidate");
     expect(calls[0]?.init.redirect).toBe("manual");
-    expect((calls[0]?.init.headers as Record<string, string>)["x-axel-admin-token"]).toBe("tk-admin");
+    expect((calls[0]?.init.headers as Record<string, string> | undefined)?.["x-axel-admin-token"]).toBe("tk-admin");
     expect(JSON.parse(calls[0]?.init.body as string)).toEqual({ source_id: "src_42" });
   });
 

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { getSetupProblem } from "../../lib/config";
 import { SignupForm } from "./SignupForm";
+import { signupSource } from "../../lib/signup-source";
 import { Logo } from "../_brand/Logo";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -8,7 +9,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 export default async function SignupPage({
   searchParams,
 }: {
-  searchParams: Promise<{ invite?: string }>;
+  searchParams: Promise<{ invite?: string; ref?: string }>;
 }) {
   const setupProblem = getSetupProblem();
   const params = await searchParams;
@@ -27,8 +28,8 @@ export default async function SignupPage({
             </CardTitle>
             <CardDescription>
               {inviteToken
-                ? "Create your account to accept the invite and start operating webhooks together."
-                : "Create the first owner account. You'll be operating production webhook traffic in minutes."}
+                ? "Create an account to join this workspace."
+                : "Create an account, then connect your first webhook source."}
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -37,7 +38,7 @@ export default async function SignupPage({
                 <AlertDescription>{setupProblem}</AlertDescription>
               </Alert>
             ) : (
-              <SignupForm inviteToken={inviteToken} />
+              <SignupForm inviteToken={inviteToken} source={signupSource(params.ref)} />
             )}
           </CardContent>
         </Card>
