@@ -2,20 +2,19 @@ openapi: 3.1.0
 info:
   title: Axel API
   version: "0.1.0"
-  summary: Webhook ingest plus workspace control plane.
+  summary: Receive webhooks and manage workspace configuration.
   description: |
-    The Axel API has two surfaces:
+    Axel has two API endpoints:
 
-    - **Workspace API** (`https://app.axelapp.ai/api/v1`) — manage sources,
-      destinations, routes, replays, and export workspace config.
+    - The workspace API at `https://app.axelapp.ai/api/v1` lists sources,
+      destinations, and routes, creates sources, queues replays, and exports
+      workspace configuration.
       Authenticated with a workspace API key:
       `Authorization: Bearer axl_…`. Create keys at
       [Settings → API keys](https://app.axelapp.ai/settings?tab=api-keys).
 
-    - **Ingest** (`https://ingest.axelapp.ai`) — deliver webhook payloads
-      from upstream providers (Stripe, GitHub, Twilio, Slack, anything).
-      Custom sources authenticate with the one-shot `x-axel-token`
-      request header. Stripe, GitHub, Shopify, and Chargebee sources
+    - Ingest at `https://ingest.axelapp.ai` accepts webhook payloads.
+      Custom sources authenticate with the `x-axel-token` request header. Stripe, GitHub, Shopify, and Chargebee sources
       use their native signature or webhook Basic Auth and do not
       use an Axel source token. Custom sources can opt into a separate
       URL credential for senders that cannot set headers.
@@ -59,15 +58,15 @@ tags:
   - name: Destinations
     description: Where Axel delivers events after routing.
   - name: Routes
-    description: Filter + transform rules that connect sources to destinations.
+    description: Filters and transforms that connect sources to destinations.
   - name: Replays
     description: Re-deliver events that landed in the dead-letter queue.
   - name: Usage
     description: Workspace usage counters.
   - name: Config
-    description: Export the full workspace configuration as JSON.
+    description: Export a redacted workspace configuration as JSON.
   - name: Ingest
-    description: The hot path. Send webhook payloads here.
+    description: Accept webhook payloads and queue them for routing.
 
 security:
   - WorkspaceBearer: []
@@ -105,10 +104,10 @@ paths:
       operationId: createSource
       summary: Create a source
       description: |
-        Creates a custom source and returns a one-shot `secret_token`. Store
-        the token immediately — it cannot be retrieved later. Send the
-        returned `ingest_url` and token as the `x-axel-token` header when
-        posting webhooks. This endpoint does not create a named-provider
+        Creates a custom source and returns `secret_token`, shown only once.
+        Save the token before leaving the response. Send webhooks to the
+        returned `ingest_url` with the token in the `x-axel-token` header.
+        The token remains valid until it is rotated or the source is disabled. This endpoint does not create a named-provider
         signature configuration.
       tags: [Sources]
       security:
@@ -206,7 +205,6 @@ paths:
       summary: Workspace usage summary
       description: |
         Returns active resource counts and a 30-day dead-letter total.
-        Suitable for status dashboards and alerting.
       tags: [Usage]
       security:
         - WorkspaceBearer: []
@@ -234,17 +232,14 @@ paths:
       operationId: exportConfig
       summary: Export workspace config
       description: |
-        Returns a versioned, redacted JSON snapshot of every routable
-        resource in the workspace: sources, destinations, routes, and
-        attachments. Suitable for `axel config pull > workspace.json`,
-        code review, or environment promotion.
+        Returns a versioned JSON snapshot of sources, destinations, routes,
+        and route bindings for configuration review. This is not a backup
+        of credentials or an import format.
 
-        Secrets are redacted: `secret_token_hash`, signing-secret
-        ciphertext, destination URLs, every configured header value,
-        and any destination `credentials_ref` are replaced with
-        `[REDACTED]`. Header names may remain for structural review.
-        Re-applying the config requires re-setting credentials and URLs
-        per destination.
+        Source token hashes and signing-secret ciphertext are omitted.
+        Destination URLs and configured header values are redacted; header
+        names remain. A present `credentials_ref` becomes a redaction marker.
+        Use the dashboard to configure destination credentials and URLs.
       tags: [Config]
       security:
         - WorkspaceBearer: []
@@ -262,13 +257,13 @@ paths:
       operationId: enqueueReplay
       summary: Enqueue a replay
       description: |
-        Queues a replay for the given `event_id`. The replay is picked
-        up by the router on its next poll. `scope` controls which
+        Queues a replay for the given `event_id`. The periodic worker picks
+        it up on its next poll. `scope` controls which
         deliveries get retried:
 
-        - `all` (default) — every destination attached to the route
-        - `route` — only deliveries on the named `route_id`
-        - `destination` — only the named `destination_id`
+        - `all` is the default and selects every destination attached to the route.
+        - `route` selects deliveries on the named `route_id`.
+        - `destination` selects the named `destination_id`.
 
         Returns `202 Accepted` with the new replay row in `pending`
         state. The event must have a matching unresolved dead-letter row.
@@ -341,7 +336,7 @@ paths:
       operationId: ingestEvent
       summary: Ingest a webhook
       description: |
-        The hot path. Custom sources require the one-shot source token in
+        Custom sources require their source token in
         the `x-axel-token` request header. Stripe, GitHub, Shopify, and
         Chargebee sources use the provider authentication configured on
         the source without an Axel token. Any `token` query parameter is
@@ -358,8 +353,7 @@ paths:
         returns `401 ambiguous_authentication`. Keep the URL private; upstream
         senders and proxies may log it. Named providers cannot use URL auth.
 
-        **Hosted at a different origin** from the workspace API:
-        `https://ingest.axelapp.ai`.
+        Send these requests to `https://ingest.axelapp.ai`, not the workspace API host.
 
         Any content type is accepted. Per-source limits (body size,
         body depth, rate) are enforced; over-limit requests get a 413
@@ -584,7 +578,7 @@ components:
       properties:
         error:
           type: string
-          description: Human-readable message. Don't pattern-match on this — use `code`.
+          description: Human-readable message. Use `code` for programmatic error handling.
         code:
           type: string
           description: Stable machine-readable failure slug.
@@ -637,13 +631,13 @@ components:
         name: { type: string, example: stripe-webhooks-prod }
         secret_token:
           type: string
-          description: The plaintext source token. Shown ONCE.
+          description: The plaintext source token, shown only in this response.
           example: stk_3f9c…
         ingest_url:
           type: string
           format: uri
           description: |
-            Pre-built ingest URL. POST upstream payloads here with
+            Source ingest URL. POST upstream payloads here with
             `x-axel-token: {secret_token}`.
           example: https://ingest.axelapp.ai/in/src_8c12af
         warning:
@@ -705,8 +699,9 @@ components:
                 type: string
                 nullable: true
                 description: |
-                  Replaced with `"[REDACTED — re-set via POST /destinations]"`
-                  when present.
+                  A redaction marker when credentials are present. Its legacy text
+                  refers to POST /destinations, but this API has no destination
+                  creation endpoint. Configure credentials in the dashboard.
         routes:
           type: array
           items:
