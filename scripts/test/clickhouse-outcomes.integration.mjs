@@ -1,4 +1,5 @@
-import { FLOW_ACTIVITY_SQL, DELIVERY_ACTIVITY_SQL, UNATTEMPTED_SQL } from "../../apps/dashboard/lib/impact-alert-queries.ts";
+import { FLOW_ACTIVITY_SQL, FLOW_HISTORY_SQL, DELIVERY_ACTIVITY_SQL, UNATTEMPTED_SQL } from "../../apps/dashboard/lib/impact-alert-queries.ts";
+import { historicalGapAllowance } from "../../apps/dashboard/lib/source-gap-history.ts";
 import { SOURCE_EVENT_COUNTS_SQL } from "../../apps/dashboard/lib/source-event-counts-query.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -130,6 +131,37 @@ test("delivery rollup preserves outcomes before background merges", { timeout: 1
     assert.equal(Number(delivery.schema_failures), 1);
     const missing = (await query(UNATTEMPTED_SQL, {workspace_id: "ws_monitor", source_id: "src_monitor", route_id: "route_monitor", destination_id: "dst_monitor", route_created: received(300)})).data[0];
     assert.equal(Number(missing.waiting_count), 23);
+  });
+  await t.test("flow history preserves recurring nights beyond the latest 2000 events and isolates tenants and test traffic", async () => {
+    // 25 days of daily bursts, with the newest 3,000 receipts all in one hour.
+    const last = Math.floor((now - 86_400_000) / 86_400_000) * 86_400_000 + 17 * 3_600_000;
+    const receipt = (at) => new Date(at).toISOString().replace("T", " ").replace("Z", "");
+    const events = [];
+    for (let day = 0; day < 25; day++) {
+      for (const minute of [0, 1, 2]) events.push({ workspace_id: "ws_history", source_id: "src_history",
+        event_id: `day_${day}_${minute}`, received_at: receipt(last - day * 86_400_000 - minute * 60_000) });
+    }
+    for (let i = 0; i < 3000; i++) events.push({ workspace_id: "ws_history", source_id: "src_history",
+      event_id: `burst_${i}`, received_at: receipt(last - i * 1000) });
+    // Duplicate rows, another source and workspace, and test receipts at night
+    // must not fill this source's quiet periods or move its bucket endpoints.
+    events.push(...events.slice(0, 3));
+    events.push({ workspace_id: "ws_other_history", source_id: "src_history", event_id: "foreign", received_at: receipt(now) });
+    events.push({ workspace_id: "ws_history", source_id: "src_other", event_id: "other_source", received_at: receipt(now) });
+    for (let day = 0; day < 25; day++) events.push({ workspace_id: "ws_history", source_id: "src_history",
+      event_id: `test_${day}`, received_at: receipt(last - day * 86_400_000 + 8 * 3_600_000), is_test: true });
+    await query(`INSERT INTO events FORMAT JSONEachRow\n${events.map(row => JSON.stringify(row)).join("\n")}`);
+    const cadence = (await query(FLOW_ACTIVITY_SQL, { workspace_id: "ws_history" })).data.find(row => row.source_id === "src_history");
+    assert.equal(Number(cadence.samples), 2000);
+    assert.equal(Number(cadence.typical_gap_seconds), 1);
+    const history = await query(FLOW_HISTORY_SQL, { workspace_id: "ws_history" });
+    assert.equal(history.data.length, 2);
+    const buckets = history.data.find(row => row.source_id === "src_history").buckets.map(pair => pair.map(Number));
+    assert.equal(Math.min(...buckets.map(pair => pair[0])), last - 24 * 86_400_000 - 2 * 60_000);
+    assert.equal(Math.max(...buckets.map(pair => pair[1])), last);
+    assert.ok(buckets.length <= 25 * 5, "history is bounded by occupied quarter-hours, not event volume");
+    assert.ok(historicalGapAllowance(buckets, last) > 20 * 3_600_000, "normal nightly silence extends the burst-only cadence");
+    t.diagnostic(`Flow history query seconds=${history.statistics.elapsed}, buckets=${buckets.length}`);
   });
   const params = { workspace_id: "ws_a", start: at(-7), end: at(0), destination_id: "dst_a" };
   const candidate = latestOutcomesCTE({ source: "rollup" });

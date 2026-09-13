@@ -6,10 +6,27 @@ Configure ClickHouse, Postgres and Resend for monitoring and email delivery.
 The Inbox shows when a check is unavailable or stale; an unavailable check never
 resolves an incident. The cron also reports failure to its Sentry monitor.
 
-An established source alerts after three times its recent 95th-percentile event
-gap, with a 30-minute minimum and seven-day maximum. Automatic monitoring needs
-20 accepted events. Set a maximum expected gap in Source Settings for scheduled,
-new or infrequent feeds. Test events do not establish traffic health.
+Automatic monitoring starts with three times the 95th-percentile gap in the
+latest 2,000 accepted events, with a 30-minute minimum and seven-day maximum.
+It also checks all retained receipt history from the last 30 days, keeping the
+first and last receipt in each occupied 15-minute bucket. Busy bursts cannot
+push normal nights or weekends out of this history.
+
+After at least seven days of history, the monitor compares completed quiet
+periods around the last receipt's UTC clock time, allowing 30 minutes of schedule
+jitter. Weekdays are compared with weekdays, weekends with weekends. Gaps over
+24 hours require matching weekdays from prior weeks. At least three independent
+quiet periods on different dates must support a longer window; one long outage
+cannot establish a pattern. The third-longest comparable allowance plus 25%
+grace can extend the recent-cadence window, up to seven days. Alert emails say
+when this historical pattern extended the window. The current unfinished gap
+never trains the baseline. An open incident keeps its original window and
+requires new accepted traffic before recovery.
+
+Automatic monitoring needs 20 accepted events. An explicit maximum expected gap
+in Source Settings takes precedence over both learned baselines, including for
+new or infrequent feeds. Test events do not establish traffic health. History
+describes receipt patterns; it cannot prove that a sender had nothing to send.
 
 Recent unresolved dead letters, destination pauses and retries older than 30 minutes
 open delivery incidents. First detection looks for failures from the last seven days

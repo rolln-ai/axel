@@ -15,6 +15,21 @@ FROM (
 )
 GROUP BY source_id`;
 
+// Keep every occupied quarter-hour in the retained window, regardless of event
+// volume. Only receipt times leave ClickHouse, at most 2,881 pairs per source.
+// min/max are unaffected by duplicate analytics inserts.
+export const FLOW_HISTORY_SQL = `
+SELECT source_id,
+  groupArray((toUnixTimestamp64Milli(first_received), toUnixTimestamp64Milli(last_received))) AS buckets
+FROM (
+  SELECT source_id, min(received_at) AS first_received, max(received_at) AS last_received
+  FROM events
+  WHERE workspace_id = {workspace_id:String} AND is_test = false
+    AND received_at >= now() - INTERVAL 30 DAY AND received_at <= now64(3)
+  GROUP BY source_id, toStartOfInterval(received_at, INTERVAL 15 MINUTE)
+)
+GROUP BY source_id`;
+
 // Duplicate analytics inserts retain the immutable event receipt time. ANY
 // prevents those copies from multiplying outcomes without a large GROUP BY.
 export const DELIVERY_ACTIVITY_SQL = `

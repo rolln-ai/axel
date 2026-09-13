@@ -16,7 +16,7 @@ export async function PipelineIncidents({ workspaceId, canMutate }: { workspaceI
     const stale = !monitor?.checked_at || Date.now() - Date.parse(monitor.checked_at) > 45 * 60_000;
     return <section className="mb-6 space-y-3" aria-label="Data flow incidents">
       <h2 className="text-base font-semibold">Data flow incidents</h2>
-      {stale ? <p role="alert" className="rounded-md border border-destructive p-3 text-sm">Monitoring has not completed a recent check. Current data flow is unverified.</p> : <p className="text-xs text-muted-foreground">Last checked <LocalTime value={monitor.checked_at!} />. Quiet feeds need an expected gap in Source Settings.</p>}
+      {stale ? <p role="alert" className="rounded-md border border-destructive p-3 text-sm">Monitoring has not completed a recent check. Current data flow is unverified.</p> : <p className="text-xs text-muted-foreground">Last checked <LocalTime value={monitor.checked_at!} />. Source Settings can override the learned traffic window.</p>}
       {Number(monitor?.unsent ?? 0) > 0 ? <p role="alert" className="text-sm text-destructive">Some incident emails could not be confirmed and need administrator review. The incidents remain visible here.</p> : null}
       {incidents.length === 0 ? <p className="text-sm text-muted-foreground">No active incidents detected. This does not confirm that historical gaps have been backfilled.</p> : null}
       {incidents.map(incident => {

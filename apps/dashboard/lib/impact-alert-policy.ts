@@ -1,4 +1,5 @@
 /** Pure incident policy. A missing telemetry result is never a healthy result. */
+import { historicalGapAllowance, type FlowHistoryBucket } from "./source-gap-history";
 export type ImpactKind = "source_silent" | "delivery_blocked";
 export type ImpactPhase = "opened" | "reminder" | "recovered";
 
@@ -15,6 +16,7 @@ export interface FlowActivity {
   last_received: string | null;
   samples: number;
   typical_gap_seconds: number;
+  history?: FlowHistoryBucket[];
 }
 
 export interface ImpactSnapshot {
@@ -28,6 +30,7 @@ export interface ImpactSnapshot {
   failedCount: number;
   waitingCount: number;
   thresholdMinutes: number;
+  thresholdBasis?: "configured" | "recent_cadence" | "historical_pattern";
   cause: "no_traffic" | "delivery_failed" | "schema_mismatch" | "authorization_failed" | "backlog" | "destination_paused";
 }
 
@@ -54,9 +57,14 @@ export function sourceSilenceObservation(source: FlowSource, activity: FlowActiv
   // explicitly set their expected maximum gap, including time to first event.
   const automatic = activity && activity.samples >= 20 && activity.typical_gap_seconds > 0;
   if (!source.alert_after_minutes && !automatic) return null;
-  const thresholdMinutes = source.alert_after_minutes
-    ?? Math.min(10080, Math.max(30, Math.ceil(activity!.typical_gap_seconds * 3 / 60)));
   const last = timestamp(activity?.last_received ?? null);
+  const cadenceMinutes = Math.max(30, Math.ceil((activity?.typical_gap_seconds ?? 0) * 3 / 60));
+  const historyMinutes = !source.alert_after_minutes && last && activity?.history
+    ? Math.ceil(historicalGapAllowance(activity.history, last) / 60_000) : 0;
+  const thresholdMinutes = source.alert_after_minutes
+    ?? Math.min(10080, Math.max(cadenceMinutes, historyMinutes));
+  const thresholdBasis = source.alert_after_minutes ? "configured"
+    : historyMinutes > cadenceMinutes ? "historical_pattern" : "recent_cadence";
   const start = last ?? timestamp(source.created_at);
   if (start === null) return null;
   return {
@@ -66,7 +74,7 @@ export function sourceSilenceObservation(source: FlowSource, activity: FlowActiv
     snapshot: {
       sourceId: source.id, sourceName: source.name, destinationId: null, destinationName: null, routeId: null,
       lastReceived: activity?.last_received ?? null, lastDelivered: null,
-      failedCount: 0, waitingCount: 0, thresholdMinutes, cause: "no_traffic",
+      failedCount: 0, waitingCount: 0, thresholdMinutes, thresholdBasis, cause: "no_traffic",
     },
   };
 }
@@ -103,7 +111,7 @@ export function impactMessage(kind: ImpactKind, snapshot: ImpactSnapshot, phase:
       : snapshot.cause === "schema_mismatch" ? `${source}: ${target} cannot store some events`
         : `${source}: deliveries to ${target} need attention`;
   const action = snapshot.cause === "no_traffic"
-    ? `No accepted events within the expected ${snapshot.thresholdMinutes}-minute window. Check that the sender's webhook is enabled and uses this source's current credentials. Requests rejected before ingestion are not available for replay in Axel.`
+    ? `No accepted events within the expected ${snapshot.thresholdMinutes}-minute window.${snapshot.thresholdBasis === "historical_pattern" ? " This window includes recurring quiet periods at comparable times in this source's retained 30-day history." : ""} Check that the sender's webhook is enabled and uses this source's current credentials. Requests rejected before ingestion are not available for replay in Axel.`
     : snapshot.cause === "schema_mismatch"
       ? "The destination rejected rows with an incompatible schema. Review the mapping and target schema, then replay retained failed events. Axel has not changed existing column types or discarded fields."
       : snapshot.cause === "authorization_failed"
