@@ -1,6 +1,6 @@
-import type { Source } from "@axel/shared";
+import { readBoundedJsonResponse, type Source } from "@axel/shared";
 import { lookupSourceFromDeliveryService, type DeliverySourceLookupEnv } from "./source-lookup-http.js";
-import { SourceLookupUnavailableError } from "./source-lookup-error.js";
+import { isSourceLookupFailureReason, SourceLookupUnavailableError } from "./source-lookup-error.js";
 
 const STATE_KEY = "source-authority";
 const INTERNAL_URL = "https://source-authority.internal/";
@@ -176,7 +176,7 @@ export async function beginSourceAuthorizationWithAuthority(
   }
   if (!env.SOURCE_AUTHORITY) {
     if (env.SOURCE_AUTHORITY_REQUIRED === "true") {
-      throw new SourceLookupUnavailableError("required source authority binding is unavailable");
+      throw new SourceLookupUnavailableError("required source authority binding is unavailable", "authority_unavailable");
     }
     return { source: await directLookup(sourceId) };
   }
@@ -188,11 +188,24 @@ export async function beginSourceAuthorizationWithAuthority(
       source_id: sourceId,
     });
   } catch {
-    throw new SourceLookupUnavailableError("source authority request failed");
+    throw new SourceLookupUnavailableError("source authority request failed", "authority_unavailable");
   }
   if (response.status === 423) {
     await response.body?.cancel().catch(() => undefined);
-    throw new SourceLookupUnavailableError("source authorization is temporarily fenced");
+    throw new SourceLookupUnavailableError("source authorization is temporarily fenced", "source_fenced");
+  }
+  if (response.status === 503) {
+    let diagnostic: unknown;
+    try {
+      diagnostic = await readBoundedJsonResponse(response, 1024);
+    } catch { /* Only fixed diagnostic codes may cross the authority boundary. */ }
+    if (diagnostic && typeof diagnostic === "object" && "reason" in diagnostic
+      && isSourceLookupFailureReason(diagnostic.reason)) {
+      const status = "http_status" in diagnostic ? diagnostic.http_status : undefined;
+      throw new SourceLookupUnavailableError("source authority lookup failed", diagnostic.reason,
+        typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined);
+    }
+    throw new SourceLookupUnavailableError("source authority unavailable", "authority_unavailable");
   }
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
@@ -369,6 +382,9 @@ export class SourceAuthorityDurableObject {
         default:
           return json({ error: "unknown_op" }, 400);
       }
+    }).catch((error: unknown) => {
+      if (!(error instanceof SourceLookupUnavailableError)) throw error;
+      return json({ error: "source_lookup_unavailable", reason: error.reason, http_status: error.httpStatus }, 503);
     });
   }
 
