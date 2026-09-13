@@ -117,6 +117,7 @@ export function FirstRunSetupFlow({
   const [pickedType, setPickedType] = useState<FirstRunDestinationType | null>(null);
   const [connected, setConnected] = useState<{
     landing: string;
+    signingSecret?: string;
     backfillJobId?: string;
     backfillEstimated: number;
   } | null>(null);
@@ -321,11 +322,21 @@ export function FirstRunSetupFlow({
       >
         {created && pickedType ? (
           connected ? (
-            <BackfillPanel
-              jobId={connected.backfillJobId}
-              estimated={connected.backfillEstimated}
-              onFinish={finish}
-            />
+            <div className="space-y-4">
+              {connected.signingSecret ? (
+                <div className="space-y-2 rounded-md border border-amber-500/50 bg-amber-500/10 p-3">
+                  <p className="text-sm font-medium">Save your destination signing secret</p>
+                  <p className="text-xs text-muted-foreground">Copy this secret into your receiver to verify webhook signatures. It is shown only during this setup.</p>
+                  <SecretRow label="Destination signing secret" value={connected.signingSecret} />
+                  <SigningSecretHint />
+                </div>
+              ) : null}
+              <BackfillPanel
+                jobId={connected.backfillJobId}
+                estimated={connected.backfillEstimated}
+                onFinish={finish}
+              />
+            </div>
           ) : (
             <DestinationForm
               key={pickedType}
@@ -467,6 +478,7 @@ function FirstEventWatcher({
       if (cancelled) return;
       if ("error" in res) {
         setNote(res.error);
+        if ("unavailable" in res && res.unavailable) return;
       } else {
         setNote(null);
         const latest = res.events[0];
@@ -487,10 +499,10 @@ function FirstEventWatcher({
 
   // Elapsed counter, so a long wait doesn't look frozen.
   useEffect(() => {
-    if (settled) return;
+    if (settled || note) return;
     const id = setInterval(() => setWaitedSec((s) => s + 1), 1000);
     return () => clearInterval(id);
-  }, [settled]);
+  }, [settled, note]);
 
   if (settled) {
     return (
@@ -530,18 +542,18 @@ function FirstEventWatcher({
     <div className="space-y-2.5 rounded-md border border-border bg-muted/30 p-4" role="status" aria-live="polite">
       <div className="flex items-center justify-between gap-2">
         <span className="flex items-center gap-2 text-sm font-medium text-foreground">
-          <Radio className="size-4 animate-pulse text-primary" aria-hidden="true" />
-          Waiting for your first event…
+          <Radio className={note ? "size-4 text-muted-foreground" : "size-4 animate-pulse text-primary"} aria-hidden="true" />
+          {note ? "Live event check unavailable" : "Waiting for your first event…"}
         </span>
-        <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">
+        {!note && <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">
           {formatElapsed(waitedSec)}
-        </span>
+        </span>}
       </div>
       {/* Indeterminate progress track — this is a wait with no known end, so
           it signals liveness rather than percentage. */}
-      <div className="h-1 w-full overflow-hidden rounded-full bg-border" aria-hidden="true">
+      {!note && <div className="h-1 w-full overflow-hidden rounded-full bg-border" aria-hidden="true">
         <div className="h-full w-1/3 animate-[firstRunScan_1.8s_ease-in-out_infinite] rounded-full bg-primary" />
-      </div>
+      </div>}
       <style>{`@keyframes firstRunScan{0%{transform:translateX(-100%)}100%{transform:translateX(300%)}}`}</style>
       <p className="text-xs leading-5 text-muted-foreground">
         {note ??
@@ -572,6 +584,7 @@ function DestinationForm({
   type: FirstRunDestinationType;
   onConnected: (result: {
     landing: string;
+    signingSecret?: string;
     backfillJobId?: string;
     backfillEstimated: number;
   }) => void;
@@ -600,6 +613,7 @@ function DestinationForm({
     notified.current = true;
     onConnected({
       landing: submittedTarget.trim() || spec.label,
+      ...(state.data.webhookSigningSecret ? { signingSecret: state.data.webhookSigningSecret } : {}),
       ...(state.data.backfillJobId ? { backfillJobId: state.data.backfillJobId } : {}),
       backfillEstimated: state.data.backfillEstimated ?? 0,
     });

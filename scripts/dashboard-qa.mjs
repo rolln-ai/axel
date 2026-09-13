@@ -10,6 +10,7 @@ import { hashPassword } from "../apps/dashboard/lib/passwords.ts";
 import { origins, qaPortBase } from "../tests/visual/origins.ts";
 import { dashboardFixture, qaPassword, qaProjects } from "../tests/dashboard/fixtures.mjs";
 import { startDashboardQaIngest } from "./test/dashboard-qa-ingest.mjs";
+import { startDashboardQaMailbox } from "./test/dashboard-qa-mailbox.mjs";
 import { connectDisposablePostgres } from "./test/postgres-integration-test-helpers.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -39,6 +40,7 @@ Object.assign(qaEnv, {
   AXEL_INGEST_URL: origins.dashboard,
   RAW_PAYLOAD_BUCKET: "axel-local-qa",
   NEXT_TELEMETRY_DISABLED: "1",
+  CREDENTIALS_MASTER_KEY: randomBytes(32).toString("hex"),
 });
 
 const children = new Set();
@@ -69,6 +71,7 @@ let container;
 let client;
 let server;
 let ingest;
+let mailbox;
 try {
   // Refuse a busy port before building; never test a neighboring worktree's server.
   const probe = createServer();
@@ -90,6 +93,8 @@ try {
   const passwordHash = hashPassword(qaPassword);
   for (const project of qaProjects) {
     const fixture = dashboardFixture(project);
+    await client.query("INSERT INTO users (id,email,name,password_hash,email_verified_at,is_super_admin) VALUES ($1,$2,'QA administrator',$3,now(),true)",
+      [`admin_${fixture.userId}`, `admin-${fixture.email}`, passwordHash]);
     await client.query("INSERT INTO users (id,email,name,password_hash,email_verified_at) VALUES ($1,$2,$3,$4,now())",
       [fixture.userId, fixture.email, "QA Operator", passwordHash]);
     await client.query("INSERT INTO workspaces (id,name,slug) VALUES ($1,$2,$3)",
@@ -136,10 +141,14 @@ try {
   await client.end();
   client = undefined;
 
-  ingest = await startDashboardQaIngest(qaEnv.DATABASE_URL);
+  ingest = await startDashboardQaIngest(qaEnv.DATABASE_URL, qaEnv.CREDENTIALS_MASTER_KEY);
   qaEnv.AXEL_INGEST_URL = ingest.origin;
   qaEnv.INGEST_ADMIN_URL = ingest.origin;
   qaEnv.INGEST_ADMIN_TOKEN = ingest.adminToken;
+  mailbox = await startDashboardQaMailbox();
+  qaEnv.RESEND_BASE_URL = mailbox.origin;
+  qaEnv.RESEND_API_KEY = mailbox.key;
+  qaEnv.RESEND_FROM_EMAIL = "Axel QA <noreply@example.test>";
 
   server = start(process.execPath, ["node_modules/next/dist/bin/next", "start", "-H", "127.0.0.1", "-p", String(qaPortBase + 1)], dashboard);
   const serverClosed = once(server, "close");
@@ -162,6 +171,7 @@ try {
     assert.ok(interrupted || code === 0, "Dashboard QA server failed");
   }
 } finally {
+  await mailbox?.close();
   await ingest?.close();
   if (server && server.exitCode === null && server.signalCode === null) {
     const closed = once(server, "close");

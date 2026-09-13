@@ -327,13 +327,16 @@ export interface RecentIngestEvent {
 export async function getRecentIngestEvents(
   sourceId: string,
   limit = 5,
-): Promise<{ events: RecentIngestEvent[] } | { error: string }> {
+): Promise<{ events: RecentIngestEvent[] } | { error: string; unavailable?: boolean }> {
   return withWorkspaceMutation({ role: "any" }, async ({ workspaceId }) => {
 
     if (typeof sourceId !== "string" || !sourceId) {
       return { error: "Missing source id." };
     }
-    if (!usageEnabled()) return { events: [] };
+    if (!usageEnabled()) return {
+      error: "Live event checks need event analytics. You can still send a test event or continue setup.",
+      unavailable: true,
+    };
 
     try {
       const rows = await listSourceEvents(workspaceId, sourceId, Math.min(Math.max(limit, 1), 20));

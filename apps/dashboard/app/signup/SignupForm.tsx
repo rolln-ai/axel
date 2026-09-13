@@ -11,8 +11,9 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import type { SignupSource } from "../../lib/signup-source";
 
-export function SignupForm({ inviteToken }: { inviteToken?: string | undefined }) {
+export function SignupForm({ inviteToken, source = "unknown" }: { inviteToken?: string | undefined; source?: SignupSource }) {
   const [state, formAction, pending] = useActionState<ActionState, FormData>(signUp, {});
   // Public signups end in the same "check your email" notice whether the
   // address was new or already registered (anti-enumeration). Swap the form
@@ -26,6 +27,7 @@ export function SignupForm({ inviteToken }: { inviteToken?: string | undefined }
   }
   return (
     <form action={formAction} className="space-y-4">
+      <input type="hidden" name="signupSource" value={source} />
       {inviteToken ? <ScrubQueryParameter name="invite" /> : null}
       {state.error ? (
         <Alert variant="destructive">

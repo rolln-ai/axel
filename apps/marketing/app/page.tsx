@@ -113,7 +113,7 @@ export default function Page() {
               Your events land in the databases, warehouses, and services you already use.
             </p>
             <div className="heroActions">
-              <a className="btn" href="https://app.axelapp.ai/signup">
+              <a className="btn" href="https://app.axelapp.ai/signup?ref=website">
                 Start on Axel Cloud <span className="arrow">→</span>
               </a>
               <a className="btn ghost" href={SOURCE_URL}>View source <span className="arrow" aria-hidden="true">↗</span></a>
@@ -175,7 +175,7 @@ export default function Page() {
                 <li>No infrastructure to deploy or maintain</li>
               </ul>
               <div className="heroActions">
-                <a className="btn" href="https://app.axelapp.ai/signup">Create a cloud account <span className="arrow">→</span></a>
+                <a className="btn" href="https://app.axelapp.ai/signup?ref=website">Create a cloud account <span className="arrow">→</span></a>
                 <a className="textLink" href="/pricing">Cloud pricing →</a>
               </div>
             </article>
@@ -405,7 +405,7 @@ export default function Page() {
               to us. Start free, then upgrade as your traffic grows.
             </p>
             <div className="heroActions">
-              <a className="btn" href="https://app.axelapp.ai/signup">
+              <a className="btn" href="https://app.axelapp.ai/signup?ref=website">
                 Start on Axel Cloud <span className="arrow">→</span>
               </a>
               <a className="btn ghost" href={SOURCE_URL}>

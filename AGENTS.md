@@ -49,9 +49,12 @@ and public browser suites require no production services.
 
 The public browser suite checks marketing, authentication, public status, and
 protected-route redirects. The signed-in suite uses real auth, Postgres, and the
-ingest handler with synthetic fixtures. R2 and Queues use in-memory substitutes; it does not exercise
-Cloudflare services or destination delivery. Verify those using the existing
-protected smoke and canary workflows.
+ingest handler with synthetic fixtures. It captures email in a local mailbox and
+runs the router and delivery processor against a local HTTP receiver, including
+a failed attempt and retry. R2, Queues, idempotency, and attempt logs use memory.
+The test connector maps only its synthetic hostname to loopback; production
+network protections are unchanged. Verify Cloudflare and provider infrastructure
+using the existing protected smoke and canary workflows.
 Do not invent an auth bypass or record customer payloads in test artifacts.
 The signed-in runner rejects local Next environment files and does not inherit
 application credentials from the shell. Both browser suites use the same port
