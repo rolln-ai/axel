@@ -3,9 +3,12 @@ import { useActionState } from "react";
 import { updateFlowMonitoringAction } from "../../../../lib/impact-alert-actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { LocalTime } from "../../../_components/LocalTime";
 
-export function FlowMonitoringEditor({ sourceId, enabled, minutes, canMutate }: {
+export function FlowMonitoringEditor({ sourceId, enabled, minutes, canMutate, learningUntil }: {
   sourceId: string; enabled: boolean; minutes: number | null; canMutate: boolean;
+  /** ISO time before which automatic alerts cannot start, or null once learning is over. */
+  learningUntil?: string | null;
 }) {
   const [state, action, pending] = useActionState(updateFlowMonitoringAction, {});
   return <form action={action} className="space-y-3 border-t border-border pt-5">
@@ -19,7 +22,8 @@ export function FlowMonitoringEditor({ sourceId, enabled, minutes, canMutate }: 
       <span>Maximum expected gap in minutes</span>
       <Input name="alert_after_minutes" type="number" min={15} max={10080} step={1} defaultValue={minutes ?? ""} placeholder="Automatic" disabled={!canMutate} className="max-w-xs" />
     </label>
-    <p className="max-w-2xl text-xs text-muted-foreground">Automatic monitoring starts after 20 events and checks recent cadence plus recurring quiet periods in up to 30 days of history. It needs at least three comparable quiet periods to extend the window. An explicit gap overrides this history. Checks run every 15 minutes. Test events do not count.</p>
+    {learningUntil ? <p role="status" className="max-w-2xl text-xs text-muted-foreground">Learning this source&apos;s pattern. Automatic alerts start after its first week of traffic, on <LocalTime value={learningUntil} mode="date" /> at the earliest. Set a maximum gap to alert sooner.</p> : null}
+    <p className="max-w-2xl text-xs text-muted-foreground">Automatic monitoring starts after a source&apos;s first week of traffic. Its window is the longest quiet period in the last 30 days plus a 25% margin, and never shorter than the recent cadence or a recurring quiet period at the same time of day. A maximum gap set here alerts from the start and overrides this history. Checks run every 15 minutes. Test events do not count.</p>
     {state.error ? <p role="alert" className="text-sm text-destructive">{state.error}</p> : null}
     {state.notice ? <p role="status" className="text-sm">{state.notice}</p> : null}
     {canMutate ? <Button type="submit" size="sm" disabled={pending}>{pending ? "Saving…" : "Save monitoring"}</Button> : null}

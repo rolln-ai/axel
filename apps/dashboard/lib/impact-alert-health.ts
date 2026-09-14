@@ -60,6 +60,13 @@ export async function loadImpactObservations(workspaceId: string): Promise<Impac
       }
       silence.snapshot.lastDelivered = successful.length ? new Date(Math.max(...successful)).toISOString() : null;
       observations.push(silence);
+    } else if (priorSilence && (timestamp(flow?.last_received ?? null) ?? 0) > (timestamp(priorSilence.opened_at) ?? now)) {
+      // No automatic window applies right now, for example inside the learning
+      // window, but traffic accepted since the incident opened proves recovery.
+      // Without new traffic the incident stays open until it can be judged again.
+      observations.push({ key: priorSilence.incident_key, kind: "source_silent", unhealthy: false,
+        snapshot: { ...priorSilence.snapshot, lastReceived: flow?.last_received ?? priorSilence.snapshot.lastReceived,
+          lastDelivered: successful.length ? new Date(Math.max(...successful)).toISOString() : priorSilence.snapshot.lastDelivered } });
     }
     for (const route of routes.filter(r => r.source_id === source.id)) {
       const outcome = delivery.find(d => d.route_id === route.id && d.destination_id === route.destination_id);

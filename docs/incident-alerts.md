@@ -6,27 +6,38 @@ Configure ClickHouse, Postgres and Resend for monitoring and email delivery.
 The Inbox shows when a check is unavailable or stale; an unavailable check never
 resolves an incident. The cron also reports failure to its Sentry monitor.
 
-Automatic monitoring starts with three times the 95th-percentile gap in the
-latest 2,000 accepted events, with a 30-minute minimum and seven-day maximum.
-It also checks all retained receipt history from the last 30 days, keeping the
-first and last receipt in each occupied 15-minute bucket. Busy bursts cannot
-push normal nights or weekends out of this history.
+Automatic monitoring waits for a source's first week of accepted traffic. During
+this learning window it raises no "stopped receiving data" alert, and Source
+Settings shows the earliest date the window can end. An explicit maximum
+expected gap in Source Settings alerts from the first check and skips the
+window, including time to first event.
 
-After at least seven days of history, the monitor compares completed quiet
-periods around the last receipt's UTC clock time, allowing 30 minutes of schedule
-jitter. Weekdays are compared with weekdays, weekends with weekends. Gaps over
-24 hours require matching weekdays from prior weeks. At least three independent
-quiet periods on different dates must support a longer window; one long outage
-cannot establish a pattern. The third-longest comparable allowance plus 25%
-grace can extend the recent-cadence window, up to seven days. Alert emails say
-when this historical pattern extended the window. The current unfinished gap
-never trains the baseline. An open incident keeps its original window and
-requires new accepted traffic before recovery.
+After the window, the monitor allows the longest completed quiet period in the
+source's retained 30-day receipt history plus 25% grace. One long quiet period
+is enough: a source that has already gone silent for two days is expected to do
+so again, so an alert lands a little after the longest gap the source has
+survived. Retained history keeps the first and last receipt in each occupied
+15-minute bucket, so busy bursts cannot push normal nights or weekends out of
+it. The current unfinished gap never trains the baseline. An outage during the
+learning window sets a wide default; tighten it with an explicit gap.
 
-Automatic monitoring needs 20 accepted events. An explicit maximum expected gap
-in Source Settings takes precedence over both learned baselines, including for
-new or infrequent feeds. Test events do not establish traffic health. History
-describes receipt patterns; it cannot prove that a sender had nothing to send.
+Two other measures can raise the window, never lower it. Recent cadence is
+three times the 95th-percentile gap in the latest 2,000 accepted events, with
+a 30-minute minimum. Recurring quiet periods are compared around the last
+receipt's UTC clock time, allowing 30 minutes of schedule jitter. Weekdays are
+compared with weekdays, weekends with weekends, and gaps over 24 hours require
+matching weekdays from prior weeks. At least three independent quiet periods
+on different dates must support a recurring allowance, which takes the
+third-longest comparable allowance plus 25% grace. Every automatic window is
+capped at seven days. Alert emails say which measure set the window.
+
+An open incident keeps its original window and requires new accepted traffic
+before recovery. An incident opened before a learning window applied recovers
+once the source accepts traffic again.
+
+Automatic monitoring needs 20 accepted events. Test events do not establish
+traffic health. History describes receipt patterns; it cannot prove that a
+sender had nothing to send.
 
 Recent unresolved dead letters, destination pauses and retries older than 30 minutes
 open delivery incidents. First detection looks for failures from the last seven days

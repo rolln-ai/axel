@@ -44,6 +44,27 @@ describe("history in the live impact monitor", () => {
     expect(observation.snapshot.thresholdMinutes).toBe(30);
   });
 
+  it("recovers an incident on a source in its learning window once new traffic is accepted", async () => {
+    pgQuery.mockResolvedValueOnce({ rows: [{ incident_key: `source:${source.id}`, opened_at: new Date(last - 3_600_000).toISOString(),
+      snapshot: { sourceId: source.id, sourceName: source.name, lastReceived: null, thresholdMinutes: 30, failedCount: 0, waitingCount: 0 } }] });
+    const implementation = chQuery.getMockImplementation()!;
+    chQuery.mockImplementation((sql, params) => sql === FLOW_HISTORY_SQL
+      ? Promise.resolve({ rows: [{ source_id: source.id, buckets: buckets.slice(0, 3) }] }) : implementation(sql, params));
+    const observation = (await loadImpactObservations("ws_a"))[0]!;
+    expect(observation.key).toBe(`source:${source.id}`);
+    expect(observation.unhealthy).toBe(false);
+    expect(observation.snapshot.lastReceived).toBe(flow.last_received);
+  });
+
+  it("leaves an incident open, with no healthy check, while a learning source has accepted nothing new", async () => {
+    pgQuery.mockResolvedValueOnce({ rows: [{ incident_key: `source:${source.id}`, opened_at: new Date(last + 31 * 60_000).toISOString(),
+      snapshot: { sourceId: source.id, sourceName: source.name, lastReceived: flow.last_received, thresholdMinutes: 30, failedCount: 0, waitingCount: 0 } }] });
+    const implementation = chQuery.getMockImplementation()!;
+    chQuery.mockImplementation((sql, params) => sql === FLOW_HISTORY_SQL
+      ? Promise.resolve({ rows: [{ source_id: source.id, buckets: buckets.slice(0, 3) }] }) : implementation(sql, params));
+    expect(await loadImpactObservations("ws_a")).toEqual([]);
+  });
+
   it("keeps history lookup failures unavailable instead of reporting a healthy source", async () => {
     pgQuery.mockResolvedValueOnce({ rows: [] });
     const implementation = chQuery.getMockImplementation()!;
