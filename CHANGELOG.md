@@ -8,6 +8,10 @@ and deployment contracts mature toward 1.0.
 
 The first public release has not been tagged. These features are available on `main`.
 
+- Automatic "stopped receiving data" alerts now wait for a source's first week
+  of traffic, then allow the longest quiet period seen in its retained history
+  plus a 25% margin. An explicit maximum gap still alerts from the start.
+
 - License Axel under Apache License 2.0, including its explicit patent grant.
 - Ingest webhooks, store raw payloads durably, and route events with declarative
   filters and transforms.
