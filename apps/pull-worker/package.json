@@ -16,14 +16,14 @@
     "@axel/pull-connectors": "workspace:*",
     "@axel/shared": "workspace:*",
     "@google-cloud/bigquery": "^8.3.1",
-    "mongodb": "^7.2.0",
-    "pg": "^8.21.0",
-    "tsx": "^4.22.4",
+    "mongodb": "^7.6.0",
+    "pg": "^8.23.0",
+    "tsx": "^4.23.13",
     "undici": "7.29.0"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",
-    "@types/pg": "^8.20.0",
+    "@types/pg": "^8.23.1",
     "typescript": "^6.0.3",
     "vitest": "^5.0.0"
   }
