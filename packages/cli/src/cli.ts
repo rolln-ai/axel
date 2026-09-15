@@ -26,7 +26,7 @@ export async function run(argv: string[]): Promise<void> {
       return;
     case "--version":
     case "-v":
-      console.log("@axel/cli 0.1.1");
+      console.log("@axel/cli 0.1.2");
       return;
     case "auth": {
       const [sub, ...subRest] = rest;

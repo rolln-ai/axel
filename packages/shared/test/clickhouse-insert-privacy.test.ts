@@ -41,8 +41,9 @@ describe("ClickHouse insert diagnostics", () => {
       [{ response: secret }],
     );
 
+    expect(error).toHaveBeenCalledTimes(1);
     expect(error).toHaveBeenCalledWith(
-      "[clickhouse] delivery_attempts insert transport failed",
+      "[clickhouse] delivery_attempts insert transport failed after 3 attempts",
     );
     expect(JSON.stringify(error.mock.calls)).not.toContain(secret);
   });

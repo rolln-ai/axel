@@ -45,9 +45,12 @@ so deployment does not re-email months of historical failures. Once open, an inc
 continues to track all unresolved failures for that route and destination.
 
 Unconditional declarative routes also check for accepted
-events with no delivery attempt in the last seven days. Filtered or transformed
-routes use actual failures and retries, because a missing delivery may be an
-intentional filter result. This monitor is not proof of complete historical delivery.
+events with no delivery attempt in the last seven days. Attempt records are
+written on a best-effort basis, so an event whose delivery claim settled as
+completed in Postgres is not counted; a lost analytics row is not a missing
+delivery. Filtered or transformed routes use actual failures and retries,
+because a missing delivery may be an intentional filter result. This monitor
+is not proof of complete historical delivery.
 
 Incident email is on by default for workspace members. One opening notice is
 followed by reminders at most every six hours. Owners and admins can acknowledge
