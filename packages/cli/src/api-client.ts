@@ -65,7 +65,7 @@ export function makeClient(config: CliConfig): ApiClient {
         "content-type": "application/json",
         accept: "application/json",
         authorization: `Bearer ${config.token}`,
-        "user-agent": "axel-cli/0.1.1",
+        "user-agent": "axel-cli/0.1.2",
       },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });

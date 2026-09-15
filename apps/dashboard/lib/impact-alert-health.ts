@@ -1,7 +1,7 @@
 import "server-only";
 import { db } from "./db";
 import { clickhouse } from "./clickhouse";
-import { DEAD_LETTER_COUNTS_SQL, DELIVERY_ACTIVITY_SQL, FLOW_ACTIVITY_SQL, FLOW_HISTORY_SQL, UNATTEMPTED_SQL } from "./impact-alert-queries";
+import { COMPLETED_DELIVERIES_SQL, DEAD_LETTER_COUNTS_SQL, DELIVERY_ACTIVITY_SQL, FLOW_ACTIVITY_SQL, FLOW_HISTORY_SQL, UNATTEMPTED_SQL } from "./impact-alert-queries";
 import { sourceSilenceObservation, timestamp, type FlowActivity, type FlowSource, type ImpactObservation, type ImpactSnapshot } from "./impact-alert-policy";
 import type { FlowHistoryBucket } from "./source-gap-history";
 
@@ -74,11 +74,22 @@ export async function loadImpactObservations(workspaceId: string): Promise<Impac
         .reduce((n, f) => n + Number(f.count), 0);
       let waitingCount = Number(outcome?.waiting_count ?? 0);
       if (route.unconditional) {
-        const missing = await ch.query<{waiting_count: number}>(UNATTEMPTED_SQL, {
+        const missing = await ch.query<{waiting_count: number; event_ids: string[] | null}>(UNATTEMPTED_SQL, {
           workspace_id: workspaceId, source_id: source.id, route_id: route.id,
           destination_id: route.destination_id, route_created: route.created_at,
         });
-        waitingCount += Number(missing.rows[0]?.waiting_count ?? 0);
+        let unattempted = Number(missing.rows[0]?.waiting_count ?? 0);
+        const candidates = missing.rows[0]?.event_ids ?? [];
+        // Attempt logging is best effort. A delivery whose claim settled as
+        // completed reached the destination even if its analytics row was lost.
+        // Ids beyond the retained array stay counted, so the check only ever
+        // removes confirmed deliveries.
+        if (unattempted > 0 && candidates.length > 0) {
+          const settled = await client.query<{count: string}>(COMPLETED_DELIVERIES_SQL,
+            [workspaceId, route.id, route.destination_id, candidates]);
+          unattempted = Math.max(0, unattempted - Number(settled.rows[0]?.count ?? 0));
+        }
+        waitingCount += unattempted;
       }
       const lastDelivered = timestamp(outcome?.last_delivered ?? null);
       const key = `delivery:${route.id}:${route.destination_id}`;

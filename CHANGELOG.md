@@ -8,6 +8,12 @@ and deployment contracts mature toward 1.0.
 
 The first public release has not been tagged. These features are available on `main`.
 
+- Analytics rows for accepted events and delivery attempts now retry a
+  transient ClickHouse failure twice before giving up, so a brief connection
+  error no longer leaves a delivered event without a delivery record.
+- Delivery incident monitoring confirms a missing delivery record against the
+  settled delivery claim in Postgres before counting it, so a lost analytics
+  row no longer opens a "deliveries need attention" incident.
 - Automatic "stopped receiving data" alerts now wait for a source's first week
   of traffic, then allow the longest quiet period seen in its retained history
   plus a 25% margin. An explicit maximum gap still alerts from the start.
