@@ -11,6 +11,7 @@ export interface PipelineIncident {
   id: string; workspace_id: string; kind: ImpactKind; snapshot: ImpactSnapshot;
   opened_at: string; observed_at: string; healthy_since: string | null;
   acknowledged_until: string | null; next_reminder_at: string; sequence: number;
+  fix_requested_at: string | null;
 }
 
 export function renderImpactEmail(workspace: string, workspaceId: string, kind: ImpactKind, snapshot: ImpactSnapshot, phase: ImpactPhase): Omit<SendArgs, "to"> {
@@ -55,7 +56,7 @@ export async function recordImpactObservations(client: Queryable, workspaceId: s
   for (const observation of observations) {
     const existing = (await client.query<PipelineIncident>(
       `SELECT id, workspace_id, kind, snapshot, opened_at::text, observed_at::text, healthy_since::text,
-              acknowledged_until::text, next_reminder_at::text, sequence
+              acknowledged_until::text, next_reminder_at::text, sequence, fix_requested_at::text
          FROM pipeline_incidents WHERE workspace_id = $1 AND incident_key = $2 AND resolved_at IS NULL FOR UPDATE`,
       [workspaceId, observation.key])).rows[0];
     if (existing && Date.parse(existing.observed_at) >= observedAt.getTime()) continue;
