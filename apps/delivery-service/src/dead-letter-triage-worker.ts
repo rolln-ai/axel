@@ -295,7 +295,14 @@ export function startDeadLetterTriageWorker(deps: DeadLetterTriageWorkerDeps): R
         intervalMs,
         runOnStart: true,
         run: async () => {
-          const s = await runDeadLetterTriageOnce(deps);
+          let s: TriageTickSummary;
+          try {
+            s = await runDeadLetterTriageOnce(deps);
+          } catch (err) {
+            // The runner counts the failure but logs nothing; say what broke.
+            console.error(`[triage] tick failed: ${err instanceof Error ? err.message : String(err)}`);
+            throw err;
+          }
           if (s.jev_error) {
             console.warn(`[triage] jev failed, will retry next tick: ${s.jev_error}`);
           }
