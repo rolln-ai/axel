@@ -10,7 +10,7 @@ const snapshot = (over: Partial<ImpactSnapshot> = {}): ImpactSnapshot => ({
 const group = (over: Partial<InboxGroup> = {}): InboxGroup => ({
   fingerprint: "fp", count: 3, resolved_24h: 0, first_seen: "", last_seen: "", last_resolved_at: null, exemplar_id: "1",
   reason: "delivery_dead", message_excerpt: "", source_id: "src_a", destination_id: "dst_a", route_id: "rt_a",
-  muted_until: null, muted_reason: null, ...over,
+  muted_until: null, muted_reason: null, triage_reason: null, triage_confidence: null, auto_replayed: 0, ...over,
 });
 
 describe("incident fix matching", () => {

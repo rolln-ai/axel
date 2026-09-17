@@ -1847,3 +1847,13 @@ CREATE INDEX IF NOT EXISTS alert_email_outbox_pending_idx
   ON alert_email_outbox(next_attempt_at) WHERE state IN ('pending','sending');
 
 ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS impact_monitor_checked_at timestamptz;
+
+-- Migration 0078: Jev dead-letter triage (typed reason + auto-replay marker).
+ALTER TABLE dead_letters
+  ADD COLUMN IF NOT EXISTS triage_reason text,
+  ADD COLUMN IF NOT EXISTS triage_confidence double precision,
+  ADD COLUMN IF NOT EXISTS triaged_at timestamptz,
+  ADD COLUMN IF NOT EXISTS auto_replay_id text;
+CREATE INDEX IF NOT EXISTS dead_letters_untriaged_idx
+  ON dead_letters (errored_at DESC)
+  WHERE resolved_at IS NULL AND triaged_at IS NULL;
