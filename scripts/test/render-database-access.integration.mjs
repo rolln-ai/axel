@@ -96,6 +96,11 @@ test("Render owner provisions and verifies real service access without provider 
       const sha = createHash("sha256").update(readFileSync(new URL(filename, migrations))).digest("hex");
       await owner.query("INSERT INTO schema_migrations(filename,sha256) VALUES($1,$2)", [filename, sha]);
     }
+    // An install that predates the triage grant (0079 absent from the ledger):
+    // runtime verification stays strict, owner preflight tolerates the gap.
+    await owner.query("REVOKE UPDATE ON dead_letters FROM axel_delivery_workers; REVOKE SELECT ON dead_letter_mutes FROM axel_delivery_workers");
+    await assert.rejects(verifyDatabaseServiceRole(runtime["delivery-workers"], { ...options, profile: "delivery-workers", expectedConnectionRole: options.registry["delivery-workers"].loginRole }), /direct_acl_mismatch/);
+    await verifyRenderMigration(owner, options);
     // Exercise a real 0075 -> 0076 upgrade, not a new database whose schema
     // snapshot already contains the future tables and grants.
     await owner.query(`DROP TABLE alert_email_outbox, pipeline_incidents;
@@ -115,6 +120,13 @@ test("Render owner provisions and verifies real service access without provider 
     }
     assert.equal((await owner.query("SELECT count(*)::integer n FROM schema_migrations WHERE filename = '0076_impact_alerts.sql'")).rows[0].n, 1);
     await verifyDatabaseServiceRole(runtime.dashboard, { ...options, profile: "dashboard", expectedConnectionRole: options.registry.dashboard.loginRole });
+    await verifyRenderMigration(owner, options);
+    // The sync file restored the triage grants, and the marker now makes them mandatory.
+    assert.equal((await owner.query("SELECT count(*)::integer n FROM schema_migrations WHERE filename = '0079_dead_letter_triage_grants.sql'")).rows[0].n, 1);
+    await verifyDatabaseServiceRole(runtime["delivery-workers"], { ...options, profile: "delivery-workers", expectedConnectionRole: options.registry["delivery-workers"].loginRole });
+    await owner.query("REVOKE UPDATE ON dead_letters FROM axel_delivery_workers");
+    await assert.rejects(verifyRenderMigration(owner, options), /direct_acl_mismatch/);
+    await owner.query("GRANT UPDATE ON dead_letters TO axel_delivery_workers");
     await verifyRenderMigration(owner, options);
   } finally {
     await Promise.all(clients.map((client) => client.end().catch(() => {})));

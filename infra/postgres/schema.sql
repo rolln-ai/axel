@@ -1857,3 +1857,6 @@ ALTER TABLE dead_letters
 CREATE INDEX IF NOT EXISTS dead_letters_untriaged_idx
   ON dead_letters (errored_at DESC)
   WHERE resolved_at IS NULL AND triaged_at IS NULL;
+-- Migration 0079: marker for the dead-letter triage capability grant.
+COMMENT ON COLUMN public.dead_letters.triage_reason IS
+  'Jev typed failure reason. Workers grant: scripts/sync-dead-letter-triage-access.sql';
