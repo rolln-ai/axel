@@ -56,6 +56,7 @@ import {
   MAX_DELIVERY_CLAIM_LEASE_MS,
   numericEnv as sharedNumericEnv,
   resolveIngestBaseUrl,
+  resolveJevConfig,
   resolveRawPayloadBucket,
   sanitizeConnectorDiagnosticForStorage,
   sanitizeDeliveryAttemptResponseForStorage,
@@ -96,6 +97,7 @@ import {
   startReplayWorker,
 } from "./replay-worker.js";
 import { startBackfillJobWorker } from "./backfill-job-worker.js";
+import { startDeadLetterTriageWorker } from "./dead-letter-triage-worker.js";
 import { startParquetCompactionLoop } from "./parquet-compaction-runner.js";
 import { advanceReplayJobOnTerminal } from "./replay-job-completion.js";
 import { replayRequestIdFromEventId } from "./replay-event-id.js";
@@ -2084,6 +2086,34 @@ if (replayWorkerHandle) {
   console.log(`[boot] replay processor started interval_ms=${replayIntervalMs} batch_size=${replayBatchSize}`);
 }
 
+// Jev dead-letter triage. Labels new unresolved dead letters with a typed
+// reason and queues a replay for confident transient failures. Singleton,
+// worker role only, and off entirely unless TYPESAFE_API_KEY is set.
+const jevConfig = resolveJevConfig(process.env);
+let deadLetterTriageHandle: { stop(): Promise<void> } | null = null;
+if (runWorkers && jevConfig) {
+  const triageIntervalMs = Math.max(numericEnv("DEAD_LETTER_TRIAGE_INTERVAL_MS", 60_000), 10_000);
+  const autoReplay = (process.env.DEAD_LETTER_AUTO_REPLAY ?? "1") !== "0";
+  const minConfidence = Number.parseFloat(process.env.DEAD_LETTER_AUTO_REPLAY_MIN_CONFIDENCE ?? "");
+  deadLetterTriageHandle = startDeadLetterTriageWorker({
+    pool,
+    jev: jevConfig,
+    intervalMs: triageIntervalMs,
+    batchSize: numericEnv("DEAD_LETTER_TRIAGE_BATCH_SIZE", 25),
+    autoReplay,
+    ...(Number.isFinite(minConfidence) && minConfidence > 0 && minConfidence <= 1
+      ? { minConfidence }
+      : {}),
+    replayDelayMs: numericEnv("DEAD_LETTER_AUTO_REPLAY_DELAY_MS", 300_000),
+    maxAutoReplaysPerTick: numericEnv("DEAD_LETTER_AUTO_REPLAY_MAX_PER_TICK", 50),
+  });
+  console.log(
+    `[boot] dead-letter triage started interval_ms=${triageIntervalMs} auto_replay=${autoReplay ? "on" : "off"}`,
+  );
+} else if (runWorkers) {
+  console.warn("[boot] TYPESAFE_API_KEY not set — dead-letter triage disabled");
+}
+
 // AXE-66 v2 — backfill job worker. Drains `backfill_jobs` rows by paginating
 // ClickHouse and feeding `replay_requests` in throttled chunks. Disabled if
 // ClickHouse isn't configured — backfill jobs simply sit in `pending`.
@@ -2169,6 +2199,7 @@ async function shutdown(signal: string): Promise<void> {
   if (parquetPollLoopPromise) drains.push(parquetPollLoopPromise);
   if (replayWorkerHandle) drains.push(replayWorkerHandle.stop());
   if (backfillJobWorkerHandle) drains.push(backfillJobWorkerHandle.stop());
+  if (deadLetterTriageHandle) drains.push(deadLetterTriageHandle.stop());
   if (parquetCompactionHandle) drains.push(parquetCompactionHandle.stop());
   if (deliveryCanaryHandle) drains.push(deliveryCanaryHandle.stop());
   const drainResults = await Promise.allSettled(drains);

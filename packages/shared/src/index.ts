@@ -4,6 +4,8 @@ export * from "./route-fanout.js";
 export * from "./circuit-breaker.js";
 export * from "./signature-verify.js";
 export * from "./provider-inference.js";
+export * from "./provider-inference-jev.js";
+export * from "./dead-letter-triage.js";
 export * from "./ssrf.js";
 export * from "./headers.js";
 export * from "./http-auth.js";
