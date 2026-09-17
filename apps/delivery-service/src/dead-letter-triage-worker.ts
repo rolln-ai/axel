@@ -41,7 +41,7 @@ export interface DeadLetterTriageWorkerDeps {
   jev: JevInferenceConfig;
   /** Tick interval. Default 60s. */
   intervalMs?: number;
-  /** Rows triaged per tick. Default 25. */
+  /** Rows triaged per tick. Default 100 (about 15 s of sequential Jev calls). */
   batchSize?: number;
   /** Queue replays for confident transient failures. Default true. */
   autoReplay?: boolean;
@@ -94,7 +94,7 @@ export async function runDeadLetterTriageOnce(
   deps: DeadLetterTriageWorkerDeps,
 ): Promise<TriageTickSummary> {
   const now = deps.now ?? (() => new Date());
-  const batchSize = Math.max(1, Math.min(deps.batchSize ?? 25, 200));
+  const batchSize = Math.max(1, Math.min(deps.batchSize ?? 100, 200));
   const lookbackMs = deps.lookbackMs ?? 7 * 86_400_000;
   const summary: TriageTickSummary = {
     scanned: 0,

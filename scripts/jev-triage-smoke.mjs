@@ -22,6 +22,8 @@ const cases = [
   ["bigquery type mismatch", { ...base, reason: "destination_rejected", destination_type: "bigquery", message: "Invalid value: could not convert string to INT64 for field total", same_fingerprint_24h: 15 }],
   ["raw payload missing", { ...base, reason: "raw_payload_missing", destination_type: "s3", message: "object not found in R2" }],
   ["403 forbidden on S3", { ...base, reason: "connector_failed", destination_type: "s3", message: "AccessDenied: 403 Forbidden", same_fingerprint_24h: 8 }],
+  ["bigquery slug code, 2355 over a week, no replays", { ...base, reason: "delivery_dead", destination_type: "bigquery", message: "bigquery_schema_mismatch", same_fingerprint_1h: 40, same_fingerprint_24h: 400, age_minutes: 9000 }],
+  ["route transform error", { ...base, reason: "transform_collapse_array_expected_array", destination_type: "postgres", message: "operation_failed" }],
   ["rate limited by webhook", { ...base, reason: "rate_limited", destination_type: "webhook", message: "HTTP 429 Too Many Requests", same_fingerprint_1h: 30 }],
 ];
 

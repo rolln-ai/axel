@@ -43,6 +43,14 @@ describe("buildDeadLetterTriageState", () => {
     expect(buildDeadLetterTriageState({ ...base, message: "AccessDenied: 403 Forbidden" }).http_status).toBe(403);
   });
 
+  it("reads slug-style connector codes as schema signals", () => {
+    const s = buildDeadLetterTriageState({ ...base, reason: "delivery_dead", message: "bigquery_schema_mismatch" });
+    expect(s.signals).toContain("schema_mismatch");
+    const t = buildDeadLetterTriageState({ ...base, reason: "transform_collapse_array_expected_array", message: "operation_failed" });
+    expect(t.failure_reason).toBe("transform_error");
+    expect(buildDeadLetterTriageState({ ...base, reason: "filter_invalid_path" }).failure_reason).toBe("filter_error");
+  });
+
   it("returns no status when none is present", () => {
     expect(buildDeadLetterTriageState({ ...base, message: "ECONNREFUSED 10.0.0.1" }).http_status).toBeNull();
     expect(buildDeadLetterTriageState({ ...base, message: "ECONNREFUSED 10.0.0.1" }).signals).toContain("connection_refused");
@@ -55,6 +63,7 @@ describe("shouldAutoReplay", () => {
     expect(shouldAutoReplay({ reason: "transient", confidence: 0.75 }, "delivery_dead")).toBe(false);
     expect(shouldAutoReplay({ reason: "destination_down", confidence: 0.99 }, "delivery_dead")).toBe(false);
     expect(shouldAutoReplay({ reason: "transient", confidence: 0.99 }, "raw_payload_missing")).toBe(false);
+    expect(shouldAutoReplay({ reason: "transient", confidence: 0.99 }, "transform_collapse_array_expected_array")).toBe(false);
     expect(shouldAutoReplay({ reason: "transient", confidence: 0.6 }, "delivery_dead", 0.5)).toBe(true);
   });
 });
