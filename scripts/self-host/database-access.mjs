@@ -501,7 +501,13 @@ async function adoptAdminOwnedPublicObjects(client) {
      WHERE namespace.nspname = 'public'
        AND owner_role.rolname = $1
        AND relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+     ORDER BY relation.relkind = 'S', relation.relname
   `, [roles.admin]);
+  // Tables first. A serial sequence is linked to its table, and Postgres
+  // refuses to change the sequence's owner on its own ("cannot change owner
+  // of sequence"). Altering the table moves the sequence with it, and the
+  // later sequence ALTER is then a no-op. Catalog scan order is not stable
+  // (an ALTER TABLE rewrites the table's pg_class row), so sort explicitly.
   const objectTypes = {
     r: "TABLE",
     p: "TABLE",
