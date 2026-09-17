@@ -54,7 +54,7 @@ const TRIAGE_CRITERIA: Record<DeadLetterTriageReason, string> = {
   destination_down:
     "The destination is unreachable or failing for every event: DNS failure, connection refused, TLS failure, or repeated 5xx. Many failures share this fingerprint in the last hour and replays have not succeeded. Replaying now would fail again; wait for the destination to recover.",
   schema_mismatch:
-    "The destination accepted the connection but rejected the row: unknown column, wrong type, missing required field, constraint violation, or table not found. A replay fails until the route transform or the destination schema changes.",
+    "The destination rejected the row shape: unknown column, wrong type, missing required field, constraint violation, table not found, or a schema_mismatch signal. Also a route transform or filter error (failure_reason transform_error or filter_error). A replay fails until the route or the destination schema changes, however many times the fingerprint repeats.",
   bad_payload:
     "The event itself cannot be delivered: the raw payload is missing, not JSON, too large, or the spill object is gone. No replay can fix it.",
   auth_or_config:
@@ -142,9 +142,10 @@ const SIGNAL_PATTERNS: ReadonlyArray<[string, RegExp]> = [
   ["circuit_breaker", /\b(breaker|circuit)\b/i],
   ["backpressure", /\b(shed|inflight|in-flight|overloaded|capacity)\b/i],
   ["unauthorized", /\b(unauthori[sz]ed|forbidden|permission denied|access denied|invalid (api )?key|invalid credentials|authentication|not authorized|signature)\b/i],
+  ["schema_mismatch", /\bschema[ _-]?mismatch\b|\b[a-z]+_schema_(?:mismatch|error|invalid)\b|\bincompatible schema\b/i],
   ["not_found_resource", /\b(bucket|database|dataset|table|collection|relation|column|schema)\b[^.]{0,40}\b(not found|does not exist|doesn't exist|unknown)\b/i],
   ["unknown_column", /\b(unknown|no such|undefined) (column|field)\b|\bcolumn\b[^.]{0,60}\bdoes not exist\b/i],
-  ["type_mismatch", /\b(invalid input syntax|type mismatch|cannot cast|could not convert|wrong type|expected [a-z]+ (but|got)|not a valid)\b/i],
+  ["type_mismatch", /\b(invalid input syntax|type[ _-]?mismatch|cannot cast|could not convert|wrong type|expected [a-z]+ (but|got)|not a valid|expected_(?:array|object|string|number))\b/i],
   ["missing_required", /\b(null value|not-null|not null|required (field|property|column)|missing (field|column|required))\b/i],
   ["constraint_violation", /\b(constraint|duplicate key|unique violation|foreign key|check violation)\b/i],
   ["invalid_json", /\b(invalid json|unexpected token|json parse|malformed|not valid json)\b/i],
@@ -202,7 +203,7 @@ export function buildDeadLetterTriageState(input: DeadLetterTriageInput): DeadLe
     if (re.test(message)) signals.push(name);
   }
   return {
-    failure_reason: REASON_ALLOWLIST.has(input.reason) ? input.reason : "other",
+    failure_reason: safeFailureReason(input.reason),
     axel_backpressure: AXEL_BACKPRESSURE_REASONS.has(input.reason),
     destination_type:
       input.destination_type && DESTINATION_TYPE_ALLOWLIST.has(input.destination_type)
@@ -320,7 +321,17 @@ export function shouldAutoReplay(
   if (triage.reason !== "transient") return false;
   if (triage.confidence < minConfidence) return false;
   if (NON_REPLAYABLE_REASONS.has(deadLetterReason)) return false;
+  // A route filter or transform fails the same way on every replay.
+  if (deadLetterReason.startsWith("transform_") || deadLetterReason.startsWith("filter_")) return false;
   return true;
+}
+
+/** Allowlisted slug, or a family token for route-engine reasons, else "other". */
+export function safeFailureReason(reason: string): string {
+  if (REASON_ALLOWLIST.has(reason)) return reason;
+  if (reason.startsWith("transform_")) return "transform_error";
+  if (reason.startsWith("filter_")) return "filter_error";
+  return "other";
 }
 
 function extractHttpStatus(message: string): number | null {

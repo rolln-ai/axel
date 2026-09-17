@@ -2099,7 +2099,7 @@ if (runWorkers && jevConfig) {
     pool,
     jev: jevConfig,
     intervalMs: triageIntervalMs,
-    batchSize: numericEnv("DEAD_LETTER_TRIAGE_BATCH_SIZE", 25),
+    batchSize: numericEnv("DEAD_LETTER_TRIAGE_BATCH_SIZE", 100),
     autoReplay,
     ...(Number.isFinite(minConfidence) && minConfidence > 0 && minConfidence <= 1
       ? { minConfidence }
