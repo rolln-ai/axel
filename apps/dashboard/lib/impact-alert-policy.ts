@@ -159,7 +159,7 @@ export function impactMessage(kind: ImpactKind, snapshot: ImpactSnapshot, phase:
       `Source: ${source}. Destination: ${snapshot.destinationName ? target : "see source routes"}.`,
       `Last accepted event: ${time(snapshot.lastReceived)}. Last successful destination delivery: ${time(snapshot.lastDelivered)}.`,
       `Unresolved failed events: ${snapshot.failedCount}. Events waiting over 30 minutes: ${snapshot.waitingCount}.`,
-      phase === "recovered" ? "Review the incident period for any provider-side backfill still needed." : "This is one incident. Further reminders are limited to every six hours; acknowledgement pauses them for 24 hours.",
+      phase === "recovered" ? "Review the incident period for any provider-side backfill still needed." : "This is one incident. Further reminders arrive at most once every 24 hours; acknowledgement pauses them for 24 hours.",
     ].join("\n\n"),
   };
 }

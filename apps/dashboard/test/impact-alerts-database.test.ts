@@ -71,6 +71,7 @@ describe.skipIf(!integration)("incident transactions and recipient retries on Po
   it("deduplicates concurrent scans, retries only failed recipients, and holds ambiguous sends", async () => {
     await Promise.all([record([observation()]), record([observation()])]);
     expect((await pool.query("SELECT * FROM pipeline_incidents")).rowCount).toBe(1);
+    expect((await pool.query("SELECT * FROM pipeline_incidents WHERE next_reminder_at BETWEEN observed_at + interval '23 hours' AND observed_at + interval '25 hours'")).rowCount).toBe(1);
     expect((await pool.query("SELECT * FROM alert_email_outbox")).rowCount).toBe(2);
     const calls: { args: SendArgs; key?: string }[] = [];
     const first = await drainImpactOutbox(pool, async (args, options) => {
@@ -90,6 +91,8 @@ describe.skipIf(!integration)("incident transactions and recipient retries on Po
 
     await pool.query("UPDATE pipeline_incidents SET next_reminder_at = now() - interval '1 hour', observed_at = now() - interval '1 minute'");
     await record([observation()]);
+    expect((await pool.query("SELECT * FROM alert_email_outbox WHERE phase = 'reminder'")).rowCount).toBe(2);
+    expect((await pool.query("SELECT * FROM pipeline_incidents WHERE next_reminder_at BETWEEN now() + interval '23 hours' AND now() + interval '25 hours'")).rowCount).toBe(1);
     await pool.query("UPDATE alert_email_outbox SET first_attempt_at = now() - interval '25 hours' WHERE state = 'pending'");
     const ambiguous = await drainImpactOutbox(pool, async () => { throw new Error("must not resend expired idempotency keys"); });
     expect(ambiguous.needs_review).toBe(2);
