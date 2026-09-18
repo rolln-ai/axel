@@ -47,8 +47,11 @@ GROUP BY route_id, destination_id`;
 
 // Only unconditional declarative routes qualify. Filtered/transformed routes
 // may intentionally drop events, so their health uses actual failures/retries.
+// The ids let the caller confirm a settled delivery claim in Postgres, because
+// attempt logging is best effort and a lost row is not a missing delivery. The
+// count stays exact even when more ids exist than the array keeps.
 export const UNATTEMPTED_SQL = `
-SELECT count() AS waiting_count FROM (
+SELECT count() AS waiting_count, groupArray(1000)(event_id) AS event_ids FROM (
   SELECT DISTINCT event_id FROM events
   WHERE workspace_id = {workspace_id:String} AND source_id = {source_id:String}
     AND is_test = false AND received_at >= parseDateTimeBestEffort({route_created:String})
@@ -59,6 +62,14 @@ SELECT count() AS waiting_count FROM (
     AND destination_id = {destination_id:String}
 ) d ON e.event_id = d.base_event_id
 WHERE coalesce(d.attempted, 0) = 0`;
+
+// Postgres settles every delivery claim, in both runtimes, before the queue
+// message is acknowledged. A completed claim proves the destination accepted
+// the event even when the analytics row never arrived.
+export const COMPLETED_DELIVERIES_SQL = `
+SELECT count(DISTINCT event_id)::text AS count FROM delivery_idempotency
+ WHERE workspace_id = $1 AND route_id = $2 AND destination_id = $3
+   AND state = 'completed' AND event_id = ANY($4::text[])`;
 
 // A failed replay is another attempt at the same event, not additional lost data.
 // A later confirmed replay of the original supersedes its older failure rows.

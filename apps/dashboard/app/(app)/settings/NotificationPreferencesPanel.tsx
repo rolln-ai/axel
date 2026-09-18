@@ -27,7 +27,7 @@ export function NotificationPreferencesPanel({
       <PreferenceToggle
         name="email_immediate"
         label="Data flow incidents"
-        hint="Alert me when an established source stops receiving data or delivery is blocked. One email per incident, reminders at most every six hours, and a recovery notice. Acknowledge in the Inbox to pause reminders for 24 hours."
+        hint="Alert me when an established source stops receiving data or delivery is blocked. One email per incident, reminders at most once a day, and a recovery notice. Acknowledge in the Inbox to pause reminders for 24 hours."
         defaultChecked={current.email_immediate}
       />
       <PreferenceToggle

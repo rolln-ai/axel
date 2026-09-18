@@ -32,6 +32,13 @@ const TABLE_PRIVILEGES = [
   "TRIGGER",
 ];
 const IMPACT_TABLES = new Set(["pipeline_incidents", "alert_email_outbox"]);
+// Capability grants added to an existing table after the profile shipped.
+// Applied by a reviewed sync file that run-migrations.sh runs after the
+// migrations, so the owner preflight may tolerate their absence until the
+// marker migration named in render-database-access.mjs is in the ledger.
+const PENDING_GRANTS = new Map([
+  ["delivery-workers", new Set(["dead_letters|UPDATE", "dead_letter_mutes|SELECT"])],
+]);
 const SEQUENCE_PRIVILEGES = ["USAGE", "SELECT", "UPDATE"];
 const LEGACY_RUNTIME_PROFILE = Object.freeze({
   tables: Object.freeze(Object.fromEntries(
@@ -185,6 +192,12 @@ export function validateDatabaseServiceRoleOptions(rawOptions) {
     || (pendingTables.length > 0 && (requireIdentity || rawOptions.managedOwnerLogin !== true))) {
     throw fixedError("database_service_pending_tables_invalid");
   }
+  const pendingGrants = rawOptions.pendingGrants ?? [];
+  const allowedPendingGrants = PENDING_GRANTS.get("delivery-workers");
+  if (!Array.isArray(pendingGrants) || pendingGrants.some(entry => !allowedPendingGrants.has(entry))
+    || (pendingGrants.length > 0 && (requireIdentity || rawOptions.managedOwnerLogin !== true))) {
+    throw fixedError("database_service_pending_grants_invalid");
+  }
   const expectedConnectionRole = rawOptions.expectedConnectionRole === undefined
     ? registry[profile].loginRole
     : roleName(rawOptions.expectedConnectionRole, "database_service_connection_role_invalid");
@@ -214,6 +227,7 @@ export function validateDatabaseServiceRoleOptions(rawOptions) {
     expectedConnectionRole,
     managedOwnerLogin: rawOptions.managedOwnerLogin === true,
     pendingTables,
+    pendingGrants,
   };
 }
 
@@ -372,9 +386,12 @@ async function inspectEffectivePrivileges(client, expectedRole, profile, options
        AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
   `, [expectedRole, TABLE_PRIVILEGES]);
   const expectedTablePrivileges = expectedPrivilegeSet(profile.tables);
+  const tolerated = PENDING_GRANTS.has(profileName) ? options.pendingGrants : [];
   for (const row of tableResult.rows) {
-    const expected = expectedTablePrivileges.has(`${row.relname}|${row.privilege}`);
-    if (row.allowed !== expected) {
+    const entry = `${row.relname}|${row.privilege}`;
+    const expected = expectedTablePrivileges.has(entry);
+    // A pending grant may still be absent during owner preflight.
+    if (row.allowed !== expected && !(expected && !row.allowed && tolerated.includes(entry))) {
       throw fixedError("database_service_effective_table_privilege_mismatch");
     }
   }
@@ -808,11 +825,17 @@ async function inspectRawAclInventory(client, options) {
   }
   for (const [capabilityRole, profileName] of capabilityProfiles) {
     const profile = databaseServiceAccessProfile(profileName);
+    const actual = actualByCapability.get(capabilityRole) ?? new Set();
+    // A pending grant is tolerated only while absent; once present it is required.
+    const tolerated = PENDING_GRANTS.has(profileName) ? options.pendingGrants : [];
     const expected = new Set([
-      ...[...expectedPrivilegeSet(profile.tables)].filter(entry => !options.pendingTables.includes(entry.split("|")[0])).map((entry) => `table|${entry}`),
+      ...[...expectedPrivilegeSet(profile.tables)]
+        .filter(entry => !options.pendingTables.includes(entry.split("|")[0]))
+        .filter(entry => !(tolerated.includes(entry) && !actual.has(`table|${entry}`)))
+        .map((entry) => `table|${entry}`),
       ...[...expectedPrivilegeSet(profile.sequences)].map((entry) => `sequence|${entry}`),
     ]);
-    if (!sameSet(actualByCapability.get(capabilityRole) ?? new Set(), expected)) {
+    if (!sameSet(actual, expected)) {
       throw fixedError("database_service_direct_acl_mismatch");
     }
   }

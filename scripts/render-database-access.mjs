@@ -61,7 +61,15 @@ export async function verifyRenderMigration(client, options) {
   const pending = await client.query(`SELECT name FROM unnest(ARRAY['pipeline_incidents','alert_email_outbox']) name
     WHERE to_regclass('public.' || name) IS NULL
       AND NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE filename = '0076_impact_alerts.sql')`);
-  await verifyDatabaseServiceRole(client, { ...options, requireIdentity: false, pendingTables: pending.rows.map(row => row.name) });
+  // Likewise, grants a reviewed sync file adds after the migrations may be
+  // absent only until the marker migration is in the ledger.
+  const pendingGrants = await client.query(`SELECT name FROM unnest(ARRAY['dead_letters|UPDATE','dead_letter_mutes|SELECT']) name
+    WHERE NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE filename = '0079_dead_letter_triage_grants.sql')`);
+  await verifyDatabaseServiceRole(client, {
+    ...options, requireIdentity: false,
+    pendingTables: pending.rows.map(row => row.name),
+    pendingGrants: pendingGrants.rows.map(row => row.name),
+  });
 }
 
 async function main() {

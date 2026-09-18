@@ -1,6 +1,6 @@
 {
   "name": "@axel/cli",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "license": "Apache-2.0",
   "description": "Axel CLI — talk to your webhook pipeline from the terminal.",
   "private": true,

@@ -158,6 +158,8 @@ test("delivery rollup preserves outcomes before background merges", { timeout: 1
     assert.equal(Number(delivery.schema_failures), 1);
     const missing = (await query(UNATTEMPTED_SQL, {workspace_id: "ws_monitor", source_id: "src_monitor", route_id: "route_monitor", destination_id: "dst_monitor", route_created: received(300)})).data[0];
     assert.equal(Number(missing.waiting_count), 23);
+    assert.equal(missing.event_ids.length, 23, "candidate ids let the monitor confirm settled deliveries in Postgres");
+    for (const attempted of ["event_0", "event_1", "test", "other"]) assert.ok(!missing.event_ids.includes(attempted), attempted);
   });
   await t.test("flow history preserves recurring nights beyond the latest 2000 events and isolates tenants and test traffic", async () => {
     // 25 days of daily bursts, with the newest 3,000 receipts all in one hour.

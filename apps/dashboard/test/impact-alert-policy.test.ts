@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sourceSilenceObservation, incidentTransition, timestamp, type FlowSource } from "../lib/impact-alert-policy";
+import { sourceSilenceObservation, incidentTransition, learningWindowEnd, timestamp, type FlowSource } from "../lib/impact-alert-policy";
 import { renderImpactEmail } from "../lib/impact-alerts";
 import { optedInToImmediate } from "../lib/notification-alerts";
 
@@ -21,6 +21,11 @@ describe("impact policy", () => {
     expect(sourceSilenceObservation({ ...source, flow_monitoring_enabled: false }, activity, now)).toBeNull();
     expect(sourceSilenceObservation({ ...source, alert_after_minutes: 60 }, undefined, now)?.unhealthy).toBe(true);
   });
+  it("reports when automatic monitoring can begin for a new source", () => {
+    expect(learningWindowEnd(source, now)).toBe(Date.parse("2030-01-20T14:00:00Z"));
+    expect(learningWindowEnd({ ...source, alert_after_minutes: 60 }, now)).toBeNull();
+    expect(learningWindowEnd({ ...source, created_at: "2030-01-01" }, now)).toBeNull();
+  });
   it("respects scheduled cadence and explicit thresholds", () => {
     expect(sourceSilenceObservation(source, { ...activity, typical_gap_seconds: 86400 }, now)?.unhealthy).toBe(false);
     expect(sourceSilenceObservation({ ...source, alert_after_minutes: 60 }, activity, now)?.snapshot.thresholdMinutes).toBe(60);
@@ -31,6 +36,10 @@ describe("impact policy", () => {
     expect(incidentTransition({ ...state, acknowledged_until: null }, true, now)).toBe("remind");
     expect(incidentTransition(state, false, now)).toBe("healthy");
     expect(incidentTransition({ ...state, healthy_since: "2030-01-14 13:44:00+00" }, false, now)).toBe("recover");
+    // An operator-requested fix closes on the first healthy check, but a
+    // still-unhealthy incident keeps reminding.
+    expect(incidentTransition({ ...state, acknowledged_until: null, fix_requested_at: "2030-01-14 13:50:00+00" }, false, now)).toBe("recover");
+    expect(incidentTransition({ ...state, acknowledged_until: null, fix_requested_at: "2030-01-14 13:50:00+00" }, true, now)).toBe("remind");
     expect(timestamp("2030-01-14 14:00:00+00")).toBe(now);
     expect(timestamp("1970-01-01 00:00:00")).toBeNull();
   });
@@ -42,6 +51,9 @@ describe("impact policy", () => {
     expect(email.text).toContain("2030-01-14 12:00:00 UTC");
     expect(email.text).toContain("/workspaces/ws_test/inbox");
     expect(email.text).not.toContain("operation_failed");
+    const reminder = renderImpactEmail("Example", "ws_test", "source_silent", snapshot, "reminder");
+    expect(reminder.subject).toBe("[Example] Still unresolved: Orders stopped receiving data");
+    expect(reminder.text).toContain("at most once every 24 hours");
     const hostile = renderImpactEmail("Workspace\r\nBcc: injected", "ws_test", "source_silent", { ...snapshot, sourceName: "<script>alert(1)</script>" }, "opened");
     expect(hostile.subject).not.toMatch(/[\r\n]/);
     expect(hostile.html).not.toContain("<script>");
