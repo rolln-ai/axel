@@ -1812,8 +1812,9 @@ CREATE TABLE IF NOT EXISTS pipeline_incidents (
   healthy_since timestamptz,
   resolved_at timestamptz,
   acknowledged_until timestamptz,
-  next_reminder_at timestamptz NOT NULL DEFAULT now() + interval '6 hours',
+  next_reminder_at timestamptz NOT NULL DEFAULT now() + interval '24 hours',
   sequence integer NOT NULL DEFAULT 0,
+  fix_requested_at timestamptz,
   UNIQUE (workspace_id, id)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS pipeline_incidents_open_idx
@@ -1846,3 +1847,16 @@ CREATE INDEX IF NOT EXISTS alert_email_outbox_pending_idx
   ON alert_email_outbox(next_attempt_at) WHERE state IN ('pending','sending');
 
 ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS impact_monitor_checked_at timestamptz;
+
+-- Migration 0078: Jev dead-letter triage (typed reason + auto-replay marker).
+ALTER TABLE dead_letters
+  ADD COLUMN IF NOT EXISTS triage_reason text,
+  ADD COLUMN IF NOT EXISTS triage_confidence double precision,
+  ADD COLUMN IF NOT EXISTS triaged_at timestamptz,
+  ADD COLUMN IF NOT EXISTS auto_replay_id text;
+CREATE INDEX IF NOT EXISTS dead_letters_untriaged_idx
+  ON dead_letters (errored_at DESC)
+  WHERE resolved_at IS NULL AND triaged_at IS NULL;
+-- Migration 0079: marker for the dead-letter triage capability grant.
+COMMENT ON COLUMN public.dead_letters.triage_reason IS
+  'Jev typed failure reason. Workers grant: scripts/sync-dead-letter-triage-access.sql';
