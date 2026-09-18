@@ -293,6 +293,8 @@ const PROFILES = {
         "replay_jobs",
         "backfill_jobs",
         "dead_letters",
+        // Dead-letter triage respects operator mutes before auto-replaying.
+        "dead_letter_mutes",
         "audit_log",
         "delivery_idempotency",
         "user_sessions",
@@ -316,6 +318,8 @@ const PROFILES = {
         "routes",
         "component_heartbeats",
         "component_heartbeat_history",
+        // Dead-letter triage stamps triage_* and auto_replay_id (migration 0078).
+        "dead_letters",
       ],
       delete: [
         "dead_letters",

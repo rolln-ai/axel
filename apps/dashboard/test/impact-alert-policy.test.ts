@@ -36,6 +36,10 @@ describe("impact policy", () => {
     expect(incidentTransition({ ...state, acknowledged_until: null }, true, now)).toBe("remind");
     expect(incidentTransition(state, false, now)).toBe("healthy");
     expect(incidentTransition({ ...state, healthy_since: "2030-01-14 13:44:00+00" }, false, now)).toBe("recover");
+    // An operator-requested fix closes on the first healthy check, but a
+    // still-unhealthy incident keeps reminding.
+    expect(incidentTransition({ ...state, acknowledged_until: null, fix_requested_at: "2030-01-14 13:50:00+00" }, false, now)).toBe("recover");
+    expect(incidentTransition({ ...state, acknowledged_until: null, fix_requested_at: "2030-01-14 13:50:00+00" }, true, now)).toBe("remind");
     expect(timestamp("2030-01-14 14:00:00+00")).toBe(now);
     expect(timestamp("1970-01-01 00:00:00")).toBeNull();
   });
@@ -47,6 +51,9 @@ describe("impact policy", () => {
     expect(email.text).toContain("2030-01-14 12:00:00 UTC");
     expect(email.text).toContain("/workspaces/ws_test/inbox");
     expect(email.text).not.toContain("operation_failed");
+    const reminder = renderImpactEmail("Example", "ws_test", "source_silent", snapshot, "reminder");
+    expect(reminder.subject).toBe("[Example] Still unresolved: Orders stopped receiving data");
+    expect(reminder.text).toContain("at most once every 24 hours");
     const hostile = renderImpactEmail("Workspace\r\nBcc: injected", "ws_test", "source_silent", { ...snapshot, sourceName: "<script>alert(1)</script>" }, "opened");
     expect(hostile.subject).not.toMatch(/[\r\n]/);
     expect(hostile.html).not.toContain("<script>");
