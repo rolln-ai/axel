@@ -137,10 +137,10 @@ so its migrations, Workers, and container configuration match the images:
 
 ```sh
 git fetch --tags
-git checkout v0.1.0
+git checkout v0.1.2
 ```
 
-Set `AXEL_IMAGE_TAG=0.1.0` in `.env.selfhost`, using the version you checked out,
+Set `AXEL_IMAGE_TAG=0.1.2` in `.env.selfhost`, using the version you checked out,
 then run `edge` and `up` as above. `up` pulls the dashboard, delivery, and migration
 images from `ghcr.io/rolln-ai` and starts them without a local Docker build.
 The dashboard reads your public URLs at startup. Changing a hostname does not
@@ -149,6 +149,9 @@ require rebuilding the image. Cloudflare Workers still deploy from the checkout.
 Each release attaches `self-host-images.json` with the commit and image digests.
 Images include build provenance and an SBOM. An unset `AXEL_IMAGE_TAG` keeps the
 local build path, including when testing an unreleased checkout.
+
+For an existing installation, see the [v0.1.2 upgrade notes](releases/v0.1.2.md)
+or the [v0.1.1 upgrade notes](releases/v0.1.1.md).
 
 Runtime images omit development dependencies and build caches. The dashboard
 uses Next.js standalone output, the delivery image contains its production

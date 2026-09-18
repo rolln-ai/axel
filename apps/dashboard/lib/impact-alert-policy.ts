@@ -1,5 +1,18 @@
 /** Pure incident policy. A missing telemetry result is never a healthy result. */
-import { historicalGapAllowance, type FlowHistoryBucket } from "./source-gap-history";
+import { historicalGapAllowance, observedGapBaseline, type FlowHistoryBucket } from "./source-gap-history";
+
+/** Automatic silence alerts wait until a source has a week of accepted traffic to learn from. */
+export const LEARNING_WINDOW_DAYS = 7;
+const DAY_MS = 24 * 60 * 60_000;
+
+/** When automatic monitoring can start at the earliest, or null once the window has passed. */
+export function learningWindowEnd(source: Pick<FlowSource, "created_at" | "alert_after_minutes">, now: number): number | null {
+  if (source.alert_after_minutes) return null;
+  const created = timestamp(source.created_at);
+  if (created === null) return null;
+  const end = created + LEARNING_WINDOW_DAYS * DAY_MS;
+  return end > now ? end : null;
+}
 export type ImpactKind = "source_silent" | "delivery_blocked";
 export type ImpactPhase = "opened" | "reminder" | "recovered";
 
@@ -30,7 +43,7 @@ export interface ImpactSnapshot {
   failedCount: number;
   waitingCount: number;
   thresholdMinutes: number;
-  thresholdBasis?: "configured" | "recent_cadence" | "historical_pattern";
+  thresholdBasis?: "configured" | "recent_cadence" | "historical_pattern" | "observed_gap";
   cause: "no_traffic" | "delivery_failed" | "schema_mismatch" | "authorization_failed" | "backlog" | "destination_paused";
 }
 
@@ -58,13 +71,25 @@ export function sourceSilenceObservation(source: FlowSource, activity: FlowActiv
   const automatic = activity && activity.samples >= 20 && activity.typical_gap_seconds > 0;
   if (!source.alert_after_minutes && !automatic) return null;
   const last = timestamp(activity?.last_received ?? null);
+  const observed = !source.alert_after_minutes && last && activity?.history
+    ? observedGapBaseline(activity.history, last) : null;
+  if (observed) {
+    // Learning window: the first week of accepted traffic sets the baseline
+    // and raises no automatic alerts. An explicit gap skips this window.
+    const firstSeen = observed.firstReceived ?? timestamp(source.created_at);
+    if (firstSeen !== null && now - firstSeen < LEARNING_WINDOW_DAYS * DAY_MS) return null;
+  }
   const cadenceMinutes = Math.max(30, Math.ceil((activity?.typical_gap_seconds ?? 0) * 3 / 60));
   const historyMinutes = !source.alert_after_minutes && last && activity?.history
     ? Math.ceil(historicalGapAllowance(activity.history, last) / 60_000) : 0;
+  // The longest completed gap in retained history, with the same 25% grace
+  // as the recurring pattern. One long quiet period is enough to count.
+  const observedMinutes = observed ? Math.ceil(observed.longestGapMs * 1.25 / 60_000) : 0;
   const thresholdMinutes = source.alert_after_minutes
-    ?? Math.min(10080, Math.max(cadenceMinutes, historyMinutes));
+    ?? Math.min(10080, Math.max(cadenceMinutes, historyMinutes, observedMinutes));
   const thresholdBasis = source.alert_after_minutes ? "configured"
-    : historyMinutes > cadenceMinutes ? "historical_pattern" : "recent_cadence";
+    : observedMinutes > Math.max(cadenceMinutes, historyMinutes) ? "observed_gap"
+      : historyMinutes > cadenceMinutes ? "historical_pattern" : "recent_cadence";
   const start = last ?? timestamp(source.created_at);
   if (start === null) return null;
   return {
@@ -83,10 +108,16 @@ export interface IncidentState {
   healthy_since: string | null;
   acknowledged_until: string | null;
   next_reminder_at: string;
+  /** Set when an operator clicked Fix in the Inbox. */
+  fix_requested_at?: string | null;
 }
 
 export function incidentTransition(state: IncidentState, unhealthy: boolean, now: number): "observe" | "healthy" | "recover" | "remind" {
   if (!unhealthy) {
+    // An operator-driven fix has already been verified by this healthy
+    // observation (no unresolved failures and a newer successful delivery),
+    // so the alert clears at once instead of after 15 quiet minutes.
+    if (timestamp(state.fix_requested_at ?? null) !== null) return "recover";
     const healthySince = timestamp(state.healthy_since);
     return healthySince !== null && now - healthySince >= 15 * 60_000 ? "recover" : "healthy";
   }
@@ -111,7 +142,7 @@ export function impactMessage(kind: ImpactKind, snapshot: ImpactSnapshot, phase:
       : snapshot.cause === "schema_mismatch" ? `${source}: ${target} cannot store some events`
         : `${source}: deliveries to ${target} need attention`;
   const action = snapshot.cause === "no_traffic"
-    ? `No accepted events within the expected ${snapshot.thresholdMinutes}-minute window.${snapshot.thresholdBasis === "historical_pattern" ? " This window includes recurring quiet periods at comparable times in this source's retained 30-day history." : ""} Check that the sender's webhook is enabled and uses this source's current credentials. Requests rejected before ingestion are not available for replay in Axel.`
+    ? `No accepted events within the expected ${snapshot.thresholdMinutes}-minute window.${snapshot.thresholdBasis === "historical_pattern" ? " This window includes recurring quiet periods at comparable times in this source's retained 30-day history." : snapshot.thresholdBasis === "observed_gap" ? " This window covers the longest quiet period in this source's retained 30-day history." : ""} Check that the sender's webhook is enabled and uses this source's current credentials. Requests rejected before ingestion are not available for replay in Axel.`
     : snapshot.cause === "schema_mismatch"
       ? "The destination rejected rows with an incompatible schema. Review the mapping and target schema, then replay retained failed events. Axel has not changed existing column types or discarded fields."
       : snapshot.cause === "authorization_failed"
@@ -128,7 +159,7 @@ export function impactMessage(kind: ImpactKind, snapshot: ImpactSnapshot, phase:
       `Source: ${source}. Destination: ${snapshot.destinationName ? target : "see source routes"}.`,
       `Last accepted event: ${time(snapshot.lastReceived)}. Last successful destination delivery: ${time(snapshot.lastDelivered)}.`,
       `Unresolved failed events: ${snapshot.failedCount}. Events waiting over 30 minutes: ${snapshot.waitingCount}.`,
-      phase === "recovered" ? "Review the incident period for any provider-side backfill still needed." : "This is one incident. Further reminders are limited to every six hours; acknowledgement pauses them for 24 hours.",
+      phase === "recovered" ? "Review the incident period for any provider-side backfill still needed." : "This is one incident. Further reminders arrive at most once every 24 hours; acknowledgement pauses them for 24 hours.",
     ].join("\n\n"),
   };
 }

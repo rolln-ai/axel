@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { historicalGapAllowance, type FlowHistoryBucket } from "../lib/source-gap-history";
+import { historicalGapAllowance, observedGapBaseline, type FlowHistoryBucket } from "../lib/source-gap-history";
 import { impactMessage, sourceSilenceObservation, type FlowSource } from "../lib/impact-alert-policy";
 
 const MINUTE = 60_000;
@@ -34,12 +34,48 @@ describe("historical source gaps", () => {
     expect(impactMessage("source_silent", overnight.snapshot, "opened").body).toContain("recurring quiet periods");
   });
 
-  it("still detects an unexpected daytime stop on a feed with normal overnight gaps", () => {
+  it("allows a daytime stop for as long as the longest quiet period already seen, plus a margin", () => {
     const last = monday + (12 * 60 - 1) * MINUTE;
-    const result = sourceSilenceObservation(source, { source_id: source.id, last_received: new Date(last).toISOString(),
-      samples: 2000, typical_gap_seconds: 60, history: businessHours(last) }, last + 31 * MINUTE)!;
-    expect(result.unhealthy).toBe(true);
-    expect(result.snapshot.thresholdMinutes).toBe(30);
+    const activity = { source_id: source.id, last_received: new Date(last).toISOString(),
+      samples: 2000, typical_gap_seconds: 60, history: businessHours(last) };
+    // Nights run from 16:59 to 09:00: 961 minutes, so 1202 with the 25% margin.
+    const midday = sourceSilenceObservation(source, activity, last + 31 * MINUTE)!;
+    expect(midday.unhealthy).toBe(false);
+    expect(midday.snapshot.thresholdMinutes).toBe(1202);
+    expect(midday.snapshot.thresholdBasis).toBe("observed_gap");
+    expect(impactMessage("source_silent", midday.snapshot, "opened").body).toContain("longest quiet period");
+    expect(sourceSilenceObservation(source, activity, last + 1203 * MINUTE)?.unhealthy).toBe(true);
+  });
+
+  it("uses one long past outage as the default window without inventing a recurring pattern", () => {
+    const last = monday + (12 * 60 - 1) * MINUTE;
+    // One outage from Sunday 16:59 to Friday 09:00: 6,721 minutes, so 8,402 with the margin, under the seven-day ceiling.
+    const history = businessHours(last).filter(([first]) => Number(first) < monday - 7 * DAY || Number(first) > monday - 3 * DAY);
+    expect(historicalGapAllowance(history, last)).toBe(0);
+    const baseline = observedGapBaseline(history, last);
+    expect(baseline.firstReceived).toBe(monday - 28 * DAY + 9 * 60 * MINUTE);
+    expect(baseline.longestGapMs).toBe(4 * DAY + (16 * 60 + 1) * MINUTE);
+    const activity = { source_id: source.id, last_received: new Date(last).toISOString(), samples: 2000, typical_gap_seconds: 60, history };
+    const result = sourceSilenceObservation(source, activity, last + 5 * DAY)!;
+    expect(result.unhealthy).toBe(false);
+    expect(result.snapshot.thresholdMinutes).toBe(8402);
+    expect(result.snapshot.thresholdBasis).toBe("observed_gap");
+    expect(sourceSilenceObservation(source, activity, last + 6 * DAY)?.unhealthy).toBe(true);
+    expect(observedGapBaseline([], last)).toEqual({ firstReceived: null, longestGapMs: 0 });
+  });
+
+  it("raises no automatic alert during the first week of traffic, unless a gap is configured", () => {
+    const last = monday + (12 * 60 - 1) * MINUTE;
+    const recent = businessHours(last).filter(([first]) => Number(first) >= monday - 3 * DAY);
+    const activity = { source_id: source.id, last_received: new Date(last).toISOString(), samples: 2000, typical_gap_seconds: 60, history: recent };
+    expect(sourceSilenceObservation(source, activity, last + 2 * DAY)).toBeNull();
+    expect(sourceSilenceObservation({ ...source, alert_after_minutes: 45 }, activity, last + 46 * MINUTE)?.unhealthy).toBe(true);
+    // Learning ends seven days after the first accepted event, even if the source stays quiet.
+    const learned = sourceSilenceObservation(source, activity, monday - 3 * DAY + 9 * 60 * MINUTE + 7 * DAY + MINUTE)!;
+    expect(learned.unhealthy).toBe(true);
+    expect(learned.snapshot.thresholdBasis).toBe("observed_gap");
+    // Without any history the caller has not supplied a baseline, so cadence applies as before.
+    expect(sourceSilenceObservation(source, { ...activity, history: undefined }, last + 31 * MINUTE)?.unhealthy).toBe(true);
   });
 
   it("learns a recurring weekend closure from matching weekdays without extending Monday to a weekend", () => {
@@ -77,8 +113,8 @@ describe("historical source gaps", () => {
     const last = monday + (12 * 60 - 1) * MINUTE;
     const activity = { source_id: source.id, last_received: new Date(last).toISOString(), samples: 2000,
       typical_gap_seconds: 60, history: businessHours(last) };
-    expect(sourceSilenceObservation(source, activity, last + 31 * MINUTE)?.snapshot.thresholdMinutes).toBe(30);
-    expect(sourceSilenceObservation(source, activity, last + 3 * DAY)?.snapshot.thresholdMinutes).toBe(30);
+    expect(sourceSilenceObservation(source, activity, last + 31 * MINUTE)?.snapshot.thresholdMinutes).toBe(1202);
+    expect(sourceSilenceObservation(source, activity, last + 3 * DAY)?.snapshot.thresholdMinutes).toBe(1202);
   });
 
   it("honors explicit limits and the seven-day automatic ceiling", () => {

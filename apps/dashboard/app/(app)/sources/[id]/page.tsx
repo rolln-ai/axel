@@ -16,6 +16,7 @@ import { FieldSelectionEditor } from "./FieldSelectionEditor";
 import { IpAllowlistEditor } from "./IpAllowlistEditor";
 import { SubjectKeysEditor } from "./SubjectKeysEditor";
 import { FlowMonitoringEditor } from "./FlowMonitoringEditor";
+import { learningWindowEnd } from "../../../../lib/impact-alert-policy";
 import { LimitsEditor } from "./LimitsEditor";
 import {
   resolveIngestBaseUrl,
@@ -536,6 +537,7 @@ function SettingsTab({
   canMutate: boolean;
   isWebhook: boolean;
 }) {
+  const learningEnd = learningWindowEnd(source, Date.now());
   return (
     <Section title="Configuration" className="first:mt-0">
       {isWebhook ? (
@@ -549,7 +551,8 @@ function SettingsTab({
           signingSecretFingerprint={source.signing_secret_fingerprint}
         />
       ) : null}
-      <FlowMonitoringEditor sourceId={source.id} enabled={source.flow_monitoring_enabled} minutes={source.alert_after_minutes} canMutate={canMutate} />
+      <FlowMonitoringEditor sourceId={source.id} enabled={source.flow_monitoring_enabled} minutes={source.alert_after_minutes} canMutate={canMutate}
+        learningUntil={learningEnd ? new Date(learningEnd).toISOString() : null} />
       <div className={isWebhook ? "border-t border-border pt-5" : ""}>
         <LimitsEditor
           sourceId={source.id}
