@@ -40,6 +40,15 @@ import { ConfirmAction } from "../../_components/ConfirmAction";
 import { LocalTime } from "../../_components/LocalTime";
 import { dataTypeRepairFor } from "../../../lib/dead-letter-repair";
 
+/** Plain-English labels for Jev's typed dead-letter reasons. */
+const TRIAGE_LABELS: Record<string, string> = {
+  transient: "Transient",
+  destination_down: "Destination down",
+  schema_mismatch: "Schema mismatch",
+  bad_payload: "Bad payload",
+  auth_or_config: "Auth or config",
+};
+
 /**
  * Linear-style inbox UI for dead letter groups (AXE-57).
  *
@@ -385,6 +394,26 @@ function InboxRow({
               title="Letters in this fingerprint resolved in the last 24h — your retries are landing"
             >
               {group.resolved_24h} resolved 24h
+            </span>
+          ) : null}
+          {group.triage_reason ? (
+            <Badge
+              variant="outline"
+              title={
+                group.triage_confidence !== null
+                  ? `Jev triage, confidence ${Math.round(group.triage_confidence * 100)}%`
+                  : "Jev triage"
+              }
+            >
+              {TRIAGE_LABELS[group.triage_reason] ?? group.triage_reason}
+            </Badge>
+          ) : null}
+          {!isArchive && group.auto_replayed > 0 ? (
+            <span
+              className="rounded-full bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-700 dark:text-sky-400"
+              title="Axel judged these transient and queued a replay without waiting for you"
+            >
+              {group.auto_replayed} auto-replayed
             </span>
           ) : null}
           {group.source_id ? (

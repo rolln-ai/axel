@@ -53,7 +53,7 @@ because a missing delivery may be an intentional filter result. This monitor
 is not proof of complete historical delivery.
 
 Incident email is on by default for workspace members. One opening notice is
-followed by reminders at most every six hours. Owners and admins can acknowledge
+followed by reminders at most once every 24 hours. Owners and admins can acknowledge
 an incident in the Inbox to pause reminders for 24 hours. Recovery requires healthy
 checks spanning at least 15 minutes and, for delivery incidents, a successful
 delivery after the incident opened. A recovery notice does not claim backfill is

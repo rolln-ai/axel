@@ -107,6 +107,26 @@ test("role registry rejects injections, overlap, and the legacy broad role", () 
   );
 });
 
+test("pending grants are limited to the reviewed triage grants during owner preflight", () => {
+  const pending = ["dead_letters|UPDATE", "dead_letter_mutes|SELECT"];
+  assert.deepEqual(
+    validateDatabaseServiceRoleOptions(validOptions({
+      requireIdentity: false, managedOwnerLogin: true, migrationLoginRoles: [], pendingGrants: pending,
+    })).pendingGrants,
+    pending,
+  );
+  assert.throws(
+    () => validateDatabaseServiceRoleOptions(validOptions({
+      requireIdentity: false, managedOwnerLogin: true, migrationLoginRoles: [], pendingGrants: ["dead_letters|DELETE"],
+    })),
+    /database_service_pending_grants_invalid/,
+  );
+  assert.throws(
+    () => validateDatabaseServiceRoleOptions(validOptions({ pendingGrants: pending })),
+    /database_service_pending_grants_invalid/,
+  );
+});
+
 test("only the exact owner can be the bounded transitional login", () => {
   assert.equal(
     validateDatabaseServiceRoleOptions(validOptions({
