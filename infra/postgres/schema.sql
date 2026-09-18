@@ -1812,7 +1812,7 @@ CREATE TABLE IF NOT EXISTS pipeline_incidents (
   healthy_since timestamptz,
   resolved_at timestamptz,
   acknowledged_until timestamptz,
-  next_reminder_at timestamptz NOT NULL DEFAULT now() + interval '6 hours',
+  next_reminder_at timestamptz NOT NULL DEFAULT now() + interval '24 hours',
   sequence integer NOT NULL DEFAULT 0,
   fix_requested_at timestamptz,
   UNIQUE (workspace_id, id)
