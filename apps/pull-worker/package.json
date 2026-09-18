@@ -19,7 +19,7 @@
     "mongodb": "^7.2.0",
     "pg": "^8.21.0",
     "tsx": "^4.22.4",
-    "undici": "7.29.0"
+    "undici": "8.10.2"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",
