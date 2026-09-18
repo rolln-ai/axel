@@ -985,7 +985,7 @@ test("database credential distribution is explicit, serialized, and value-safe",
   assert.match(cloudflare, /bash scripts\/smoke\.sh/);
   assert.match(cloudflare, /AXEL_REQUIRE_DELIVERY_CANARY: "1"/);
   assert.match(cloudflare, /AXEL_REQUIRE_SENTRY_TEST: "1"/);
-  assert.match(workflow, /pnpm\/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86/);
+  assert.match(workflow, /pnpm\/action-setup@ea17c68df8912ef543352723c149a84f56e3d413/);
   assert.match(workflow, /actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020/);
   assert.match(workflow, /^          version: 9\.12\.0$/m);
 });
