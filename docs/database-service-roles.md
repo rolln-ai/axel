@@ -132,6 +132,12 @@ extension member and the extension itself is owned by the stable owner. This is
 not an ACL exception: `PUBLIC` routine execution must still be revoked with
 provider-admin authority, and any security-definer routine fails the preflight.
 
+Adding a grant on an existing table to a profile needs three pieces: the
+profile entry, a capability-grant SQL file that `run-migrations.sh` applies
+after the migrations (see `scripts/sync-dead-letter-triage-access.sql`), and a
+marker migration. The Render owner preflight tolerates the missing grant only
+while the marker is absent from the ledger; runtime verification stays strict.
+
 `delivery-workers` intentionally excludes the native delivery database path.
 Keep `PARQUET_DELIVERY_QUEUE_ID` absent. Enabling that loop requires a separate
 profile review and code change. The Render blueprint omits the key so a fresh

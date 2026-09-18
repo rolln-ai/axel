@@ -586,6 +586,8 @@ trap - EXIT
 # role attributes or memberships. Complete them before strict postflight.
 psql_safe -v ON_ERROR_STOP=1 -v owner_role="$DATABASE_MIGRATION_ROLE" \
   -f "$SCRIPT_DIR/sync-impact-alert-access.sql" > /dev/null
+psql_safe -v ON_ERROR_STOP=1 -v owner_role="$DATABASE_MIGRATION_ROLE" \
+  -f "$SCRIPT_DIR/sync-dead-letter-triage-access.sql" > /dev/null
 
 preflight_migration_role
 assert_role_state_unchanged "$initial_role_state"
