@@ -108,10 +108,16 @@ export interface IncidentState {
   healthy_since: string | null;
   acknowledged_until: string | null;
   next_reminder_at: string;
+  /** Set when an operator clicked Fix in the Inbox. */
+  fix_requested_at?: string | null;
 }
 
 export function incidentTransition(state: IncidentState, unhealthy: boolean, now: number): "observe" | "healthy" | "recover" | "remind" {
   if (!unhealthy) {
+    // An operator-driven fix has already been verified by this healthy
+    // observation (no unresolved failures and a newer successful delivery),
+    // so the alert clears at once instead of after 15 quiet minutes.
+    if (timestamp(state.fix_requested_at ?? null) !== null) return "recover";
     const healthySince = timestamp(state.healthy_since);
     return healthySince !== null && now - healthySince >= 15 * 60_000 ? "recover" : "healthy";
   }
@@ -153,7 +159,7 @@ export function impactMessage(kind: ImpactKind, snapshot: ImpactSnapshot, phase:
       `Source: ${source}. Destination: ${snapshot.destinationName ? target : "see source routes"}.`,
       `Last accepted event: ${time(snapshot.lastReceived)}. Last successful destination delivery: ${time(snapshot.lastDelivered)}.`,
       `Unresolved failed events: ${snapshot.failedCount}. Events waiting over 30 minutes: ${snapshot.waitingCount}.`,
-      phase === "recovered" ? "Review the incident period for any provider-side backfill still needed." : "This is one incident. Further reminders are limited to every six hours; acknowledgement pauses them for 24 hours.",
+      phase === "recovered" ? "Review the incident period for any provider-side backfill still needed." : "This is one incident. Further reminders arrive at most once every 24 hours; acknowledgement pauses them for 24 hours.",
     ].join("\n\n"),
   };
 }

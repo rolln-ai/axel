@@ -29,7 +29,7 @@ COPY scripts/run-migrations.sh scripts/psql-safe.mjs \
     scripts/check-postgres-migrations.mjs scripts/postgres-migration-safety.mjs \
     scripts/database-service-access-profiles.mjs \
     scripts/verify-database-migration-role.sql scripts/ensure-database-migration-ledger.sql \
-    scripts/sync-impact-alert-access.sql ./scripts/
+    scripts/sync-impact-alert-access.sql scripts/sync-dead-letter-triage-access.sql ./scripts/
 COPY scripts/self-host/run-database-setup.sh scripts/self-host/database-access.mjs ./scripts/self-host/
 USER node
 CMD ["bash", "/app/scripts/self-host/run-database-setup.sh"]

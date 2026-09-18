@@ -11,6 +11,7 @@ export interface PipelineIncident {
   id: string; workspace_id: string; kind: ImpactKind; snapshot: ImpactSnapshot;
   opened_at: string; observed_at: string; healthy_since: string | null;
   acknowledged_until: string | null; next_reminder_at: string; sequence: number;
+  fix_requested_at: string | null;
 }
 
 export function renderImpactEmail(workspace: string, workspaceId: string, kind: ImpactKind, snapshot: ImpactSnapshot, phase: ImpactPhase): Omit<SendArgs, "to"> {
@@ -55,7 +56,7 @@ export async function recordImpactObservations(client: Queryable, workspaceId: s
   for (const observation of observations) {
     const existing = (await client.query<PipelineIncident>(
       `SELECT id, workspace_id, kind, snapshot, opened_at::text, observed_at::text, healthy_since::text,
-              acknowledged_until::text, next_reminder_at::text, sequence
+              acknowledged_until::text, next_reminder_at::text, sequence, fix_requested_at::text
          FROM pipeline_incidents WHERE workspace_id = $1 AND incident_key = $2 AND resolved_at IS NULL FOR UPDATE`,
       [workspaceId, observation.key])).rows[0];
     if (existing && Date.parse(existing.observed_at) >= observedAt.getTime()) continue;
@@ -64,8 +65,8 @@ export async function recordImpactObservations(client: Queryable, workspaceId: s
     if (!incident) {
       if (!observation.unhealthy) continue;
       incident = (await client.query<PipelineIncident>(
-        `INSERT INTO pipeline_incidents (id, workspace_id, source_id, incident_key, kind, snapshot, observed_at)
-         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7) RETURNING *`,
+        `INSERT INTO pipeline_incidents (id, workspace_id, source_id, incident_key, kind, snapshot, observed_at, next_reminder_at)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $7::timestamptz + interval '24 hours') RETURNING *`,
         [prefixedId("inc"), workspaceId, observation.snapshot.sourceId, observation.key, observation.kind, JSON.stringify(observation.snapshot), observedAt])).rows[0]!;
       phase = "opened";
     } else {
@@ -77,7 +78,7 @@ export async function recordImpactObservations(client: Queryable, workspaceId: s
         `UPDATE pipeline_incidents SET snapshot = $3::jsonb, observed_at = $4,
           healthy_since = CASE WHEN $5 THEN NULL ELSE COALESCE(healthy_since, $4) END,
           resolved_at = CASE WHEN $6 = 'recovered' THEN $4 ELSE NULL END,
-          next_reminder_at = CASE WHEN $6 = 'reminder' THEN $4::timestamptz + interval '6 hours' ELSE next_reminder_at END,
+          next_reminder_at = CASE WHEN $6 = 'reminder' THEN $4::timestamptz + interval '24 hours' ELSE next_reminder_at END,
           sequence = $7 WHERE workspace_id = $1 AND id = $2`,
         [workspaceId, incident.id, JSON.stringify(observation.snapshot), observedAt, observation.unhealthy, phase, incident.sequence]);
     }
