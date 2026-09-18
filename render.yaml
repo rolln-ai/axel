@@ -218,6 +218,11 @@ services:
         value: "500"
       - key: REPLAY_WORKER_INTERVAL_MS
         value: "1000"
+      # TypeSafe AI (Jev) dead-letter triage. Optional: when unset the worker
+      # logs "triage disabled" at boot and nothing else changes. Set out of
+      # band; the runtime secret sync leaves this key alone.
+      - key: TYPESAFE_API_KEY
+        sync: false
       # PARQUET_DELIVERY_QUEUE_ID must stay unset for this least-privilege
       # worker profile. Enabling the native delivery loop requires a separate
       # reviewed database profile before the environment key can be restored.

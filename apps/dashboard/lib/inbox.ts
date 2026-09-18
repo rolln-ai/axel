@@ -68,6 +68,11 @@ export interface InboxGroup {
   /** Set when the fingerprint has an active mute. */
   muted_until: string | null;
   muted_reason: string | null;
+  /** Jev's typed reason for the newest unresolved letter, when triaged. */
+  triage_reason: string | null;
+  triage_confidence: number | null;
+  /** Unresolved letters in the group that Axel auto-replayed. */
+  auto_replayed: number;
 }
 
 interface RawRow {
@@ -79,6 +84,9 @@ interface RawRow {
   destination_id: string | null;
   errored_at: string;
   resolved_at: string | null;
+  triage_reason: string | null;
+  triage_confidence: number | null;
+  auto_replay_id: string | null;
 }
 
 interface MuteRow {
@@ -112,7 +120,10 @@ export const loadInboxGroups = cache(async (workspaceId: string): Promise<InboxG
               dl.route_id,
               NULLIF(dl.destination_id, '') AS destination_id,
               dl.errored_at::text AS errored_at,
-              null::text AS resolved_at
+              null::text AS resolved_at,
+              dl.triage_reason,
+              dl.triage_confidence,
+              dl.auto_replay_id
          FROM dead_letters dl
         WHERE dl.workspace_id = $1
           AND dl.resolved_at IS NULL
@@ -128,7 +139,10 @@ export const loadInboxGroups = cache(async (workspaceId: string): Promise<InboxG
               dl.route_id,
               NULLIF(dl.destination_id, '') AS destination_id,
               dl.errored_at::text AS errored_at,
-              dl.resolved_at::text AS resolved_at
+              dl.resolved_at::text AS resolved_at,
+              dl.triage_reason,
+              dl.triage_confidence,
+              dl.auto_replay_id
          FROM dead_letters dl
         WHERE dl.workspace_id = $1
           AND dl.resolved_at IS NOT NULL
@@ -164,6 +178,11 @@ export const loadInboxGroups = cache(async (workspaceId: string): Promise<InboxG
       existing.count += 1;
       if (row.errored_at < existing.first_seen) existing.first_seen = row.errored_at;
       if (row.errored_at > existing.last_seen) existing.last_seen = row.errored_at;
+      if (row.auto_replay_id) existing.auto_replayed += 1;
+      if (existing.triage_reason === null && row.triage_reason) {
+        existing.triage_reason = row.triage_reason;
+        existing.triage_confidence = row.triage_confidence;
+      }
       continue;
     }
     groupByFingerprint.set(fp, {
@@ -181,6 +200,9 @@ export const loadInboxGroups = cache(async (workspaceId: string): Promise<InboxG
       route_id: row.route_id,
       muted_until: mute?.until ?? null,
       muted_reason: mute?.reason ?? null,
+      triage_reason: row.triage_reason ?? null,
+      triage_confidence: row.triage_confidence ?? null,
+      auto_replayed: row.auto_replay_id ? 1 : 0,
     });
   }
 
@@ -218,6 +240,9 @@ export const loadInboxGroups = cache(async (workspaceId: string): Promise<InboxG
       route_id: row.route_id,
       muted_until: mute?.until ?? null,
       muted_reason: mute?.reason ?? null,
+      triage_reason: row.triage_reason ?? null,
+      triage_confidence: row.triage_confidence ?? null,
+      auto_replayed: row.auto_replay_id ? 1 : 0,
     });
   }
 

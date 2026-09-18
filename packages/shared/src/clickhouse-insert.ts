@@ -15,7 +15,20 @@
  *     `async_insert_busy_timeout_ms=1000` bounds the buffer/durability window.
  *   - Fire-and-forget: failures are logged and swallowed — we'd rather miss an
  *     analytics row than crash a worker on a transient ClickHouse outage.
+ *   - Transient failures (a transport error, 429, or 5xx) are retried twice
+ *     with a short backoff before giving up. A lost `delivery_attempts` row
+ *     makes a delivered event look undelivered to incident monitoring, so a
+ *     one-second blip should not cost the row. A retry after an ambiguous
+ *     transport failure can duplicate a row; every reader collapses rows by
+ *     id (uniqExact, DISTINCT, ReplacingMergeTree), so duplicates are harmless.
  */
+
+const INSERT_ATTEMPTS = 3;
+const INSERT_RETRY_BASE_MS = 200;
+
+function transientStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
 
 export interface ClickhouseInsertEnv {
   CLICKHOUSE_URL?: string;
@@ -64,23 +77,42 @@ export async function insertRows(
   };
   if (env.CLICKHOUSE_USER) headers["x-clickhouse-user"] = env.CLICKHOUSE_USER;
   if (env.CLICKHOUSE_PASSWORD) headers["x-clickhouse-key"] = env.CLICKHOUSE_PASSWORD;
+  const body = rows.map((row) => JSON.stringify(row)).join("\n");
 
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      redirect: "manual",
-      headers,
-      body: rows.map((row) => JSON.stringify(row)).join("\n"),
-    });
-    if (!res.ok) {
-      // ClickHouse parse errors can echo the submitted JSON row. That row can
-      // include webhook metadata or a destination response excerpt, so status
-      // is the only safe process-log diagnostic.
-      console.error(`[clickhouse] ${table} insert ${res.status}`);
+  for (let attempt = 1; attempt <= INSERT_ATTEMPTS; attempt += 1) {
+    let status = 0;
+    let transient = true;
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        redirect: "manual",
+        headers,
+        body,
+      });
+      if (res.ok) return;
+      status = res.status;
+      transient = transientStatus(res.status);
+      // Release the connection. The body may echo the submitted row, so it is
+      // never read or logged.
+      try {
+        await res.body?.cancel();
+      } catch {
+        // Nothing to release.
+      }
+    } catch {
+      // Transport failure: the request may or may not have reached ClickHouse.
     }
-  } catch {
-    // Fetch implementations may attach the request to their exception. Never
-    // send that object to stdout/stderr because it contains the row body.
-    console.error(`[clickhouse] ${table} insert transport failed`);
+    if (transient && attempt < INSERT_ATTEMPTS) {
+      await new Promise((resolve) => setTimeout(resolve, INSERT_RETRY_BASE_MS * attempt));
+      continue;
+    }
+    // ClickHouse parse errors can echo the submitted JSON row. That row can
+    // include webhook metadata or a destination response excerpt, so status
+    // is the only safe process-log diagnostic. Fetch exceptions may attach the
+    // request, so they are never logged either.
+    const outcome = status ? `insert ${status}` : "insert transport failed";
+    const retries = attempt > 1 ? ` after ${attempt} attempts` : "";
+    console.error(`[clickhouse] ${table} ${outcome}${retries}`);
+    return;
   }
 }

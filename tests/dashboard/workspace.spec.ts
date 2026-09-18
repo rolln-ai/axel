@@ -53,11 +53,14 @@ test("sign-in, workspace changes, source isolation, and sign-out", async ({ page
     } });
   });
   await page.goto(`/sources/${fixture.sourceId}?tab=settings`);
-  await page.getByLabel("Maximum expected gap in minutes", { exact: true }).fill("60");
+  // Streamed page content waits in a hidden container at body level until
+  // React reveals it. Label lookups match hidden nodes, so scope them to main.
+  const settings = page.getByRole("main");
+  await settings.getByLabel("Maximum expected gap in minutes", { exact: true }).fill("60");
   await page.getByRole("button", { name: "Save monitoring", exact: true }).click();
   await expect(page.getByText("Traffic monitoring saved.", { exact: true })).toBeVisible();
   await page.reload();
-  await expect(page.getByLabel("Maximum expected gap in minutes", { exact: true })).toHaveValue("60");
+  await expect(settings.getByLabel("Maximum expected gap in minutes", { exact: true })).toHaveValue("60");
   await expect(page.getByRole("heading", {name: "Traffic monitoring", exact: true})).toBeVisible();
   await expect(page.getByRole("button", {name: "Save monitoring", exact: true})).toBeVisible();
   const monitorScreenshot = testInfo.outputPath("traffic-monitoring.png");
@@ -126,10 +129,15 @@ test("sign-in, workspace changes, source isolation, and sign-out", async ({ page
   const incidentScreenshot = testInfo.outputPath("pipeline-incident.png");
   await page.screenshot({path: incidentScreenshot, fullPage: true});
   await testInfo.attach("pipeline-incident", {path: incidentScreenshot, contentType: "image/png"});
-  await page.getByRole("button", {name: "Acknowledge for 24 hours", exact: true}).click();
-  await expect(page.getByText(/Reminders paused until/)).toBeVisible();
+  // A silent source cannot be fixed from the Inbox; it links to the source instead.
+  await expect(page.getByRole("button", {name: "Fix now", exact: true})).toHaveCount(0);
+  await expect(page.getByRole("link", {name: "Check source setup", exact: true})).toBeVisible();
+  await page.getByText("Details", {exact: true}).click();
+  await page.getByRole("button", {name: "Pause reminder emails for 24 hours", exact: true}).click();
+  await expect(page.getByText(/Reminder emails paused until/)).toBeVisible();
   await page.reload();
-  await expect(page.getByRole("button", {name: "Acknowledge for 24 hours", exact: true})).toHaveCount(0);
+  await page.getByText("Details", {exact: true}).click();
+  await expect(page.getByRole("button", {name: "Pause reminder emails for 24 hours", exact: true})).toHaveCount(0);
   await page.goto("/settings?tab=notifications");
   await expect(page.getByRole("checkbox", {name: /^Data flow incidents/})).toBeChecked();
   await expect(page.getByRole("checkbox", {name: /^Weekly schema observations/})).not.toBeChecked();

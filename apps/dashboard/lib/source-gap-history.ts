@@ -5,6 +5,34 @@ const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
 const weekend = (at: number) => [0, 6].includes(new Date(at).getUTCDay());
 
+function retainedBuckets(history: FlowHistoryBucket[], lastReceived: number): (readonly [number, number])[] {
+  return history.map(([first, last]) => [Number(first), Number(last)] as const)
+    .filter(([first, last]) => Number.isFinite(first) && first > 0 && last >= first
+      && last <= lastReceived && first >= lastReceived - 30 * DAY)
+    .sort((a, b) => a[0] - b[0]);
+}
+
+export interface ObservedGapBaseline {
+  /** Earliest retained receipt, or null when nothing has been retained. */
+  firstReceived: number | null;
+  /** Longest completed quiet period between retained receipts. */
+  longestGapMs: number;
+}
+
+/**
+ * The longest silence this source has already survived. Unlike the recurring
+ * pattern below, one long gap counts: a source that has gone quiet for two
+ * days before is expected to do so again. The ongoing gap never counts.
+ */
+export function observedGapBaseline(history: FlowHistoryBucket[], lastReceived: number): ObservedGapBaseline {
+  const buckets = retainedBuckets(history, lastReceived);
+  let longestGapMs = 0;
+  for (let i = 1; i < buckets.length; i++) {
+    longestGapMs = Math.max(longestGapMs, buckets[i]![0] - buckets[i - 1]![1]);
+  }
+  return { firstReceived: buckets[0]?.[0] ?? null, longestGapMs };
+}
+
 /**
  * Compare the last receipt's clock time with completed quiet periods on earlier
  * days. Three independent gaps must support an allowance. A single outage,
@@ -14,10 +42,7 @@ const weekend = (at: number) => [0, 6].includes(new Date(at).getUTCDay());
  * Unlike an event-count sample, busy bursts cannot crowd nights out of history.
  */
 export function historicalGapAllowance(history: FlowHistoryBucket[], lastReceived: number): number {
-  const buckets = history.map(([first, last]) => [Number(first), Number(last)] as const)
-    .filter(([first, last]) => Number.isFinite(first) && first > 0 && last >= first
-      && last <= lastReceived && first >= lastReceived - 30 * DAY)
-    .sort((a, b) => a[0] - b[0]);
+  const buckets = retainedBuckets(history, lastReceived);
   const firstBucket = buckets[0];
   if (!firstBucket || lastReceived - firstBucket[0] < 7 * DAY) return 0;
 
