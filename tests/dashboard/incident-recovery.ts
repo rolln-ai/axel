@@ -1,15 +1,10 @@
-import { expect, test } from "@playwright/test";
-import { dashboardFixture, qaPassword } from "./fixtures.mjs";
+import { expect, type Page, type TestInfo } from "@playwright/test";
+import { dashboardFixture } from "./fixtures.mjs";
 
-test("route errors point to the route and live recovery overrides an old alert", async ({ page }, testInfo) => {
+export async function verifyIncidentRecovery(page: Page, testInfo: TestInfo) {
   const fixture = dashboardFixture(testInfo.project.name);
-  const theme = testInfo.project.name.endsWith("light") ? "light" : "dark";
   const routeId = `${fixture.sourceId}_errored`;
-  await page.addInitScript(value => localStorage.setItem("theme", value), theme);
   await page.goto("/inbox");
-  await page.getByLabel("Email", { exact: true }).fill(fixture.email);
-  await page.getByLabel("Password", { exact: true }).fill(qaPassword);
-  await page.getByRole("button", { name: "Sign in", exact: true }).click();
   const card = page.locator("article").filter({ hasText: "Synthetic healthy destination" });
   await expect(card.getByText("The route stopped after a processing error. Correct the route and enable it, then click Fix now to replay.", { exact: true })).toBeVisible();
   await expect(card).not.toContainText("destination is paused");
@@ -31,4 +26,4 @@ test("route errors point to the route and live recovery overrides an old alert",
   await card.getByRole("button", { name: "Fix now", exact: true }).click();
   await expect(card.getByRole("button", { name: "Fixing…", exact: true })).toBeVisible();
   await expect(card.getByRole("status")).not.toContainText("Correct the route");
-});
+}

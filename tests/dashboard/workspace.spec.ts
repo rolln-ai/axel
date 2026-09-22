@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { dashboardFixture, qaPassword } from "./fixtures.mjs";
 import { verifySlowNavigation } from "./navigation";
+import { verifyIncidentRecovery } from "./incident-recovery";
 
 test("sign-in, workspace changes, source isolation, and sign-out", async ({ page, request }, testInfo) => {
   const pageErrors: string[] = [];
@@ -123,6 +124,8 @@ test("sign-in, workspace changes, source isolation, and sign-out", async ({ page
   await page.reload();
   await expect(page.getByRole("button", { name: "Generate webhook URL", exact: true })).toBeVisible();
 
+  // Reuse this real sign-in so the full suite stays inside auth throttling.
+  await test.step("Errored route recovery", () => verifyIncidentRecovery(page, testInfo));
   await page.goto("/inbox");
   await expect(page.getByRole("heading", {name: "Synthetic webhook stopped receiving data", exact: true})).toBeVisible();
   await expect(page.getByText("Monitoring has not completed a recent check. Current data flow is unverified.", {exact: true})).toBeVisible();
