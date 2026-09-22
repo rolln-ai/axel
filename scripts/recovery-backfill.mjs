@@ -1,0 +1,100 @@
+#!/usr/bin/env node
+import { createHash } from "node:crypto";
+import { pathToFileURL } from "node:url";
+import pg from "pg";
+import { writeAudit } from "../apps/dashboard/lib/audit.ts";
+import { recoveryRouteReady } from "../apps/delivery-service/src/recovery-backfill.ts";
+import { controlPlanePgSslOption } from "./control-plane-pg.mjs";
+import { validateRouteScope } from "./inspect-route-health.mjs";
+
+const fail = () => { throw new Error("recovery_backfill_precondition_failed"); };
+export async function inspectRecoveryBackfill(client, workspaceId, routeId) {
+  validateRouteScope(workspaceId, routeId);
+  await client.query("BEGIN READ ONLY");
+  try {
+    await client.query("SET LOCAL statement_timeout='10s'");
+    return (await client.query(`SELECT b.id,b.state,b.since,b.until,b.total_estimated,b.enqueued,b.skipped,
+      b.cursor_received_at,b.started_at,b.finished_at,
+      count(*) FILTER (WHERE rr.state='pending')::int AS pending,
+      count(*) FILTER (WHERE rr.state='in_progress')::int AS in_progress,
+      count(*) FILTER (WHERE rr.state='done')::int AS delivered,
+      count(*) FILTER (WHERE rr.state='failed')::int AS failed
+      FROM backfill_jobs b LEFT JOIN replay_requests rr ON rr.backfill_job_id=b.id
+      WHERE b.workspace_id=$1 AND b.route_id=$2 AND b.recovery_destination_id IS NOT NULL
+      GROUP BY b.id ORDER BY b.requested_at DESC LIMIT 5`, [workspaceId, routeId])).rows;
+  } finally { await client.query("ROLLBACK"); }
+}
+
+export async function startRecoveryBackfill(client, options) {
+  const { workspaceId, routeId, expectedUpdatedAt, since, until, countEvents, runUrl, now = new Date() } = options;
+  validateRouteScope(workspaceId, routeId);
+  const start = Date.parse(since), end = Date.parse(until), current = now.getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || !Number.isFinite(Date.parse(expectedUpdatedAt))
+      || start >= end || start < current - 7 * 86400_000 || end > current - 300_000
+      || !/^https:\/\/github\.com\/rolln-ai\/axel\/actions\/runs\/\d+$/.test(runUrl)) fail();
+  const id = `bfj_${createHash("sha256").update(JSON.stringify([workspaceId, routeId, new Date(start).toISOString(), new Date(end).toISOString()])).digest("hex").slice(0,24)}`;
+  // Counting is read only; hold no control-plane locks during network IO.
+  const route = (await client.query(`SELECT source_id FROM routes WHERE workspace_id=$1 AND id=$2`, [workspaceId,routeId])).rows[0];
+  if (!route) fail();
+  const total = await countEvents(route.source_id, new Date(start), new Date(end));
+  if (!Number.isSafeInteger(total) || total < 1 || total > 2_000_000) fail();
+  await client.query("BEGIN");
+  try {
+    await client.query("SET LOCAL statement_timeout='10s'");
+    await client.query("SET LOCAL lock_timeout='5s'");
+    const currentRoute = (await client.query(`SELECT source_id,updated_at::text AS updated_at
+      FROM routes WHERE workspace_id=$1 AND id=$2 FOR UPDATE`, [workspaceId,routeId])).rows[0];
+    if (!currentRoute || route.source_id !== currentRoute.source_id || Date.parse(currentRoute.updated_at) !== Date.parse(expectedUpdatedAt)) fail();
+    const existing = (await client.query("SELECT id,state FROM backfill_jobs WHERE id=$1 AND workspace_id=$2", [id,workspaceId])).rows[0];
+    if (existing) { await client.query("COMMIT"); return { ...existing, already_exists: true }; }
+    const destinations = (await client.query(`SELECT destination_id FROM route_destinations WHERE route_id=$1`, [routeId])).rows;
+    if (destinations.length !== 1) fail();
+    const scope = { workspace_id: workspaceId, route_id: routeId, source_id: route.source_id,
+      recovery_destination_id: destinations[0].destination_id, recovery_route_updated_at: currentRoute.updated_at };
+    if (!await recoveryRouteReady(client, scope, true)) fail();
+    const blocked = await client.query(`SELECT 1 FROM dead_letters WHERE workspace_id=$1 AND route_id=$2 AND resolved_at IS NULL
+      UNION ALL SELECT 1 FROM backfill_jobs WHERE workspace_id=$1 AND route_id=$2 AND since<$4::timestamptz AND until>$3::timestamptz LIMIT 1`,
+    [workspaceId,routeId,new Date(start),new Date(end)]);
+    if (blocked.rows.length) fail();
+    await client.query(`INSERT INTO backfill_jobs(id,workspace_id,route_id,source_id,since,until,state,total_estimated,
+      max_inflight_replays,recovery_destination_id,recovery_route_updated_at)
+      VALUES($1,$2,$3,$4,$5,$6,'pending',$7,500,$8,$9::timestamptz)`,
+    [id,workspaceId,routeId,route.source_id,new Date(start),new Date(end),total,scope.recovery_destination_id,currentRoute.updated_at]);
+    await writeAudit(client, { workspaceId, actorUserId:null, action:"route.recovery_backfill_started",targetType:"backfill_job",targetId:id,
+      metadata:{ since:new Date(start).toISOString(),until:new Date(end).toISOString(),total_estimated:total,max_inflight_replays:500,run_url:runUrl } });
+    await client.query("COMMIT");
+    return { id,state:"pending",total_estimated:total,max_inflight_replays:500 };
+  } catch (error) { await client.query("ROLLBACK").catch(() => {}); throw error; }
+}
+
+async function main() {
+  const e=process.env;
+  if (!e.DATABASE_URL || !["inspect","start"].includes(e.RECOVERY_BACKFILL_ACTION)) fail();
+  const client=new pg.Client({connectionString:e.DATABASE_URL,ssl:controlPlanePgSslOption(e.DATABASE_URL,e.DATABASE_TLS_VERIFY),connectionTimeoutMillis:10_000});
+  try {
+    await client.connect();
+    if(e.RECOVERY_BACKFILL_ACTION==='inspect') {
+      console.log(JSON.stringify(await inspectRecoveryBackfill(client,e.ROUTE_HEALTH_WORKSPACE_ID,e.ROUTE_HEALTH_ROUTE_ID)));
+      return;
+    }
+    if(e.RECOVERY_BACKFILL_CONFIRM!=="start-reviewed-backfill" || !e.CLICKHOUSE_URL) fail();
+    console.log(JSON.stringify(await startRecoveryBackfill(client,{
+      workspaceId:e.ROUTE_HEALTH_WORKSPACE_ID,routeId:e.ROUTE_HEALTH_ROUTE_ID,expectedUpdatedAt:e.RECOVERY_BACKFILL_EXPECTED_UPDATED_AT,
+      since:e.RECOVERY_BACKFILL_SINCE,until:e.RECOVERY_BACKFILL_UNTIL,runUrl:`https://github.com/rolln-ai/axel/actions/runs/${e.GITHUB_RUN_ID}`,
+      countEvents:async(sourceId,since,until)=>{
+        const url=new URL(e.CLICKHOUSE_URL);
+        for(const [key,value] of Object.entries({readonly:'1',default_format:'JSON',max_execution_time:'20',max_threads:'2',
+          param_workspace:e.ROUTE_HEALTH_WORKSPACE_ID,param_source:sourceId,param_since:since.toISOString(),param_until:until.toISOString()})) url.searchParams.set(key,value);
+        const response=await fetch(url,{method:'POST',redirect:'error',signal:AbortSignal.timeout(25_000),
+          headers:{'X-ClickHouse-User':e.CLICKHOUSE_USER??'default','X-ClickHouse-Key':e.CLICKHOUSE_PASSWORD??''},
+          body:`SELECT count() AS n FROM events WHERE workspace_id={workspace:String} AND source_id={source:String}
+            AND received_at>=parseDateTime64BestEffort({since:String},3) AND received_at<parseDateTime64BestEffort({until:String},3) AND is_test=0`});
+        if(!response.ok) fail();
+        return Number((await response.json()).data?.[0]?.n);
+      },
+    })));
+  } finally { await client.end(); }
+}
+if(process.argv[1] && import.meta.url===pathToFileURL(process.argv[1]).href) {
+  main().catch(()=>{console.error("recovery_backfill_failed_inspect_before_retry");process.exitCode=1;});
+}

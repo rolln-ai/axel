@@ -18,7 +18,7 @@
     "linear:comment": "node scripts/linear-comment.mjs",
     "dashboard:load-budget": "node scripts/dashboard-load-budget.mjs",
     "dev": "turbo run dev",
-    "test:database": "pnpm --filter @axel/shared build && node --import tsx --conditions=react-server --test scripts/test/recover-array-collapse-route.integration.mjs && node --experimental-strip-types --test scripts/test/admin-growth-postgres.integration.mjs scripts/test/inspect-route-health.integration.mjs && AXEL_RUN_POSTGRES_INTEGRATION=1 node --test scripts/test/database-service-roles.integration.mjs scripts/test/render-database-access.integration.mjs && AXEL_RUN_POSTGRES_INTEGRATION=1 pnpm --filter @axel/dashboard exec vitest run test/impact-alerts-database.test.ts",
+    "test:database": "pnpm --filter @axel/shared build && node --import tsx --conditions=react-server --test scripts/test/recover-array-collapse-route.integration.mjs scripts/test/recovery-backfill.integration.mjs && node --experimental-strip-types --test scripts/test/admin-growth-postgres.integration.mjs scripts/test/inspect-route-health.integration.mjs && AXEL_RUN_POSTGRES_INTEGRATION=1 node --test scripts/test/database-service-roles.integration.mjs scripts/test/render-database-access.integration.mjs && AXEL_RUN_POSTGRES_INTEGRATION=1 pnpm --filter @axel/dashboard exec vitest run test/impact-alerts-database.test.ts",
     "test:analytics": "node --experimental-strip-types --conditions=react-server --test scripts/test/clickhouse-outcomes.integration.mjs",
     "verify": "pnpm lint && pnpm lint:sql && pnpm typecheck && pnpm test && pnpm test:database && pnpm test:analytics && pnpm visual:smoke && pnpm test:dashboard",
     "test:dashboard": "tsx scripts/dashboard-qa.mjs --test",

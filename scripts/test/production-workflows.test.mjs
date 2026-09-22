@@ -672,7 +672,7 @@ test("runtime credentials stay in bounded distribution, diagnostic, and recovery
       read(file),
     ),
   );
-  assert.deepEqual(consumers, [".github/workflows/inspect-route-health.yml", ".github/workflows/recover-array-collapse-route.yml", ".github/workflows/sync-database-url.yml"]);
+  assert.deepEqual(consumers, [".github/workflows/inspect-route-health.yml", ".github/workflows/recover-array-collapse-route.yml", ".github/workflows/recovery-backfill.yml", ".github/workflows/sync-database-url.yml"]);
 
   const workflow = read(".github/workflows/sync-database-url.yml");
   assert.equal([...workflow.matchAll(/wrangler secret put DATABASE_URL/g)].length, 1);
@@ -1221,4 +1221,15 @@ test("public security and self-hosting claims stay within implemented guarantees
     ci,
     /image: postgres:16@sha256:f1c3376c26f2609ab9f29f71f824103fe2fcd8ee0346485cb6122a4f93df6f94/,
   );
+});
+
+test("recovery backfills use protected reviewed code and keep credentials inside the operation", () => {
+  const workflow=read(".github/workflows/recovery-backfill.yml");
+  assert.match(workflow, /github\.ref == 'refs\/heads\/main'/);
+  assert.match(workflow, /^    environment: Production$/m);
+  assert.match(workflow, /^  group: production-deploy$/m);
+  assert.match(workflow, /^  contents: read$/m);
+  assert.match(workflow, /^          persist-credentials: false$/m);
+  assert.match(workflow, /RECOVERY_BACKFILL_CONFIRM: \$\{\{ inputs\.confirm_production \}\}/);
+  assert.doesNotMatch(workflow, /upload-artifact|GITHUB_OUTPUT|GITHUB_ENV|vercel|wrangler/);
 });

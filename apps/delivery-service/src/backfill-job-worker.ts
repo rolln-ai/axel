@@ -33,7 +33,9 @@
  * event's replay twice.
  */
 
+import { randomBytes } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
+import { recoveryDeliveryState, recoveryRouteReady } from "./recovery-backfill.js";
 import {
   startPeriodicRunner,
   type RunnerHandle,
@@ -60,6 +62,8 @@ interface BackfillJobRow {
   cursor_received_at: string | null;
   cursor_event_id: string | null;
   max_inflight_replays: number;
+  recovery_destination_id?: string | null;
+  recovery_route_updated_at?: string | null;
   enqueued: string; // bigint comes back as string from pg
 }
 
@@ -150,6 +154,7 @@ async function fetchNextWindow(
   env: ClickhouseEnv,
   job: BackfillJobRow,
   fetchImpl: typeof fetch,
+  limit: number,
 ): Promise<ClickhouseRow[]> {
   // Without a cursor we just use `since` as the lower bound. With a cursor,
   // we want strictly-after — `(received_at, event_id) > (cursor_rcv, cursor_evt)`
@@ -184,7 +189,7 @@ async function fetchNextWindow(
         until: untilParam,
         cursor_rcv: toClickhouseDateTime(new Date(job.cursor_received_at)),
         cursor_evt: job.cursor_event_id,
-        lim: BATCH_LIMIT,
+        lim: limit,
       },
       fetchImpl,
     );
@@ -206,23 +211,10 @@ async function fetchNextWindow(
       source_id: job.source_id,
       since: sinceParam,
       until: untilParam,
-      lim: BATCH_LIMIT,
+      lim: limit,
     },
     fetchImpl,
   );
-}
-
-/**
- * Generate a unique rpl_ id. The router-side `prefixedId("rpl")` uses
- * crypto.randomBytes; here we use the same shape with crypto so replays
- * are indistinguishable from dashboard-initiated ones.
- */
-function generateReplayId(counter: { n: number }): string {
-  // counter ensures uniqueness within a single bulk INSERT — combined with
-  // wall time for global uniqueness. Crypto-random would be stronger but
-  // requires a sync RNG; this is good enough for INSERT-time uniqueness.
-  counter.n += 1;
-  return `rpl_${Date.now().toString(36)}_${counter.n.toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 /**
@@ -234,13 +226,14 @@ async function enqueueWindow(
   client: PoolClient,
   job: BackfillJobRow,
   rows: ClickhouseRow[],
+  completed = new Set<string>(),
 ): Promise<void> {
-  const counter = { n: 0 };
   const values: unknown[] = [];
-  const tuples = rows.map((r, j) => {
+  const eligible = rows.filter(row => !completed.has(row.event_id));
+  const tuples = eligible.map((r, j) => {
     const o = j * 10;
     values.push(
-      generateReplayId(counter),
+      `rpy_${randomBytes(16).toString("base64url")}`,
       job.workspace_id,
       r.event_id,
       job.source_id,
@@ -253,7 +246,7 @@ async function enqueueWindow(
     );
     return `($${o + 1},$${o + 2},$${o + 3},$${o + 4},$${o + 5},$${o + 6},$${o + 7},$${o + 8},$${o + 9},$${o + 10})`;
   });
-  const inserted = await client.query(
+  const inserted = tuples.length === 0 ? { rowCount: 0 } : await client.query(
     `INSERT INTO replay_requests
        (id, workspace_id, event_id, source_id, r2_key, scope, route_id, destination_id, state, backfill_job_id)
      VALUES ${tuples.join(",")}
@@ -263,7 +256,7 @@ async function enqueueWindow(
   // A crash-replayed window re-pulls the same events; the partial unique
   // index (migration 0039) turns those into no-ops. Count actually-inserted
   // rows so `enqueued` doesn't over-count on a replayed window.
-  const insertedCount = inserted.rowCount ?? rows.length;
+  const insertedCount = inserted.rowCount ?? eligible.length;
 
   const lastRow = rows[rows.length - 1]!;
   await client.query(
@@ -272,9 +265,10 @@ async function enqueueWindow(
             started_at = COALESCE(started_at, now()),
             cursor_received_at = $2,
             cursor_event_id = $3,
-            enqueued = enqueued + $4
+            enqueued = enqueued + $4,
+            skipped = skipped + $5
       WHERE id = $1`,
-    [job.id, clickhouseToIso(lastRow.received_at_text), lastRow.event_id, insertedCount],
+    [job.id, clickhouseToIso(lastRow.received_at_text), lastRow.event_id, insertedCount, rows.length - eligible.length],
   );
 }
 
@@ -311,7 +305,7 @@ async function countPendingReplays(pool: Pool, jobId: string): Promise<number> {
     `SELECT count(*)::text AS n
        FROM replay_requests
       WHERE backfill_job_id = $1
-        AND state = 'pending'`,
+        AND state IN ('pending', 'in_progress')`,
     [jobId],
   );
   return Number.parseInt(result.rows[0]?.n ?? "0", 10);
@@ -338,6 +332,7 @@ async function claimActiveJobs(pool: Pool, limit: number): Promise<BackfillJobRo
             cursor_received_at::text AS cursor_received_at,
             cursor_event_id,
             max_inflight_replays,
+            recovery_destination_id, recovery_route_updated_at::text AS recovery_route_updated_at,
             enqueued::text AS enqueued
        FROM backfill_jobs
       WHERE state IN ('pending', 'running')
@@ -362,15 +357,27 @@ export async function advanceJob(
     [job.id],
   );
   const freshState = freshResult.rows[0]?.state;
+  if (!freshState) return "cancelled";
   if (freshState === "cancelled") return "cancelled";
   if (freshState === "done" || freshState === "failed") return freshState as "done" | "failed";
 
+  if (job.recovery_destination_id) {
+    if (!await recoveryRouteReady(deps.pool, job)) {
+      await markJobFailed(deps.pool, job.id, "recovery_route_unavailable_or_changed");
+      return "failed";
+    }
+    const failed = await deps.pool.query(`SELECT 1 FROM replay_requests WHERE backfill_job_id=$1 AND state='failed' LIMIT 1`, [job.id]);
+    if (failed.rows.length > 0) {
+      await markJobFailed(deps.pool, job.id, "recovery_delivery_failed");
+      return "failed";
+    }
+  }
   const pending = await countPendingReplays(deps.pool, job.id);
   if (pending >= job.max_inflight_replays) return "throttled";
 
   let rows: ClickhouseRow[];
   try {
-    rows = await fetchNextWindow(deps.clickhouse, job, deps.fetchImpl ?? fetch);
+    rows = await fetchNextWindow(deps.clickhouse, job, deps.fetchImpl ?? fetch, Math.min(BATCH_LIMIT, job.max_inflight_replays - pending));
   } catch (err) {
     const reason = sanitizeConnectorDiagnosticForStorage(
       err instanceof Error ? err.message : "unknown",
@@ -381,11 +388,12 @@ export async function advanceJob(
   }
 
   if (rows.length === 0) {
+    if (pending > 0) return "throttled";
     await markJobDone(deps.pool, job.id);
     return "done";
   }
 
-  if (rows.some((row) => !isCanonicalRawPayloadKey(row.r2_key, {
+  if (rows.some((row) => (job.recovery_destination_id && row.event_id.includes("#")) || !isCanonicalRawPayloadKey(row.r2_key, {
     workspaceId: job.workspace_id,
     eventId: row.event_id,
     sourceId: job.source_id,
@@ -399,7 +407,24 @@ export async function advanceJob(
   const client = await deps.pool.connect();
   try {
     await client.query("BEGIN");
-    await enqueueWindow(client, job, rows);
+    let completed = new Set<string>();
+    if (job.recovery_destination_id) {
+      const fresh = (await client.query(`SELECT state, cursor_received_at::text AS cursor_received_at, cursor_event_id
+        FROM backfill_jobs WHERE id=$1 FOR UPDATE`, [job.id])).rows[0];
+      if (!fresh || !["pending", "running"].includes(fresh.state)
+          || fresh.cursor_received_at !== job.cursor_received_at || fresh.cursor_event_id !== job.cursor_event_id) {
+        await client.query("ROLLBACK");
+        return "throttled";
+      }
+      if (!await recoveryRouteReady(client, job, true)) throw new Error("recovery_route_unavailable_or_changed");
+      const delivery = await recoveryDeliveryState(client, job, rows.map(row => row.event_id));
+      if (delivery.busy) {
+        await client.query("ROLLBACK");
+        return "throttled";
+      }
+      completed = delivery.completed;
+    }
+    await enqueueWindow(client, job, rows, completed);
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK");

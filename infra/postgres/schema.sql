@@ -780,6 +780,9 @@ CREATE TABLE IF NOT EXISTS backfill_jobs (
   until timestamptz NOT NULL,
   state text NOT NULL CHECK (state IN ('pending', 'running', 'done', 'failed', 'cancelled')),
   total_estimated bigint,
+  recovery_destination_id text,
+  recovery_route_updated_at timestamptz,
+  skipped bigint NOT NULL DEFAULT 0,
   enqueued bigint NOT NULL DEFAULT 0,
   -- Pagination cursor. NULL until the worker's first batch — at that point
   -- we record (received_at, event_id) of the last row enqueued so the next
@@ -1860,3 +1863,12 @@ CREATE INDEX IF NOT EXISTS dead_letters_untriaged_idx
 -- Migration 0079: marker for the dead-letter triage capability grant.
 COMMENT ON COLUMN public.dead_letters.triage_reason IS
   'Jev typed failure reason. Workers grant: scripts/sync-dead-letter-triage-access.sql';
+
+CREATE INDEX IF NOT EXISTS delivery_idempotency_recovery_idx
+  ON delivery_idempotency (workspace_id, route_id, destination_id, (split_part(event_id, '#', 1)))
+  WHERE state IN ('completed', 'in_flight');
+CREATE INDEX IF NOT EXISTS replay_requests_recovery_idx
+  ON replay_requests (workspace_id, source_id, (split_part(event_id, '#', 1)))
+  WHERE state IN ('pending', 'in_progress');
+CREATE INDEX IF NOT EXISTS replay_requests_backfill_state_idx
+  ON replay_requests (backfill_job_id, state) WHERE backfill_job_id IS NOT NULL;
