@@ -11,7 +11,7 @@ test("route errors point to the route and live recovery overrides an old alert",
   await page.getByLabel("Password", { exact: true }).fill(qaPassword);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   const card = page.locator("article").filter({ hasText: "Synthetic healthy destination" });
-  await expect(card.getByText(/The route stopped after a processing error/)).toBeVisible();
+  await expect(card.getByText("The route stopped after a processing error. Correct the route and enable it, then click Fix now to replay.", { exact: true })).toBeVisible();
   await expect(card).not.toContainText("destination is paused");
   await card.getByRole("button", { name: "Fix now", exact: true }).click();
   await expect(card.getByRole("status")).toContainText("Correct the route and enable it on the route page");
@@ -26,7 +26,7 @@ test("route errors point to the route and live recovery overrides an old alert",
   await page.goto("/inbox");
   // Monitoring is deliberately unavailable in local QA. The stored alert
   // still describes the route error, but the action must read current state.
-  await expect(card.getByText(/The route stopped after a processing error/)).toBeVisible();
+  await expect(card.getByText("The route stopped after a processing error. Correct the route and enable it, then click Fix now to replay.", { exact: true })).toBeVisible();
   await card.getByRole("button", { name: "Fix now", exact: true }).click();
   await expect(card.getByRole("button", { name: "Fixing…", exact: true })).toBeVisible();
   await expect(card.getByRole("status")).not.toContainText("Correct the route");
