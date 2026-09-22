@@ -672,7 +672,7 @@ test("runtime credentials stay in bounded distribution, diagnostic, and recovery
       read(file),
     ),
   );
-  assert.deepEqual(consumers, [".github/workflows/inspect-route-health.yml", ".github/workflows/recover-array-collapse-route.yml", ".github/workflows/recovery-backfill.yml", ".github/workflows/sync-database-url.yml"]);
+  assert.deepEqual(consumers, [".github/workflows/inspect-route-health.yml", ".github/workflows/recover-array-collapse-route.yml", ".github/workflows/recovery-backfill.yml", ".github/workflows/repair-bigquery-route.yml", ".github/workflows/sync-database-url.yml"]);
 
   const workflow = read(".github/workflows/sync-database-url.yml");
   assert.equal([...workflow.matchAll(/wrangler secret put DATABASE_URL/g)].length, 1);
@@ -1231,5 +1231,17 @@ test("recovery backfills use protected reviewed code and keep credentials inside
   assert.match(workflow, /^  contents: read$/m);
   assert.match(workflow, /^          persist-credentials: false$/m);
   assert.match(workflow, /RECOVERY_BACKFILL_CONFIRM: \$\{\{ inputs\.confirm_production \}\}/);
+  assert.doesNotMatch(workflow, /upload-artifact|GITHUB_OUTPUT|GITHUB_ENV|vercel|wrangler/);
+});
+
+test("BigQuery recovery uses protected reviewed code and keeps secrets out of artifacts", () => {
+  const workflow=read(".github/workflows/repair-bigquery-route.yml");
+  assert.match(workflow, /github\.ref == 'refs\/heads\/main'/);
+  assert.match(workflow, /^    environment: Production$/m);
+  assert.match(workflow, /^  group: production-deploy$/m);
+  assert.match(workflow, /^  contents: read$/m);
+  assert.match(workflow, /^          persist-credentials: false$/m);
+  assert.match(workflow, /BQ_REPAIR_PLAN_HASH: \$\{\{ inputs\.plan_hash \}\}/);
+  assert.match(workflow, /BQ_REPAIR_CONFIRM: \$\{\{ inputs\.confirm_production \}\}/);
   assert.doesNotMatch(workflow, /upload-artifact|GITHUB_OUTPUT|GITHUB_ENV|vercel|wrangler/);
 });
