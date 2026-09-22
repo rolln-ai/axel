@@ -90,7 +90,8 @@ export async function prepareBigQueryRouteRepair(client, options) {
   for(const issue of ordered) {
     const proposal=repairProposalFromIssue(issue);
     // Only lossless serialization into an existing scalar STRING column.
-    // Numeric rounding, schema DDL and record/scalar rewrites are excluded.
+    // Numeric rounding and record/scalar rewrites are excluded. Missing
+    // columns require an explicit opt-in to the existing route policy.
     const repair=proposal?.repair;
     const scalarString=issue.kind==='type_conflict' && issue.existing==='STRING'
       && ['BOOL','INT64','FLOAT64'].includes(issue.expected) && repair?.kind==='coerce' && repair.to==='string';
@@ -166,10 +167,11 @@ export async function reconcileBigQueryReplays(client,options) {
       SELECT * FROM jsonb_to_recordset($5::jsonb) AS x(id bigint,base_event_id text)
     ), confirmed AS (
       SELECT DISTINCT ON(c.id) c.id,rr.id AS replay_id FROM candidates c
+      JOIN dead_letters failure ON failure.id=c.id
       JOIN delivery_idempotency di ON di.workspace_id=$1 AND di.route_id=$2 AND di.destination_id=$3
-        AND split_part(di.event_id,'#',1)=c.base_event_id AND di.state='completed'
+        AND split_part(di.event_id,'#',1)=c.base_event_id AND di.state='completed' AND di.updated_at>=failure.errored_at
       JOIN replay_requests rr ON rr.id=split_part(di.event_id,'#',2) AND rr.workspace_id=$1
-        AND rr.source_id=$4 AND rr.route_id=$2 AND rr.event_id=c.base_event_id AND rr.state='done'
+        AND rr.source_id=$4 AND rr.route_id=$2 AND rr.event_id=c.base_event_id AND rr.state='done' AND rr.finished_at>=failure.errored_at
         AND di.event_id=rr.event_id||'#'||rr.id
       ORDER BY c.id,rr.finished_at DESC
     ) UPDATE dead_letters dl SET resolved_at=now(),resolved_by_replay_id=c.replay_id FROM confirmed c

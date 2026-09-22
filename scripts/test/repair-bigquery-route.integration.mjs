@@ -85,6 +85,13 @@ test("reviewed BigQuery serialization is scoped, lossless, atomic and compatible
   await client.query(`INSERT INTO delivery_idempotency(idempotency_key,workspace_id,event_id,route_id,destination_id,state,expires_at)
     VALUES('synthetic','ws_a',$1,'rt_a','dst_a','completed',now()+interval '1 day')`,['evt_a#'+replay]);
   await client.query('SET ROLE synthetic_dashboard');
+  await client.query('RESET ROLE');
+  await client.query("UPDATE delivery_idempotency SET updated_at=now()-interval '1 day'");
+  await client.query('SET ROLE synthetic_dashboard');
+  assert.equal((await reconcileBigQueryReplays(client,options)).confirmed_failures_resolved,0);
+  await client.query('RESET ROLE');
+  await client.query("UPDATE delivery_idempotency SET updated_at=now()");
+  await client.query('SET ROLE synthetic_dashboard');
   assert.equal((await reconcileBigQueryReplays(client,options)).confirmed_failures_resolved,2);
 
   // A compatible payload with missing columns still fails under manual
@@ -100,7 +107,7 @@ test("reviewed BigQuery serialization is scoped, lossless, atomic and compatible
   await assert.rejects(applyBigQueryRouteRepair(client,{...newOptions,expectedPlanHash:additionPlan.planHash},additionPlan));
   const additionResult=await applyBigQueryRouteRepair(client,{...newOptions,allowNewFields:true,expectedPlanHash:additionPlan.planHash},additionPlan);
   assert.equal(additionResult.enabled_new_fields,true);assert.equal(additionResult.replays_queued,1);
-  assert.equal((await client.query("SELECT binding FROM route_destinations WHERE route_id='rt_a'")).rows[0].binding.schema_evolution,'add_columns');
+  assert.deepEqual((await client.query("SELECT binding FROM route_destinations WHERE route_id='rt_a'")).rows[0].binding,{dataset:'synthetic',table:'events',mode:'typed_records',schema_evolution:'add_columns'});
   assert.equal((await client.query("SELECT event_id FROM replay_requests WHERE event_id='evt_new'")).rows.length,1);
 
 });
