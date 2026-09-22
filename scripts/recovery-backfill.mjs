@@ -138,9 +138,15 @@ export async function reconcileRecoveryBackfill(client, options) {
       || !await recoveryRouteReady(client,job,true)) fail();
     // Disabled routes count too: a failure before routing has no reliable
     // evidence that any other configured route was intentionally excluded.
-    const routes = (await client.query(`SELECT id FROM routes
+    const routes = (await client.query(`SELECT id,engine,pipeline_graph FROM routes
       WHERE workspace_id=$1 AND source_id=$2 FOR SHARE`,[workspaceId,job.source_id])).rows;
-    if (routes.length !== 1 || routes[0].id !== routeId) fail();
+    if (routes.length !== 1 || routes[0].id !== routeId || routes[0].engine !== 'declarative') fail();
+    const graph = routes[0].pipeline_graph;
+    if (graph !== null) {
+      if (!Array.isArray(graph?.nodes)) fail();
+      const leaves = graph.nodes.filter(node => node?.kind === 'destination');
+      if (leaves.length !== 1 || leaves[0].destination_id !== job.recovery_destination_id) fail();
+    }
     const resolved = await client.query(`WITH confirmed AS (
       SELECT DISTINCT ON(dl.id) dl.id,rr.id AS replay_id
       FROM dead_letters dl

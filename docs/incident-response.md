@@ -32,7 +32,8 @@ reviewed route's `expected_updated_at`, and
 `confirm_production=reconcile-confirmed-source-failures`. Reconciliation requires
 a successful replay and a completed delivery claim for the same event, retained
 payload, workspace, route and destination after the original failure. It refuses
-sources with additional routes, including disabled routes. It logs only the
+sources with additional routes, including disabled routes, and graphs with more
+than one destination leaf. It logs only the
 resolved count and writes an audit entry; it neither sends another delivery nor
 changes route settings. Use the source-wide dashboard replay controls when the
 source has multiple routes.

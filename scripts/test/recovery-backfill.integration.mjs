@@ -153,6 +153,16 @@ test("recovery backfill skips confirmed deliveries, waits for ambiguous work and
   await client.query("INSERT INTO routes(id,workspace_id,source_id,status) VALUES('rt_extra','ws_a','src_a','disabled')");
   await assert.rejects(reconcileAsDashboard(resumeOptions));
   await client.query("DELETE FROM routes WHERE id='rt_extra'");
+  await client.query("UPDATE routes SET engine='legacy_js' WHERE id='rt_a'");
+  await assert.rejects(reconcileAsDashboard(resumeOptions));
+  await client.query("UPDATE routes SET engine='declarative',pipeline_graph=$1::jsonb WHERE id='rt_a'",
+    [JSON.stringify({nodes:[{kind:'destination',destination_id:'dst_a'},{kind:'destination',destination_id:'dst_a'}]})]);
+  await assert.rejects(reconcileAsDashboard(resumeOptions));
+  await client.query("UPDATE routes SET pipeline_graph=$1::jsonb WHERE id='rt_a'",
+    [JSON.stringify({nodes:[{kind:'destination',destination_id:'dst_wrong'}]})]);
+  await assert.rejects(reconcileAsDashboard(resumeOptions));
+  await client.query("UPDATE routes SET pipeline_graph=$1::jsonb WHERE id='rt_a'",
+    [JSON.stringify({nodes:[{kind:'source',id:'src'},{kind:'destination',destination_id:'dst_a',id:'dst'}],version:1,edges:[{from:'src',to:'dst'}]})]);
   const replay=replayRows.find(row=>row.event_id==='evt_missing');
   const payload='events/ws_a/2026-09-17/evt_missing';
   const insertFailure=async (ws,source,route,key,reason='max_retries_exceeded',destination=null,when="now()-interval '2 minutes'",isTest=false)=>
