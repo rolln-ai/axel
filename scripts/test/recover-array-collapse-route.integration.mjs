@@ -3,7 +3,8 @@ import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { recoverArrayCollapseRoute } from "../recover-array-collapse-route.mjs";
+import { recoverArrayCollapseRoute, recoveryErrorCode } from "../recover-array-collapse-route.mjs";
+import { databaseServiceAccessProfile } from "../database-service-access-profiles.mjs";
 import { connectDisposablePostgres } from "./postgres-integration-test-helpers.mjs";
 
 test("route recovery validates retained payloads before an audited atomic resume and replay", { timeout: 120_000 }, async t => {
@@ -52,7 +53,17 @@ test("route recovery validates retained payloads before an audited atomic resume
   } }));
   await assertUnchanged();
   await client.query("UPDATE routes SET updated_at='2026-09-17T01:33:39.956Z' WHERE id='rt_a'");
+  // Exercise the production dashboard role: route_destinations has no UPDATE
+  // privilege, so SELECT FOR SHARE on that binding table is forbidden.
+  await client.query("CREATE ROLE synthetic_dashboard NOLOGIN");
+  const profile = databaseServiceAccessProfile("dashboard");
+  for (const [table, privileges] of Object.entries(profile.tables))
+    await client.query(`GRANT ${privileges.join(",")} ON TABLE ${table} TO synthetic_dashboard`);
+  for (const [sequence, privileges] of Object.entries(profile.sequences))
+    await client.query(`GRANT ${privileges.join(",")} ON SEQUENCE ${sequence} TO synthetic_dashboard`);
+  await client.query("SET ROLE synthetic_dashboard");
   assert.deepEqual(await recoverArrayCollapseRoute(client, options), { status: "resumed", validated_failures: 1, replays_queued: 1, already_in_flight: 0 });
+  await client.query("RESET ROLE");
   assert.equal((await client.query("SELECT status FROM routes WHERE id='rt_a'")).rows[0].status, "active");
   const replay = (await client.query("SELECT workspace_id,event_id,scope,route_id,state FROM replay_requests")).rows;
   assert.deepEqual(replay, [{ workspace_id: "ws_a", event_id: "evt_a", scope: "route", route_id: "rt_a", state: "pending" }]);
@@ -60,4 +71,10 @@ test("route recovery validates retained payloads before an audited atomic resume
   assert.equal((await client.query("SELECT resolved_at FROM dead_letters")).rows[0].resolved_at, null);
   await assert.rejects(recoverArrayCollapseRoute(client, options));
   assert.equal((await client.query("SELECT count(*)::int AS n FROM replay_requests")).rows[0].n, 1);
+});
+
+ test("recovery diagnostics never expose provider bodies or customer values", () => {
+  assert.equal(recoveryErrorCode(new Error("private provider response")), "operation_failed");
+  assert.equal(recoveryErrorCode(Object.assign(new Error("private SQL detail"), { code: "42501" })), "postgres_42501");
+  assert.equal(recoveryErrorCode(new Error("route_recovery_payload_key_mismatch")), "route_recovery_payload_key_mismatch");
 });
