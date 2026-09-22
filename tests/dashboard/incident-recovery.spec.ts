@@ -21,6 +21,7 @@ test("route errors point to the route and live recovery overrides an old alert",
   await testInfo.attach("route-error-incident", { path: screenshot, contentType: "image/png" });
   await card.getByRole("link", { name: "Route", exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/routes/${routeId}$`));
+  await page.goto(`/routes/${routeId}?tab=destinations`);
   await page.getByRole("button", { name: "Enable", exact: true }).click();
   await expect(page.getByRole("button", { name: "Disable", exact: true })).toBeVisible();
   await page.goto("/inbox");
