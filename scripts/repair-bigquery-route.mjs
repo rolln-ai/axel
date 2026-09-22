@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import pg from "pg";
 import { cloudflareR2ObjectUrl, compareBigQuerySchemas, executeGraph, expectedBigQuerySchema,
-  isCanonicalRawPayloadKey, parsePipelineGraph } from "../packages/shared/dist/index.js";
+  isCanonicalRawPayloadKey, parseCanonicalRawPayloadKey, parsePipelineGraph } from "../packages/shared/dist/index.js";
 import { addRepairToPipeline, repairProposalFromIssue } from "../apps/dashboard/lib/inbox-repair.ts";
 import { bigQueryModeForBinding } from "../apps/dashboard/lib/pipeline-binding.ts";
 import { introspectBigQueryDestination } from "../apps/dashboard/lib/destination-inspect.ts";
@@ -19,6 +19,14 @@ import { validateRouteScope } from "./inspect-route-health.mjs";
 const fail = () => { throw new Error("bigquery_route_repair_precondition_failed"); };
 const hash = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const object = value => value && typeof value==='object' && !Array.isArray(value) ? value : {};
+
+export function retainedBaseEvent(row, workspaceId) {
+  const parsed=parseCanonicalRawPayloadKey(row.r2_key);
+  if(!parsed || parsed.eventId.includes('#') || !isCanonicalRawPayloadKey(row.r2_key,{workspaceId,sourceId:row.source_id,eventId:parsed.eventId})) fail();
+  const suffix=row.event_id.slice(parsed.eventId.length);
+  if(!row.event_id.startsWith(parsed.eventId) || (suffix!==''&&!/^(?:#rp[yl]_[A-Za-z0-9_-]+)+$/.test(suffix))) fail();
+  return parsed.eventId;
+}
 
 async function loadState(client, workspaceId, routeId, lock = false) {
   const route=(await client.query(`SELECT r.source_id,r.pipeline_graph::text AS graph,r.updated_at::text AS updated_at
@@ -64,12 +72,15 @@ export async function prepareBigQueryRouteRepair(client, options) {
   if(schema.kind!=='schema') fail();
   const payloads=[];
   const issues=new Map();
+  const additions=new Set();
   onStage('validate_retained_payloads');
   for(const row of failures) {
-    if(!isCanonicalRawPayloadKey(row.r2_key,{workspaceId,sourceId:row.source_id,eventId:row.event_id})) fail();
+    row.base_event_id=retainedBaseEvent(row,workspaceId);
     const payload=await readPayload(row.r2_key);
     payloads.push(payload);
-    for(const issue of compareBigQuerySchemas(expectedBigQuerySchema([outgoing(payload,graph,state.destination.id)],mode,payloadColumn),schema.fields).conflicts)
+    const compatibility=compareBigQuerySchemas(expectedBigQuerySchema([outgoing(payload,graph,state.destination.id)],mode,payloadColumn),schema.fields);
+    for(const path of compatibility.additions) additions.add(path);
+    for(const issue of compatibility.conflicts)
       issues.set(JSON.stringify([issue.path,issue.kind,issue.expected,issue.existing]),issue);
   }
   const ordered=[...issues.values()].sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)));
@@ -79,7 +90,8 @@ export async function prepareBigQueryRouteRepair(client, options) {
   for(const issue of ordered) {
     const proposal=repairProposalFromIssue(issue);
     // Only lossless serialization into an existing scalar STRING column.
-    // Numeric rounding, schema DDL and record/scalar rewrites are excluded.
+    // Numeric rounding and record/scalar rewrites are excluded. Missing
+    // columns require an explicit opt-in to the existing route policy.
     const repair=proposal?.repair;
     const scalarString=issue.kind==='type_conflict' && issue.existing==='STRING'
       && ['BOOL','INT64','FLOAT64'].includes(issue.expected) && repair?.kind==='coerce' && repair.to==='string';
@@ -93,9 +105,12 @@ export async function prepareBigQueryRouteRepair(client, options) {
   if(supported) for(const payload of payloads) {
     if(compareBigQuerySchemas(expectedBigQuerySchema([outgoing(payload,candidate,state.destination.id)],mode,payloadColumn),schema.fields).conflicts.length) supported=false;
   }
-  const planHash=hash({state,schema:schema.fields,issues:ordered.map(({path,kind,expected,existing})=>({path,kind,expected,existing})),candidate});
-  return {state,schema,candidate,failures,repairs,supported,planHash,target,
+  const requiresNewFields=additions.size>0 && target.schema_evolution!=='add_columns';
+  if(requiresNewFields && (!state.destination.binding || additions.size>200)) supported=false;
+  const planHash=hash({state,additions:[...additions].sort(),requiresNewFields,schema:schema.fields,issues:ordered.map(({path,kind,expected,existing})=>({path,kind,expected,existing})),candidate});
+  return {state,schema,candidate,failures,repairs,supported,planHash,target,requiresNewFields,
     summary:{plan_hash:planHash,supported,validated_failures:failures.length,
+      schema_policy:target.schema_evolution==='add_columns'?'add_columns':'manual',additional_fields:additions.size,requires_new_fields:requiresNewFields,
       conflicts:ordered.map(issue=>({field_hash:hash(issue.path).slice(0,12),kind:issue.kind,
         expected:/^(REPEATED )?[A-Z0-9_]+$/.test(issue.expected)?issue.expected:'unknown',
         existing:/^(REPEATED )?[A-Z0-9_]+$/.test(issue.existing)?issue.existing:'unknown'}))}};
@@ -103,7 +118,7 @@ export async function prepareBigQueryRouteRepair(client, options) {
 
 export async function applyBigQueryRouteRepair(client, options, plan) {
   const {workspaceId,routeId,expectedPlanHash,readSchema,runUrl,onStage=()=>{}}=options;
-  if(!plan.supported || expectedPlanHash!==plan.planHash || !/^https:\/\/github\.com\/rolln-ai\/axel\/actions\/runs\/\d+$/.test(runUrl)) fail();
+  if(!plan.supported || (plan.requiresNewFields && options.allowNewFields!==true) || expectedPlanHash!==plan.planHash || !/^https:\/\/github\.com\/rolln-ai\/axel\/actions\/runs\/\d+$/.test(runUrl)) fail();
   onStage('recheck_schema');
   const schema=await readSchema(plan.state.destination.id,{dataset:plan.target.dataset,table:plan.target.table});
   if(schema.kind!=='schema'||hash(schema.fields)!==hash(plan.schema.fields)) fail();
@@ -114,30 +129,69 @@ export async function applyBigQueryRouteRepair(client, options, plan) {
     onStage('lock_route');
     const state=await loadState(client,workspaceId,routeId,true);
     if(JSON.stringify(state)!==JSON.stringify(plan.state)) fail();
-    if(plan.repairs.length>0) await client.query(`UPDATE routes SET pipeline_graph=$1::jsonb,updated_at=now() WHERE workspace_id=$2 AND id=$3`,[JSON.stringify(plan.candidate),workspaceId,routeId]);
+    if(plan.requiresNewFields) {
+      // Same delete/insert pattern as the dashboard; its role intentionally
+      // cannot UPDATE binding rows. The route lock fences binding edits.
+      await client.query('DELETE FROM route_destinations WHERE route_id=$1 AND destination_id=$2',[routeId,state.destination.id]);
+      await client.query('INSERT INTO route_destinations(route_id,destination_id,binding) VALUES($1,$2,$3::jsonb)',
+        [routeId,state.destination.id,JSON.stringify({...state.destination.binding,schema_evolution:'add_columns'})]);
+    }
+    if(plan.repairs.length>0 || plan.requiresNewFields) await client.query(`UPDATE routes SET pipeline_graph=$1::jsonb,updated_at=now() WHERE workspace_id=$2 AND id=$3`,[JSON.stringify(plan.candidate),workspaceId,routeId]);
     onStage('queue_replays');
     const replay=await enqueueReplays(client,{workspaceId,actorUserId:null,reason:'reviewed_lossless_bigquery_repair',
-      candidates:{sql:`SELECT DISTINCT ON(event_id) event_id,source_id,r2_key,'route'::text AS scope,route_id,
+      candidates:{sql:`SELECT DISTINCT ON(split_part(event_id,'#',1)) split_part(event_id,'#',1) AS event_id,source_id,r2_key,'route'::text AS scope,route_id,
         NULL::text AS destination_id,reason AS failure_reason,fingerprint FROM dead_letters
         WHERE workspace_id=$1 AND route_id=$2 AND source_id=$3 AND destination_id=$4 AND resolved_at IS NULL AND id=ANY($5::bigint[])
-        ORDER BY event_id,id`,params:[workspaceId,routeId,state.route.source_id,state.destination.id,plan.failures.map(row=>row.id)]}});
+        ORDER BY split_part(event_id,'#',1),id`,params:[workspaceId,routeId,state.route.source_id,state.destination.id,plan.failures.map(row=>row.id)]}});
     if(replay.mutedSkipped>0) fail();
     await writeAudit(client,{workspaceId,actorUserId:null,action:'route.lossless_bigquery_repair',targetType:'route',targetId:routeId,
-      metadata:{plan_hash:plan.planHash,repairs:plan.repairs,queued:replay.queued,run_url:runUrl}});
+      metadata:{plan_hash:plan.planHash,repairs:plan.repairs,enabled_new_fields:plan.requiresNewFields,queued:replay.queued,run_url:runUrl}});
     await client.query('COMMIT');
-    return {status:'repaired',replays_queued:replay.queued,already_in_flight:replay.inFlightSkipped,fields_repaired:plan.repairs.length};
+    return {status:'repaired',replays_queued:replay.queued,already_in_flight:replay.inFlightSkipped,fields_repaired:plan.repairs.length,enabled_new_fields:plan.requiresNewFields};
   } catch(error) {await client.query('ROLLBACK').catch(()=>{});throw error;}
+}
+
+export async function reconcileBigQueryReplays(client,options) {
+  const {workspaceId,routeId,runUrl}=options;
+  validateRouteScope(workspaceId,routeId);
+  if(!/^https:\/\/github\.com\/rolln-ai\/axel\/actions\/runs\/\d+$/.test(runUrl)) fail();
+  await client.query('BEGIN');
+  try {
+    await client.query("SET LOCAL statement_timeout='10s'");
+    const state=await loadState(client,workspaceId,routeId,true);
+    const failures=(await client.query(`SELECT id::text,event_id,source_id,r2_key FROM dead_letters
+      WHERE workspace_id=$1 AND route_id=$2 AND source_id=$3 AND destination_id=$4 AND resolved_at IS NULL LIMIT 1000 FOR UPDATE`,
+      [workspaceId,routeId,state.route.source_id,state.destination.id])).rows;
+    const candidates=failures.map(row=>({id:row.id,base_event_id:retainedBaseEvent(row,workspaceId)}));
+    const resolved=await client.query(`WITH candidates AS (
+      SELECT * FROM jsonb_to_recordset($5::jsonb) AS x(id bigint,base_event_id text)
+    ), confirmed AS (
+      SELECT DISTINCT ON(c.id) c.id,rr.id AS replay_id FROM candidates c
+      JOIN dead_letters failure ON failure.id=c.id
+      JOIN delivery_idempotency di ON di.workspace_id=$1 AND di.route_id=$2 AND di.destination_id=$3
+        AND split_part(di.event_id,'#',1)=c.base_event_id AND di.state='completed' AND di.updated_at>=failure.errored_at
+      JOIN replay_requests rr ON rr.id=split_part(di.event_id,'#',2) AND rr.workspace_id=$1
+        AND rr.source_id=$4 AND rr.route_id=$2 AND rr.event_id=c.base_event_id AND rr.state='done' AND rr.finished_at>=failure.errored_at
+        AND di.event_id=rr.event_id||'#'||rr.id
+      ORDER BY c.id,rr.finished_at DESC
+    ) UPDATE dead_letters dl SET resolved_at=now(),resolved_by_replay_id=c.replay_id FROM confirmed c
+      WHERE dl.id=c.id AND dl.workspace_id=$1 AND dl.route_id=$2 AND dl.destination_id=$3 AND dl.source_id=$4 AND dl.resolved_at IS NULL`,
+      [workspaceId,routeId,state.destination.id,state.route.source_id,JSON.stringify(candidates)]);
+    await writeAudit(client,{workspaceId,actorUserId:null,action:'route.confirmed_replays_reconciled',targetType:'route',targetId:routeId,
+      metadata:{resolved:resolved.rowCount,run_url:runUrl}});
+    await client.query('COMMIT');return {confirmed_failures_resolved:resolved.rowCount};
+  }catch(error){await client.query('ROLLBACK').catch(()=>{});throw error;}
 }
 
 let stage='configuration';
 async function main() {
   const e=process.env;
-  if(!e.DATABASE_URL||!e.CREDENTIALS_MASTER_KEY||!e.CLOUDFLARE_API_TOKEN||!e.CLOUDFLARE_ACCOUNT_ID||!['inspect','apply'].includes(e.BQ_REPAIR_ACTION)) fail();
+  if(!e.DATABASE_URL||!e.CREDENTIALS_MASTER_KEY||!e.CLOUDFLARE_API_TOKEN||!e.CLOUDFLARE_ACCOUNT_ID||!['inspect','apply','reconcile'].includes(e.BQ_REPAIR_ACTION)) fail();
   const client=new pg.Client({connectionString:e.DATABASE_URL,ssl:controlPlanePgSslOption(e.DATABASE_URL,e.DATABASE_TLS_VERIFY),connectionTimeoutMillis:10_000});
   try {
     stage='connect_database';await client.connect();
     const options={workspaceId:e.ROUTE_HEALTH_WORKSPACE_ID,routeId:e.ROUTE_HEALTH_ROUTE_ID,expectedUpdatedAt:e.BQ_REPAIR_EXPECTED_UPDATED_AT,
-      expectedPlanHash:e.BQ_REPAIR_PLAN_HASH,runUrl:`https://github.com/rolln-ai/axel/actions/runs/${e.GITHUB_RUN_ID}`,
+      allowNewFields:e.BQ_REPAIR_ALLOW_NEW_FIELDS==='true',expectedPlanHash:e.BQ_REPAIR_PLAN_HASH,runUrl:`https://github.com/rolln-ai/axel/actions/runs/${e.GITHUB_RUN_ID}`,
       onStage:value=>{stage=value;},
       readSchema:(destinationId,target)=>introspectBigQueryDestination(destinationId,e.ROUTE_HEALTH_WORKSPACE_ID,target),
       readPayload:async key=>{
@@ -146,6 +200,10 @@ async function main() {
         if(!response.ok) fail();
         return JSON.parse(new TextDecoder().decode(await readResponseBytesLimited(response,6*1024*1024)));
       }};
+    if(e.BQ_REPAIR_ACTION==='reconcile') {
+      if(e.BQ_REPAIR_CONFIRM!=='reconcile-confirmed-deliveries') fail();
+      console.log(JSON.stringify(await reconcileBigQueryReplays(client,options)));return;
+    }
     const plan=await prepareBigQueryRouteRepair(client,options);
     console.log(JSON.stringify(plan.summary));
     if(e.BQ_REPAIR_ACTION==='apply') {

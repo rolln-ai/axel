@@ -10,6 +10,12 @@ on:
         options:
           - inspect
           - apply
+          - reconcile
+      allow_new_fields:
+        description: Explicitly enable the route's Allow new fields policy when the reviewed plan requires additions
+        required: false
+        default: false
+        type: boolean
       plan_hash:
         description: Exact plan hash returned by inspection (apply only)
         required: false
@@ -27,7 +33,7 @@ on:
         required: true
         type: string
       confirm_production:
-        description: Type apply-reviewed-lossless-repair (apply only)
+        description: Type apply-reviewed-lossless-repair or reconcile-confirmed-deliveries for the selected mutation
         required: false
         type: string
 
@@ -68,5 +74,6 @@ jobs:
           BQ_REPAIR_CONFIRM: ${{ inputs.confirm_production }}
           CREDENTIALS_MASTER_KEY: ${{ secrets.CREDENTIALS_MASTER_KEY }}
           BQ_REPAIR_ACTION: ${{ inputs.action }}
+          BQ_REPAIR_ALLOW_NEW_FIELDS: ${{ inputs.allow_new_fields }}
           BQ_REPAIR_PLAN_HASH: ${{ inputs.plan_hash }}
         run: node --import tsx --conditions=react-server scripts/repair-bigquery-route.mjs
