@@ -8,12 +8,19 @@ import { controlPlanePgSslOption } from "./control-plane-pg.mjs";
 import { validateRouteScope } from "./inspect-route-health.mjs";
 
 const fail = () => { throw new Error("recovery_backfill_precondition_failed"); };
+export function safeRecoveryError(value) {
+  if (/^(?:r2_(?:get|put|delete)|queue_enqueue)_[1-5][0-9]{2}$/.test(value ?? "")) return value;
+  if (["recovery_delivery_failed", "recovery_route_unavailable_or_changed", "raw_payload_key_mismatch",
+    "replay_payload_key_mismatch", "fetch failed"].includes(value)) return value;
+  if(value === "Replay produced no delivery attempts.") return "no_delivery_attempts";
+  return value == null ? null : "unrecognized_error";
+}
 export async function inspectRecoveryBackfill(client, workspaceId, routeId) {
   validateRouteScope(workspaceId, routeId);
   await client.query("BEGIN READ ONLY");
   try {
     await client.query("SET LOCAL statement_timeout='10s'");
-    return (await client.query(`SELECT b.id,b.state,b.since,b.until,b.total_estimated,b.enqueued,b.skipped,
+    const jobs=(await client.query(`SELECT b.id,b.state,b.error_message,b.since,b.until,b.total_estimated,b.enqueued,b.skipped,
       b.cursor_received_at,b.started_at,b.finished_at,
       count(*) FILTER (WHERE rr.state='pending')::int AS pending,
       count(*) FILTER (WHERE rr.state='in_progress')::int AS in_progress,
@@ -22,6 +29,16 @@ export async function inspectRecoveryBackfill(client, workspaceId, routeId) {
       FROM backfill_jobs b LEFT JOIN replay_requests rr ON rr.backfill_job_id=b.id
       WHERE b.workspace_id=$1 AND b.route_id=$2 AND b.recovery_destination_id IS NOT NULL
       GROUP BY b.id ORDER BY b.requested_at DESC LIMIT 5`, [workspaceId, routeId])).rows;
+    for(const job of jobs) {
+      job.error_message=safeRecoveryError(job.error_message);
+      const failures=(await client.query(`SELECT error_message,count(*)::int AS count FROM replay_requests
+        WHERE workspace_id=$1 AND route_id=$2 AND backfill_job_id=$3 AND state='failed'
+        GROUP BY error_message`,[workspaceId,routeId,job.id])).rows;
+      const counts=new Map();
+      for(const row of failures) {const code=safeRecoveryError(row.error_message);counts.set(code,(counts.get(code)??0)+row.count);}
+      job.failure_codes=[...counts].map(([code,count])=>({code,count}));
+    }
+    return jobs;
   } finally { await client.query("ROLLBACK"); }
 }
 
