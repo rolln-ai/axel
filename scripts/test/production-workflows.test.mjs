@@ -666,18 +666,29 @@ test("secret mutations cannot race production deploys", () => {
   assert.match(render, /Dispatch Deploy Render Services for the reviewed main commit/);
 });
 
-test("only the bounded database workflow can distribute the runtime credential", () => {
+test("runtime credentials stay in bounded distribution and read-only diagnostic workflows", () => {
   const consumers = listWorkflowFiles().filter((file) =>
     /secrets\.DATABASE_(?:DASHBOARD|DELIVERY_NATIVE|DELIVERY_WORKERS|PULL_WORKER|DELIVERY_EDGE)_URL/.test(
       read(file),
     ),
   );
-  assert.deepEqual(consumers, [".github/workflows/sync-database-url.yml"]);
+  assert.deepEqual(consumers, [".github/workflows/inspect-route-health.yml", ".github/workflows/sync-database-url.yml"]);
 
-  const workflow = read(consumers[0]);
+  const workflow = read(".github/workflows/sync-database-url.yml");
   assert.equal([...workflow.matchAll(/wrangler secret put DATABASE_URL/g)].length, 1);
   assert.match(workflow, /^  group: production-deploy$/m);
   assert.doesNotMatch(workflow, /^\s+- all$/m);
+
+  const diagnostic = read(".github/workflows/inspect-route-health.yml");
+  assert.match(diagnostic, /^  workflow_dispatch:$/m);
+  assert.match(diagnostic, /github\.ref == 'refs\/heads\/main'/);
+  assert.match(diagnostic, /^    environment: Production$/m);
+  assert.match(diagnostic, /^  contents: read$/m);
+  assert.match(diagnostic, /^          persist-credentials: false$/m);
+  assert.match(diagnostic, /DATABASE_URL: \$\{\{ secrets\.DATABASE_DASHBOARD_URL \}\}/);
+  assert.equal([...diagnostic.matchAll(/secrets\./g)].length, 1);
+  assert.deepEqual([...diagnostic.matchAll(/^\s+run: (.*)$/gm)].map(match => match[1]), ["node scripts/inspect-route-health.mjs"]);
+  assert.doesNotMatch(diagnostic, /upload-artifact|GITHUB_OUTPUT|GITHUB_ENV|vercel|wrangler/);
 });
 
 test("delivery canary settings target only the immutable singleton worker", () => {
