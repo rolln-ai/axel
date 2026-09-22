@@ -129,6 +129,17 @@ describe("backfill-job-worker", () => {
     expect(fetchImpl).not.toHaveBeenCalled(); // no CH query when throttled
   });
 
+  it("keeps the job running until dispatched work settles and only fetches available capacity", async () => {
+    const { deps, fetchImpl, jobsById } = fakeWorkerDeps({
+      jobs: [{ ...baseJob, pending_replays: 93 }],
+      fetchPages: [[]],
+    });
+    expect(await advanceJob(deps, baseJob as never)).toBe("throttled");
+    expect(jobsById.get("bfj_1")?.state).toBe("pending");
+    const url = new URL(String(vi.mocked(fetchImpl).mock.calls[0]?.[0]));
+    expect(url.searchParams.get("param_lim")).toBe("7");
+  });
+
   it("marks job done when ClickHouse returns no events", async () => {
     const { deps, fetchImpl, jobsById } = fakeWorkerDeps({
       jobs: [{ ...baseJob }],

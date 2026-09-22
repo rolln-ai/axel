@@ -89,11 +89,11 @@ for number in $duplicate_numbers; do
   exit 1
 done
 
-# Every new migration must run inside the runner's transaction together with
-# its ledger insert. Six older files predate that rule. Their exact content is
-# pinned here because their own transaction control or concurrent index build
-# prevents the ordinary wrapper from being used safely.
-historical_exception_hash() {
+# Migrations normally share a transaction with their ledger insert. Exact
+# reviewed exceptions are hash-pinned: six historical files, plus recovery
+# lookup indexes built concurrently to keep production delivery writes open.
+# New concurrent indexes verify indisvalid before a ledger row can be written.
+reviewed_exception_hash() {
   local name="$1"
   local mode="$2"
   case "$name:$mode" in
@@ -112,6 +112,15 @@ historical_exception_hash() {
     0059_pull_sync_partial_status.sql:explicit_transaction)
       printf '%s' 'f56b18030b61a45ac9f0196699c07f869cc1b038b7a9458e2e85ae2a86d613c8'
       ;;
+    0082_recovery_delivery_lookup.sql:concurrent_index)
+      printf '%s' '66dfe748c124da392387cbeac648191282f52693bac60cc2651658cc28500752'
+      ;;
+    0083_recovery_replay_lookup.sql:concurrent_index)
+      printf '%s' '9b6353604af6e9f0c866000e7e8008abf03d92723200c441259008acf522e847'
+      ;;
+    0084_backfill_outcome_lookup.sql:concurrent_index)
+      printf '%s' '54ef016236f30206f1a3ec1342708810293231d7c555f8fd27af95c99660ffc2'
+      ;;
     0060_delivery_idempotency_workspace_index.sql:concurrent_index)
       printf '%s' '67b60981ab0302e610c57274c3c3a8eb71376e6606359c4d48522f0d1b7c5038'
       ;;
@@ -129,13 +138,13 @@ for fpath in $(find "$MIGRATIONS_DIR" -maxdepth 1 -type f -name '*.sql' | sort);
   if [ "$transaction_mode" = "atomic" ]; then
     continue
   fi
-  expected_exception_hash="$(historical_exception_hash "$fname" "$transaction_mode")"
+  expected_exception_hash="$(reviewed_exception_hash "$fname" "$transaction_mode")"
   if [ -z "$expected_exception_hash" ]; then
     echo "[run-migrations] $fname cannot use the required atomic migration wrapper" >&2
     exit 1
   fi
   if [ "$(migration_sha256 "$fpath")" != "$expected_exception_hash" ]; then
-    echo "[run-migrations] immutable historical transaction exception changed: $fname" >&2
+    echo "[run-migrations] immutable reviewed transaction exception changed: $fname" >&2
     exit 1
   fi
 done
@@ -554,7 +563,7 @@ for fpath in $(find "$MIGRATIONS_DIR" -maxdepth 1 -type f -name '*.sql' | sort);
       >> "$migration_driver_file"
     printf '%s\n' 'COMMIT;' >> "$migration_driver_file"
   else
-    # Validation above proved that this is an exact, hash-pinned historical
+    # Validation above proved that this is an exact, hash-pinned reviewed
     # exception. Its DDL cannot share a transaction with the ledger record.
     printf "\\ir '%s'\n" "$fpath" >> "$migration_driver_file"
     printf '%s\n' 'BEGIN;' >> "$migration_driver_file"
