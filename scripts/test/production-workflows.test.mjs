@@ -1241,6 +1241,7 @@ test("BigQuery recovery uses protected reviewed code and keeps secrets out of ar
   assert.match(workflow, /^  group: production-deploy$/m);
   assert.match(workflow, /^  contents: read$/m);
   assert.match(workflow, /^          persist-credentials: false$/m);
+  assert.match(workflow, /BQ_REPAIR_ALLOW_NEW_FIELDS: \$\{\{ inputs\.allow_new_fields \}\}/);
   assert.match(workflow, /BQ_REPAIR_PLAN_HASH: \$\{\{ inputs\.plan_hash \}\}/);
   assert.match(workflow, /BQ_REPAIR_CONFIRM: \$\{\{ inputs\.confirm_production \}\}/);
   assert.doesNotMatch(workflow, /upload-artifact|GITHUB_OUTPUT|GITHUB_ENV|vercel|wrangler/);
