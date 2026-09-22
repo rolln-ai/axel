@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import pg from "pg";
-import { startRecoveryBackfill, inspectRecoveryBackfill, safeRecoveryError } from "../recovery-backfill.mjs";
+import { startRecoveryBackfill, inspectRecoveryBackfill, safeRecoveryError, resumeRecoveryBackfill } from "../recovery-backfill.mjs";
 import { advanceJob } from "../../apps/delivery-service/src/backfill-job-worker.ts";
 import { databaseServiceAccessProfile } from "../database-service-access-profiles.mjs";
 import { connectDisposablePostgres } from "./postgres-integration-test-helpers.mjs";
@@ -99,6 +99,32 @@ test("recovery backfill skips confirmed deliveries, waits for ambiguous work and
   const failedSummary=(await inspectRecoveryBackfill(client,'ws_a','rt_a'))[0];
   assert.equal(failedSummary.error_message,'recovery_delivery_failed');
   assert.deepEqual(failedSummary.failure_codes,[{code:'r2_get_429',count:1}]);
+  const resumeOptions={workspaceId:'ws_a',routeId:'rt_a',jobId:created.id,expectedUpdatedAt:options.expectedUpdatedAt,runUrl:options.runUrl};
+  const resumeAsDashboard=async input=>{
+    await client.query('SET ROLE synthetic_dashboard');
+    try{return await resumeRecoveryBackfill(client,input);}finally{await client.query('RESET ROLE');}
+  };
+  await assert.rejects(resumeAsDashboard(resumeOptions)); // other requests still in progress
+  await client.query("UPDATE replay_requests SET state='done' WHERE backfill_job_id=$1 AND state='in_progress'",[created.id]);
+  await client.query("UPDATE replay_requests SET error_message='rate_limited',finished_at=now()-interval '10 minutes' WHERE state='failed'");
+  await assert.rejects(resumeAsDashboard({...resumeOptions,workspaceId:'ws_b'}));
+  await assert.rejects(resumeAsDashboard({...resumeOptions,expectedUpdatedAt:'2026-09-22T11:00:00Z'}));
+  await client.query("UPDATE routes SET updated_at='2026-09-22T10:01:00Z'");
+  await assert.rejects(resumeAsDashboard(resumeOptions));
+  await client.query("UPDATE routes SET updated_at='2026-09-22T10:00:00Z'");
+  await client.query("UPDATE delivery_idempotency SET state='in_flight' WHERE event_id='evt_busy'");
+  await assert.rejects(resumeAsDashboard(resumeOptions));
+  await client.query("UPDATE delivery_idempotency SET state='completed' WHERE event_id='evt_busy'");
+  await assert.rejects(resumeAsDashboard(resumeOptions));
+  await client.query("UPDATE delivery_idempotency SET state='failed' WHERE event_id='evt_busy'");
+  const beforeResume=await loadJob();
+  assert.equal((await resumeAsDashboard(resumeOptions)).retried,1);
+  const afterResume=await loadJob();
+  assert.equal(afterResume.state,'running');assert.equal(afterResume.cursor_event_id,beforeResume.cursor_event_id);
+  assert.equal(afterResume.enqueued,beforeResume.enqueued);assert.equal(afterResume.finished_at,null);
+  assert.equal((await client.query('SELECT state FROM replay_requests WHERE id=$1',[replayRows[0].id])).rows[0].state,'pending');
+  assert.equal((await client.query('SELECT count(*)::int n FROM replay_requests WHERE backfill_job_id=$1',[created.id])).rows[0].n,5);
+  await assert.rejects(resumeAsDashboard(resumeOptions)); // cannot resume a running job twice
   await client.query("UPDATE replay_requests SET state='done' WHERE backfill_job_id=$1",[created.id]);
   await client.query("UPDATE backfill_jobs SET state='running',error_message=NULL,finished_at=NULL");
   await client.query("UPDATE destinations SET delivery_paused=true");

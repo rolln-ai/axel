@@ -71,14 +71,34 @@ async function fetchWithTimeout(
   }
 }
 
+// Cloudflare can block the account API for five minutes after a 429. A
+// subsecond retry exhausts an entire backfill before the window resets.
+// Keep the same request/replay identity, cancel discarded bodies, and wait
+// for Retry-After (bounded to the documented window) before retrying.
+async function fetchCloudflareWithRateLimitRetry(
+  fetchImpl: typeof fetch,
+  input: Parameters<typeof fetch>[0],
+  init?: Parameters<typeof fetch>[1],
+): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    const response = await fetchWithTimeout(fetchImpl, input, init);
+    if (response.status !== 429 || attempt >= 2) return response;
+    const raw = response.headers.get("retry-after");
+    const seconds = raw !== null && /^\d+(?:\.\d+)?$/.test(raw.trim()) ? Number(raw) : 300;
+    const delay = (Number.isFinite(seconds) ? Math.min(300, Math.max(1, seconds)) : 300) * 1000 + 1000;
+    await response.body?.cancel().catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, delay));
+  }
+}
+
 // Attempt delays for the R2 HTTP API (3 tries total). Mirrors the connector
 // backoff shape used elsewhere (e.g. bigquery SCHEMA_PROPAGATION_BACKOFF_MS).
 const R2_RETRY_BACKOFF_MS = [0, 100, 300] as const;
 
-/** Cloudflare/R2 statuses worth retrying: 429 + all 5xx, incl. CF edge errors
+/** R2 5xx statuses use short retries; 429 has its own reset-window wait.
  *  520–530 — notably 525 "SSL handshake failed", which is transient. */
 function isRetryableR2Status(status: number): boolean {
-  return status === 429 || status >= 500;
+  return status >= 500;
 }
 
 /** Declared body size, or null when the header is absent or unparseable. */
@@ -105,8 +125,9 @@ async function fetchR2WithRetry(
   for (let attempt = 0; attempt < R2_RETRY_BACKOFF_MS.length; attempt++) {
     const backoff = R2_RETRY_BACKOFF_MS[attempt]!;
     if (backoff > 0) await new Promise((resolve) => setTimeout(resolve, backoff));
-    res = await fetchWithTimeout(fetchImpl, input, init);
+    res = await fetchCloudflareWithRateLimitRetry(fetchImpl, input, init);
     if (!isRetryableR2Status(res.status)) return res;
+    if (attempt < R2_RETRY_BACKOFF_MS.length - 1) await res.body?.cancel().catch(() => undefined);
   }
   return res!;
 }
@@ -451,7 +472,7 @@ export function createCloudflareDeliveryQueueSink(deps: CfQueueDeps): DeliveryQu
   const fetchImpl = deps.fetchImpl ?? fetch;
   return {
     async enqueue(message): Promise<void> {
-      const res = await fetchWithTimeout(
+      const res = await fetchCloudflareWithRateLimitRetry(
         fetchImpl,
         `https://api.cloudflare.com/client/v4/accounts/${deps.cloudflareAccountId}/queues/${deps.deliveryQueueId}/messages`,
         {

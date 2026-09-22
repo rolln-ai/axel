@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import pg from "pg";
 import { writeAudit } from "../apps/dashboard/lib/audit.ts";
-import { recoveryRouteReady } from "../apps/delivery-service/src/recovery-backfill.ts";
+import { recoveryRouteReady, recoveryDeliveryState } from "../apps/delivery-service/src/recovery-backfill.ts";
 import { controlPlanePgSslOption } from "./control-plane-pg.mjs";
 import { validateRouteScope } from "./inspect-route-health.mjs";
 
@@ -84,14 +84,55 @@ export async function startRecoveryBackfill(client, options) {
   } catch (error) { await client.query("ROLLBACK").catch(() => {}); throw error; }
 }
 
+// Resume the exact failed job and replay identities after a reviewed transient
+// failure. Never reset its cursor or create a second delivery identity.
+export async function resumeRecoveryBackfill(client, options) {
+  const {workspaceId,routeId,jobId,expectedUpdatedAt,runUrl}=options;
+  validateRouteScope(workspaceId,routeId);
+  if(!/^bfj_[a-f0-9]{24}$/.test(jobId??'') || !Number.isFinite(Date.parse(expectedUpdatedAt))
+    || !/^https:\/\/github\.com\/rolln-ai\/axel\/actions\/runs\/\d+$/.test(runUrl)) fail();
+  await client.query('BEGIN');
+  try {
+    await client.query("SET LOCAL statement_timeout='10s'");
+    await client.query("SET LOCAL lock_timeout='5s'");
+    const job=(await client.query(`SELECT *,recovery_route_updated_at::text AS reviewed_at FROM backfill_jobs
+      WHERE id=$1 AND workspace_id=$2 AND route_id=$3 FOR UPDATE`,[jobId,workspaceId,routeId])).rows[0];
+    if(!job || job.state!=='failed' || job.error_message!=='recovery_delivery_failed'
+      || Date.parse(job.reviewed_at)!==Date.parse(expectedUpdatedAt) || !await recoveryRouteReady(client,job,true)) fail();
+    if((await client.query(`SELECT 1 FROM dead_letters WHERE workspace_id=$1 AND route_id=$2 AND resolved_at IS NULL LIMIT 1`,[workspaceId,routeId])).rows.length) fail();
+    const unfinished=(await client.query(`SELECT id,workspace_id,event_id,source_id,scope,route_id,destination_id,state,error_message,
+      finished_at <= now()-interval '5 minutes' AS cooled
+      FROM replay_requests WHERE backfill_job_id=$1 AND state<>'done' FOR UPDATE`,[jobId])).rows;
+    if(!unfinished.length || unfinished.length>500 || unfinished.some(row=>row.state!=='failed' || !row.cooled
+      || row.workspace_id!==workspaceId || row.source_id!==job.source_id || row.scope!=='route' || row.route_id!==routeId || row.destination_id!==null
+      || !['rate_limited','operation_timeout','connection_failed','http_error_500','http_error_502','http_error_503','http_error_504'].includes(row.error_message))) fail();
+    const delivery=await recoveryDeliveryState(client,job,unfinished.map(row=>row.event_id));
+    if(delivery.busy || delivery.completed.size) fail();
+    await client.query(`UPDATE replay_requests SET state='pending',started_at=NULL,finished_at=NULL,error_message=NULL
+      WHERE backfill_job_id=$1 AND state='failed'`,[jobId]);
+    await client.query(`UPDATE backfill_jobs SET state='running',finished_at=NULL,error_message=NULL WHERE id=$1`,[jobId]);
+    await writeAudit(client,{workspaceId,actorUserId:null,action:'route.recovery_backfill_resumed',targetType:'backfill_job',targetId:jobId,
+      metadata:{retried:unfinished.length,run_url:runUrl}});
+    await client.query('COMMIT');
+    return {id:jobId,state:'running',retried:unfinished.length};
+  } catch(error) {await client.query('ROLLBACK').catch(()=>{});throw error;}
+}
+
 async function main() {
   const e=process.env;
-  if (!e.DATABASE_URL || !["inspect","start"].includes(e.RECOVERY_BACKFILL_ACTION)) fail();
+  if (!e.DATABASE_URL || !["inspect","start","resume"].includes(e.RECOVERY_BACKFILL_ACTION)) fail();
   const client=new pg.Client({connectionString:e.DATABASE_URL,ssl:controlPlanePgSslOption(e.DATABASE_URL,e.DATABASE_TLS_VERIFY),connectionTimeoutMillis:10_000});
   try {
     await client.connect();
     if(e.RECOVERY_BACKFILL_ACTION==='inspect') {
       console.log(JSON.stringify(await inspectRecoveryBackfill(client,e.ROUTE_HEALTH_WORKSPACE_ID,e.ROUTE_HEALTH_ROUTE_ID)));
+      return;
+    }
+    if(e.RECOVERY_BACKFILL_ACTION==='resume') {
+      if(e.RECOVERY_BACKFILL_CONFIRM!=="resume-reviewed-backfill") fail();
+      console.log(JSON.stringify(await resumeRecoveryBackfill(client,{workspaceId:e.ROUTE_HEALTH_WORKSPACE_ID,
+        routeId:e.ROUTE_HEALTH_ROUTE_ID,jobId:e.RECOVERY_BACKFILL_JOB_ID,expectedUpdatedAt:e.RECOVERY_BACKFILL_EXPECTED_UPDATED_AT,
+        runUrl:`https://github.com/rolln-ai/axel/actions/runs/${e.GITHUB_RUN_ID}`})));
       return;
     }
     if(e.RECOVERY_BACKFILL_CONFIRM!=="start-reviewed-backfill" || !e.CLICKHOUSE_URL) fail();

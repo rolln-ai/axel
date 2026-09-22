@@ -562,7 +562,8 @@ describe("replay-worker — CF delivery queue sink", () => {
     expect(body.body.event_id).toBe("evt_1");
   });
 
-  it("throws on non-2xx so the replay batch reports failure", async () => {
+  it("bounds persistent rate-limit retries before reporting failure", async () => {
+    vi.useFakeTimers();
     const fetchImpl = vi.fn(async () => new Response("rate limited", { status: 429 }));
     const sink = createCloudflareDeliveryQueueSink({
       cloudflareAccountId: "acc",
@@ -570,7 +571,7 @@ describe("replay-worker — CF delivery queue sink", () => {
       deliveryQueueId: "qid",
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
-    await expect(
+    const result = expect(
       sink.enqueue({
         queue_message_version: 1,
         event_id: "evt_1",
@@ -592,6 +593,10 @@ describe("replay-worker — CF delivery queue sink", () => {
         is_test: false,
       }),
     ).rejects.toThrow("queue_enqueue_429");
+    await vi.runAllTimersAsync();
+    await result;
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    vi.useRealTimers();
   });
 });
 
@@ -747,5 +752,36 @@ describe("replay-worker — ClickHouse hints", () => {
     const result = await hints.resolveHints("evt_1", "k", "ws_1", "src_1");
     expect(result?.headers).toEqual({});
     expect(result?.query).toEqual({});
+  });
+});
+
+
+describe("replay rate-limit recovery", () => {
+  afterEach(() => vi.useRealTimers());
+  it("waits for the reset before retrying an R2 read", async () => {
+    vi.useFakeTimers();
+    const cancel=vi.fn();
+    const body=new ReadableStream({cancel});
+    const fetchImpl=vi.fn().mockResolvedValueOnce(new Response(body,{status:429,headers:{"retry-after":"2"}}))
+      .mockResolvedValueOnce(new Response("retained"));
+    const store=createR2HttpRawPayloadStore({cloudflareAccountId:"acc",cloudflareApiToken:"tok",rawPayloadBucket:"raw",fetchImpl});
+    const result=store.get("key");
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);expect(cancel).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(new TextDecoder().decode((await result)!)).toBe("retained");
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+  it("retries a rate-limited queue send with the same body and idempotency key", async () => {
+    vi.useFakeTimers();
+    const fetchImpl=vi.fn().mockResolvedValueOnce(new Response("private provider body",{status:429}))
+      .mockResolvedValueOnce(new Response("{}"));
+    const sink=createCloudflareDeliveryQueueSink({cloudflareAccountId:"acc",cloudflareApiToken:"tok",deliveryQueueId:"queue",fetchImpl});
+    const message={event_id:"evt#rpy_a",idempotency_key:"stable"} as Parameters<typeof sink.enqueue>[0];
+    const result=sink.enqueue(message);
+    await vi.advanceTimersByTimeAsync(300999);expect(fetchImpl).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);await result;
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl.mock.calls[1]?.[1]?.body).toBe(fetchImpl.mock.calls[0]?.[1]?.body);
   });
 });

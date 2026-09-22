@@ -10,6 +10,11 @@ on:
         options:
           - inspect
           - start
+          - resume
+      job_id:
+        description: Exact failed recovery job to resume after its transient cause is addressed
+        required: false
+        type: string
       since:
         description: Inclusive UTC receipt time (within seven days)
         required: false
@@ -31,7 +36,7 @@ on:
         required: false
         type: string
       confirm_production:
-        description: Type start-reviewed-backfill after live and retained deliveries pass
+        description: Type start-reviewed-backfill or resume-reviewed-backfill after reviewing delivery health
         required: false
         type: string
 
@@ -70,6 +75,7 @@ jobs:
           ROUTE_HEALTH_ROUTE_ID: ${{ inputs.route_id }}
           RECOVERY_BACKFILL_EXPECTED_UPDATED_AT: ${{ inputs.expected_updated_at }}
           RECOVERY_BACKFILL_CONFIRM: ${{ inputs.confirm_production }}
+          RECOVERY_BACKFILL_JOB_ID: ${{ inputs.job_id }}
           RECOVERY_BACKFILL_ACTION: ${{ inputs.action }}
           RECOVERY_BACKFILL_SINCE: ${{ inputs.since }}
           RECOVERY_BACKFILL_UNTIL: ${{ inputs.until }}
