@@ -95,10 +95,10 @@ export async function resumeRecoveryBackfill(client, options) {
   try {
     await client.query("SET LOCAL statement_timeout='10s'");
     await client.query("SET LOCAL lock_timeout='5s'");
-    const job=(await client.query(`SELECT *,recovery_route_updated_at::text AS reviewed_at FROM backfill_jobs
+    const job=(await client.query(`SELECT *,recovery_route_updated_at::text AS recovery_route_updated_at FROM backfill_jobs
       WHERE id=$1 AND workspace_id=$2 AND route_id=$3 FOR UPDATE`,[jobId,workspaceId,routeId])).rows[0];
     if(!job || job.state!=='failed' || job.error_message!=='recovery_delivery_failed'
-      || Date.parse(job.reviewed_at)!==Date.parse(expectedUpdatedAt) || !await recoveryRouteReady(client,job,true)) fail();
+      || Date.parse(job.recovery_route_updated_at)!==Date.parse(expectedUpdatedAt) || !await recoveryRouteReady(client,job,true)) fail();
     if((await client.query(`SELECT 1 FROM dead_letters WHERE workspace_id=$1 AND route_id=$2 AND resolved_at IS NULL LIMIT 1`,[workspaceId,routeId])).rows.length) fail();
     const unfinished=(await client.query(`SELECT id,workspace_id,event_id,source_id,scope,route_id,destination_id,state,error_message,
       finished_at <= now()-interval '5 minutes' AS cooled

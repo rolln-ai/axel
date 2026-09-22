@@ -117,6 +117,11 @@ test("recovery backfill skips confirmed deliveries, waits for ambiguous work and
   await client.query("UPDATE delivery_idempotency SET state='completed' WHERE event_id='evt_busy'");
   await assert.rejects(resumeAsDashboard(resumeOptions));
   await client.query("UPDATE delivery_idempotency SET state='failed' WHERE event_id='evt_busy'");
+  // Keep Postgres microseconds across the readiness fence; JavaScript Date
+  // would truncate them and incorrectly reject the unchanged route.
+  await client.query("UPDATE routes SET updated_at='2026-09-22T10:00:00.123456Z'");
+  await client.query("UPDATE backfill_jobs SET recovery_route_updated_at='2026-09-22T10:00:00.123456Z'");
+  resumeOptions.expectedUpdatedAt='2026-09-22T10:00:00.123Z';
   const beforeResume=await loadJob();
   assert.equal((await resumeAsDashboard(resumeOptions)).retried,1);
   const afterResume=await loadJob();
