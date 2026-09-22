@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import pg from "pg";
 import { cloudflareR2ObjectUrl, compareBigQuerySchemas, executeGraph, expectedBigQuerySchema,
   isCanonicalRawPayloadKey, parseCanonicalRawPayloadKey, parsePipelineGraph } from "../packages/shared/dist/index.js";
-import { addRepairToPipeline, repairProposalFromIssue } from "../apps/dashboard/lib/inbox-repair.ts";
+import { addRepairToPipeline, repairProposalFromIssue, synthesizeLegacyPipeline } from "../apps/dashboard/lib/inbox-repair.ts";
 import { bigQueryModeForBinding } from "../apps/dashboard/lib/pipeline-binding.ts";
 import { introspectBigQueryDestination } from "../apps/dashboard/lib/destination-inspect.ts";
 import { db } from "../apps/dashboard/lib/db.ts";
@@ -29,12 +29,12 @@ export function retainedBaseEvent(row, workspaceId) {
 }
 
 async function loadState(client, workspaceId, routeId, lock = false) {
-  const route=(await client.query(`SELECT r.source_id,r.pipeline_graph::text AS graph,r.updated_at::text AS updated_at
+  const route=(await client.query(`SELECT r.source_id,r.pipeline_graph::text AS graph,r.filter_expression,r.transform_script,r.updated_at::text AS updated_at
     FROM routes r JOIN sources s ON s.id=r.source_id AND s.workspace_id=r.workspace_id
     JOIN workspaces w ON w.id=r.workspace_id
     WHERE r.workspace_id=$1 AND r.id=$2 AND r.status='active' AND s.status='active' AND w.status='active'
     ${lock?"FOR UPDATE OF r FOR SHARE OF s,w":""}`,[workspaceId,routeId])).rows[0];
-  if(!route?.graph) fail();
+  if(!route) fail();
   const destinations=(await client.query(`SELECT d.id,d.config,rd.binding
     FROM route_destinations rd JOIN destinations d ON d.id=rd.destination_id AND d.workspace_id=$2
     WHERE rd.route_id=$1 AND d.type='bigquery' AND d.status='active' AND NOT d.delivery_paused AND d.circuit_state='closed'
@@ -58,7 +58,8 @@ export async function prepareBigQueryRouteRepair(client, options) {
   const state=await loadState(client,workspaceId,routeId);
   if(Date.parse(state.route.updated_at)!==Date.parse(expectedUpdatedAt)) fail();
   const attached=new Set([state.destination.id]);
-  const graph=parsePipelineGraph(state.route.graph,{attached_destination_ids:attached});
+  const graph=state.route.graph ? parsePipelineGraph(state.route.graph,{attached_destination_ids:attached})
+    : synthesizeLegacyPipeline({filterExpression:state.route.filter_expression,transformScript:state.route.transform_script,destinationIds:[state.destination.id]});
   const target={...object(state.destination.config),...object(state.destination.binding)};
   if(typeof target.dataset!=='string'||typeof target.table!=='string') fail();
   const mode=bigQueryModeForBinding(state.destination.binding===null?null:target);
@@ -136,7 +137,7 @@ export async function applyBigQueryRouteRepair(client, options, plan) {
       await client.query('INSERT INTO route_destinations(route_id,destination_id,binding) VALUES($1,$2,$3::jsonb)',
         [routeId,state.destination.id,JSON.stringify({...state.destination.binding,schema_evolution:'add_columns'})]);
     }
-    if(plan.repairs.length>0 || plan.requiresNewFields) await client.query(`UPDATE routes SET pipeline_graph=$1::jsonb,updated_at=now() WHERE workspace_id=$2 AND id=$3`,[JSON.stringify(plan.candidate),workspaceId,routeId]);
+    if(plan.repairs.length>0 || plan.requiresNewFields) await client.query(`UPDATE routes SET pipeline_graph=$1::jsonb,filter_expression=NULL,transform_script=NULL,updated_at=now() WHERE workspace_id=$2 AND id=$3`,[JSON.stringify(plan.candidate),workspaceId,routeId]);
     onStage('queue_replays');
     const replay=await enqueueReplays(client,{workspaceId,actorUserId:null,reason:'reviewed_lossless_bigquery_repair',
       candidates:{sql:`SELECT DISTINCT ON(split_part(event_id,'#',1)) split_part(event_id,'#',1) AS event_id,source_id,r2_key,'route'::text AS scope,route_id,

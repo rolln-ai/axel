@@ -110,4 +110,24 @@ test("reviewed BigQuery serialization is scoped, lossless, atomic and compatible
   assert.deepEqual((await client.query("SELECT binding FROM route_destinations WHERE route_id='rt_a'")).rows[0].binding,{dataset:'synthetic',table:'events',mode:'typed_records',schema_evolution:'add_columns'});
   assert.equal((await client.query("SELECT event_id FROM replay_requests WHERE event_id='evt_new'")).rows.length,1);
 
+  // Older declarative routes migrate their filter and transform atomically.
+  await client.query("RESET ROLE");
+  await client.query(`INSERT INTO routes(id,workspace_id,source_id,status,filter_expression,transform_script,updated_at)
+    VALUES('rt_legacy','ws_a','src_a','active',$1,$2,'2026-09-22T15:42:31.031Z')`,[
+    JSON.stringify({kind:'event_type_in',path:'type',values:['invoice']}),
+    JSON.stringify({kind:'select',assignments:{total:'amount',tags:'tags'}})]);
+  await client.query(`INSERT INTO route_destinations(route_id,destination_id,binding)
+    SELECT 'rt_legacy',destination_id,binding FROM route_destinations WHERE route_id='rt_a'`);
+  await client.query(`INSERT INTO dead_letters(workspace_id,event_id,source_id,route_id,destination_id,r2_key,reason,message,errored_at)
+    VALUES('ws_a','evt_legacy','src_a','rt_legacy','dst_a','events/ws_a/2026-09-22/evt_legacy','delivery_dead','synthetic',now())`);
+  await client.query('SET ROLE synthetic_dashboard');
+  const legacyOptions={...options,routeId:'rt_legacy',readPayload:async()=>({type:'invoice',amount:12.5,tags:['keep']})};
+  const legacyPlan=await prepareBigQueryRouteRepair(client,legacyOptions);
+  assert.equal(legacyPlan.repairs.length,2);
+  await applyBigQueryRouteRepair(client,{...legacyOptions,expectedPlanHash:legacyPlan.planHash},legacyPlan);
+  const legacy=(await client.query("SELECT pipeline_graph,filter_expression,transform_script FROM routes WHERE id='rt_legacy'")).rows[0];
+  assert.equal(legacy.filter_expression,null);assert.equal(legacy.transform_script,null);
+  assert.deepEqual({...executeGraph(await legacyOptions.readPayload(),legacy.pipeline_graph).deliveries[0].payload},{total:'12.5',tags:'["keep"]'});
+  assert.equal(executeGraph({type:'other',amount:12.5,tags:['keep']},legacy.pipeline_graph).deliveries.length,0);
+
 });

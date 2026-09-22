@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import pg from "pg";
-import { startRecoveryBackfill, inspectRecoveryBackfill } from "../recovery-backfill.mjs";
+import { startRecoveryBackfill, inspectRecoveryBackfill, safeRecoveryError } from "../recovery-backfill.mjs";
 import { advanceJob } from "../../apps/delivery-service/src/backfill-job-worker.ts";
 import { databaseServiceAccessProfile } from "../database-service-access-profiles.mjs";
 import { connectDisposablePostgres } from "./postgres-integration-test-helpers.mjs";
@@ -95,6 +95,10 @@ test("recovery backfill skips confirmed deliveries, waits for ambiguous work and
   await client.query("UPDATE replay_requests SET state='failed' WHERE id=$1",[replayRows[0].id]);
   assert.equal(await advanceJob(empty,await loadJob()),'failed');
   assert.equal((await loadJob()).error_message,'recovery_delivery_failed');
+  await client.query("UPDATE replay_requests SET error_message='r2_get_429' WHERE id=$1",[replayRows[0].id]);
+  const failedSummary=(await inspectRecoveryBackfill(client,'ws_a','rt_a'))[0];
+  assert.equal(failedSummary.error_message,'recovery_delivery_failed');
+  assert.deepEqual(failedSummary.failure_codes,[{code:'r2_get_429',count:1}]);
   await client.query("UPDATE replay_requests SET state='done' WHERE backfill_job_id=$1",[created.id]);
   await client.query("UPDATE backfill_jobs SET state='running',error_message=NULL,finished_at=NULL");
   await client.query("UPDATE destinations SET delivery_paused=true");
@@ -105,4 +109,13 @@ test("recovery backfill skips confirmed deliveries, waits for ambiguous work and
   const summary=(await inspectRecoveryBackfill(client,'ws_a','rt_a'))[0];
   assert.equal(summary.delivered,5);assert.equal(summary.skipped,'2');assert.equal(summary.state,'done');
   assert.deepEqual(await inspectRecoveryBackfill(client,'ws_b','rt_a'),[]);
+});
+
+
+test("recovery diagnostics expose fixed codes without provider responses or customer values",()=>{
+  assert.equal(safeRecoveryError('r2_get_429'),'r2_get_429');
+  assert.equal(safeRecoveryError('queue_enqueue_503'),'queue_enqueue_503');
+  assert.equal(safeRecoveryError('Replay produced no delivery attempts.'),'no_delivery_attempts');
+  assert.equal(safeRecoveryError('r2_get_429 private payload'),'unrecognized_error');
+  assert.equal(safeRecoveryError('private token or provider response'),'unrecognized_error');
 });
