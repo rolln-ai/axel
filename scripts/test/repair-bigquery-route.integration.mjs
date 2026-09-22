@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { executeGraph, parsePipelineGraph } from "../../packages/shared/dist/index.js";
-import { prepareBigQueryRouteRepair, applyBigQueryRouteRepair, reconcileBigQueryReplays, retainedBaseEvent } from "../repair-bigquery-route.mjs";
+import { prepareBigQueryRouteRepair, applyBigQueryRouteRepair, reconcileBigQueryReplays, retainedBaseEvent, validEpochTimestamp } from "../repair-bigquery-route.mjs";
 import { databaseServiceAccessProfile } from "../database-service-access-profiles.mjs";
 import { connectDisposablePostgres } from "./postgres-integration-test-helpers.mjs";
 
@@ -122,6 +122,14 @@ test("reviewed BigQuery serialization is scoped, lossless, atomic and compatible
     VALUES('ws_a','evt_legacy','src_a','rt_legacy','dst_a','events/ws_a/2026-09-22/evt_legacy','delivery_dead','synthetic',now())`);
   await client.query('SET ROLE synthetic_dashboard');
   const legacyOptions={...options,routeId:'rt_legacy',readPayload:async()=>({type:'invoice',amount:12.5,tags:['keep']})};
+  const epochOptions={...legacyOptions,readPayload:async()=>({type:'invoice',amount:1720000000,tags:'keep'}),
+    readSchema:async()=>({kind:'schema',fields:[{name:'total',type:'TIMESTAMP'},fields[1]]})};
+  const epochPlan=await prepareBigQueryRouteRepair(client,epochOptions);
+  assert.equal(epochPlan.supported,true);assert.equal(epochPlan.repairs.length,0);
+  assert.equal(epochPlan.summary.validated_epoch_timestamp_fields,1);
+  assert.equal(executeGraph(await epochOptions.readPayload(),epochPlan.candidate).deliveries[0].payload.total,1720000000);
+  const invalidEpoch=await prepareBigQueryRouteRepair(client,{...epochOptions,readPayload:async()=>({type:'invoice',amount:1720000000000,tags:'keep'})});
+  assert.equal(invalidEpoch.supported,false);
   const legacyPlan=await prepareBigQueryRouteRepair(client,legacyOptions);
   assert.equal(legacyPlan.repairs.length,2);
   await applyBigQueryRouteRepair(client,{...legacyOptions,expectedPlanHash:legacyPlan.planHash},legacyPlan);
@@ -130,4 +138,17 @@ test("reviewed BigQuery serialization is scoped, lossless, atomic and compatible
   assert.deepEqual({...executeGraph(await legacyOptions.readPayload(),legacy.pipeline_graph).deliveries[0].payload},{total:'12.5',tags:'["keep"]'});
   assert.equal(executeGraph({type:'other',amount:12.5,tags:['keep']},legacy.pipeline_graph).deliveries.length,0);
 
+});
+
+
+test("timestamp compatibility validates Unix seconds and retains mode and value boundaries",()=>{
+  const issue={kind:'type_conflict',expected:'INT64',existing:'TIMESTAMP',path:'data.when'};
+  const fields=[{name:'data',type:'RECORD',fields:[{name:'when',type:'TIMESTAMP'}]}];
+  assert.equal(validEpochTimestamp(issue,{data:{when:1720000000}},fields),true);
+  assert.equal(validEpochTimestamp(issue,{data:[{when:1720000000},{when:0}]},fields),true);
+  for(const value of [1720000000000,253402300800,-62135596801,1.5,'1720000000',null,[1720000000]])
+    assert.equal(validEpochTimestamp(issue,{data:{when:value}},fields),false);
+  assert.equal(validEpochTimestamp(issue,{data:[{when:1720000000},{when:1720000000000}]},fields),false);
+  assert.equal(validEpochTimestamp(issue,{data:{when:1720000000}},[{name:'data',type:'RECORD',fields:[{name:'when',type:'TIMESTAMP',mode:'REPEATED'}]}]),false);
+  assert.equal(validEpochTimestamp({...issue,existing:'INT64'},{data:{when:1720000000}},fields),false);
 });

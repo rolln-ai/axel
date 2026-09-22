@@ -9,9 +9,9 @@ import { validateRouteScope } from "./inspect-route-health.mjs";
 
 const fail = () => { throw new Error("recovery_backfill_precondition_failed"); };
 export function safeRecoveryError(value) {
-  if (/^(?:r2_(?:get|put|delete)|queue_enqueue)_[1-5][0-9]{2}$/.test(value ?? "")) return value;
+  if (/^(?:r2_(?:get|put|delete)|queue_enqueue|http_error)_[1-5][0-9]{2}$/.test(value ?? "")) return value;
   if (["recovery_delivery_failed", "recovery_route_unavailable_or_changed", "raw_payload_key_mismatch",
-    "replay_payload_key_mismatch", "fetch failed"].includes(value)) return value;
+    "replay_payload_key_mismatch", "fetch failed", "rate_limited", "operation_timeout", "operation_failed", "connection_failed", "not_found", "authorization_failed", "payload_too_large", "queue_overloaded", "invalid_payload", "delivery_failed"].includes(value)) return value;
   if(value === "Replay produced no delivery attempts.") return "no_delivery_attempts";
   return value == null ? null : "unrecognized_error";
 }
