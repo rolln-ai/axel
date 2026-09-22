@@ -69,10 +69,38 @@ export async function fixIncidentAction(input: { incidentId: string }): Promise<
       if (!incidentIsFixable(incident)) {
         return fail("Axel cannot fix this one from here. The sender stopped sending; check the webhook at the sender.");
       }
-      if (incident.snapshot.cause === "destination_paused") {
-        return fail("Delivery to this destination is paused or its circuit is open. Resume it on the destination page, then click Fix again.");
-      }
       const scope = incidentScope(incident.snapshot);
+      // A monitor snapshot can predate an operator's repair. Check live,
+      // workspace-scoped controls before repairing data or queuing replays.
+      if (scope.routeId) {
+        const route = (await db().query<{ status: string }>(
+          `SELECT status FROM routes WHERE workspace_id = $1 AND id = $2 AND source_id = $3`,
+          [workspaceId, scope.routeId, scope.sourceId],
+        )).rows[0];
+        if (!route) return fail("This route is no longer available in this workspace. Refresh the Inbox.");
+        if (route.status === "errored") {
+          return fail("The route stopped after a processing error. Correct the route and enable it on the route page, then click Fix again.");
+        }
+        if (route.status !== "active") return fail("This route is disabled. Enable it on the route page, then click Fix again.");
+      }
+      if (scope.destinationId) {
+        const destination = (await db().query<{ status: string; delivery_paused: boolean; circuit_state: string }>(
+          `SELECT d.status, d.delivery_paused, d.circuit_state FROM destinations d
+            WHERE d.workspace_id = $1 AND d.id = $2
+              AND EXISTS (SELECT 1 FROM route_destinations rd WHERE rd.route_id = $3 AND rd.destination_id = d.id)`,
+          [workspaceId, scope.destinationId, scope.routeId],
+        )).rows[0];
+        if (!destination) return fail("This destination is no longer available on the route. Refresh the Inbox.");
+        if (destination.status !== "active" || destination.circuit_state === "disabled") {
+          return fail("This destination is disabled. Enable it on the destination page, then click Fix again.");
+        }
+        if (destination.delivery_paused) {
+          return fail("Delivery to this destination is paused. Resume it in the destination's delivery controls, then click Fix again.");
+        }
+        if (destination.circuit_state === "open") {
+          return fail("This destination's circuit breaker is open. Check the failure and reset the breaker in the destination's delivery controls, then click Fix again.");
+        }
+      }
 
       // 1. Lift mutes in scope. Muted fingerprints never replay, and the
       //    operator has just asked for the opposite.

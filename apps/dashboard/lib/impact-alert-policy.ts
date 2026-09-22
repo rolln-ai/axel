@@ -44,7 +44,7 @@ export interface ImpactSnapshot {
   waitingCount: number;
   thresholdMinutes: number;
   thresholdBasis?: "configured" | "recent_cadence" | "historical_pattern" | "observed_gap";
-  cause: "no_traffic" | "delivery_failed" | "schema_mismatch" | "authorization_failed" | "backlog" | "destination_paused";
+  cause: "no_traffic" | "delivery_failed" | "schema_mismatch" | "authorization_failed" | "backlog" | "destination_paused" | "route_errored";
 }
 
 export interface ImpactObservation {
@@ -147,6 +147,8 @@ export function impactMessage(kind: ImpactKind, snapshot: ImpactSnapshot, phase:
       ? "The destination rejected rows with an incompatible schema. Review the mapping and target schema, then replay retained failed events. Axel has not changed existing column types or discarded fields."
       : snapshot.cause === "authorization_failed"
         ? "The destination rejected authentication. Check its credentials and permissions, then replay retained failed events."
+        : snapshot.cause === "route_errored"
+          ? "The route stopped after a processing error. Review and correct the route, then enable it and replay retained failed events."
         : snapshot.cause === "destination_paused"
           ? "Delivery is paused or the destination is disabled. Review delivery controls and the underlying error before resuming."
           : snapshot.cause === "backlog"

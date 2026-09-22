@@ -111,6 +111,20 @@ try {
         failedCount: 0, waitingCount: 0, thresholdMinutes: 30, cause: "no_traffic"}),
     ]);
     const recoverySource = `${fixture.sourceId}_recovery`;
+    const erroredRoute = `${fixture.sourceId}_errored`;
+    const healthyDestination = `${erroredRoute}_destination`;
+    await client.query("INSERT INTO routes (id,workspace_id,source_id,name,status) VALUES ($1,$2,$3,'Synthetic errored route','errored')",
+      [erroredRoute, fixture.workspaceId, fixture.sourceId]);
+    await client.query("INSERT INTO destinations (id,workspace_id,name,type,config) VALUES ($1,$2,'Synthetic healthy destination','bigquery','{}'::jsonb)",
+      [healthyDestination, fixture.workspaceId]);
+    await client.query("INSERT INTO route_destinations (route_id,destination_id) VALUES ($1,$2)", [erroredRoute, healthyDestination]);
+    await client.query(`INSERT INTO pipeline_incidents (id,workspace_id,source_id,incident_key,kind,snapshot)
+      VALUES ($1,$2,$3,$4,'delivery_blocked',$5::jsonb)`, [
+      `inc_${erroredRoute}`, fixture.workspaceId, fixture.sourceId, `delivery:${erroredRoute}:${healthyDestination}`,
+      JSON.stringify({ sourceId: fixture.sourceId, sourceName: "Synthetic webhook", routeId: erroredRoute,
+        destinationId: healthyDestination, destinationName: "Synthetic healthy destination", cause: "route_errored",
+        lastReceived: null, lastDelivered: null, failedCount: 0, waitingCount: 0, thresholdMinutes: 30 }),
+    ]);
     const recoveryMap = `${fixture.sourceId}_contract`;
     const recoveryVersion = `${fixture.sourceId}_version`;
     await client.query("INSERT INTO sources (id,workspace_id,name,secret_token_hash,status) VALUES ($1,$2,'Recovery fixture','synthetic','active')", [recoverySource, fixture.workspaceId]);

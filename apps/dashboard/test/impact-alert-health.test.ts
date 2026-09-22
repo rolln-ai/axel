@@ -95,7 +95,7 @@ describe("history in the live impact monitor", () => {
 
 describe("missing delivery records in the live impact monitor", () => {
   const route = { id: "rt_a", source_id: source.id, destination_id: "dst_a", destination_name: "Warehouse",
-    paused: false, unconditional: true, created_at: "2030-01-01" };
+    paused: false, route_errored: false, unconditional: true, created_at: "2030-01-01" };
   const key = `delivery:${route.id}:${route.destination_id}`;
   const outcome = { route_id: route.id, destination_id: route.destination_id, last_delivered: flow.last_received,
     waiting_count: 0, schema_failures: 0, auth_failures: 0 };
@@ -107,6 +107,8 @@ describe("missing delivery records in the live impact monitor", () => {
     pgQuery.mockReset();
     chQuery.mockReset();
     missing = { waiting_count: 1, event_ids: ["evt_lost"] };
+    route.paused = false;
+    route.route_errored = false;
     pgQuery.mockResolvedValueOnce({ rows: [source] }).mockResolvedValueOnce({ rows: [route] })
       .mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [] });
     chQuery.mockImplementation(async (sql: string, params: Record<string, string>) => {
@@ -160,5 +162,21 @@ describe("missing delivery records in the live impact monitor", () => {
   it("keeps a Postgres failure unavailable instead of reporting a healthy route", async () => {
     pgQuery.mockRejectedValueOnce(new Error("Control plane unavailable"));
     await expect(loadImpactObservations("ws_a")).rejects.toThrow("Control plane unavailable");
+  });
+
+  it("identifies an errored route without claiming its healthy destination is paused", async () => {
+    route.route_errored = true;
+    missing = { waiting_count: 0, event_ids: [] };
+    const observation = (await loadImpactObservations("ws_a")).find(o => o.key === key)!;
+    expect(observation.unhealthy).toBe(true);
+    expect(observation.snapshot.cause).toBe("route_errored");
+  });
+
+  it("still identifies an actual destination pause separately", async () => {
+    route.paused = true;
+    missing = { waiting_count: 0, event_ids: [] };
+    const observation = (await loadImpactObservations("ws_a")).find(o => o.key === key)!;
+    expect(observation.unhealthy).toBe(true);
+    expect(observation.snapshot.cause).toBe("destination_paused");
   });
 });
