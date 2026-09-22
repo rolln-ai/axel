@@ -114,6 +114,8 @@ test("recovery backfill skips confirmed deliveries, waits for ambiguous work and
 
 test("recovery diagnostics expose fixed codes without provider responses or customer values",()=>{
   assert.equal(safeRecoveryError('r2_get_429'),'r2_get_429');
+  assert.equal(safeRecoveryError('rate_limited'),'rate_limited');
+  assert.equal(safeRecoveryError('http_error_503'),'http_error_503');
   assert.equal(safeRecoveryError('queue_enqueue_503'),'queue_enqueue_503');
   assert.equal(safeRecoveryError('Replay produced no delivery attempts.'),'no_delivery_attempts');
   assert.equal(safeRecoveryError('r2_get_429 private payload'),'unrecognized_error');

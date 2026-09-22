@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import pg from "pg";
-import { cloudflareR2ObjectUrl, compareBigQuerySchemas, executeGraph, expectedBigQuerySchema,
+import { cloudflareR2ObjectUrl, compareBigQuerySchemas, executeGraph, expectedBigQuerySchema, bigQueryRowForEvent,
   isCanonicalRawPayloadKey, parseCanonicalRawPayloadKey, parsePipelineGraph } from "../packages/shared/dist/index.js";
 import { addRepairToPipeline, repairProposalFromIssue, synthesizeLegacyPipeline } from "../apps/dashboard/lib/inbox-repair.ts";
 import { bigQueryModeForBinding } from "../apps/dashboard/lib/pipeline-binding.ts";
@@ -51,6 +51,26 @@ function outgoing(payload, graph, destinationId) {
   return result[0].payload;
 }
 
+// BigQuery insertAll accepts integer Unix seconds for TIMESTAMP columns.
+// Validate retained values, not only inferred schema types; never guess units
+// or convert milliseconds. Keep repeated/scalar mismatches blocked.
+export function validEpochTimestamp(issue,row,fields) {
+  if(issue.kind!=='type_conflict'||issue.expected!=='INT64'||issue.existing!=='TIMESTAMP') return false;
+  const parts=issue.path.split('.');
+  let field;
+  for(const part of parts) {field=fields.find(item=>item.name.toLowerCase()===part.toLowerCase());if(!field)return false;fields=field.fields??[];}
+  if(field.mode==='REPEATED') return false;
+  const values=(value,index)=>{
+    if(index===parts.length) return [value];
+    if(Array.isArray(value)) return value.flatMap(item=>values(item,index));
+    if(!value||typeof value!=='object')return [];
+    const key=Object.keys(value).find(key=>key.toLowerCase()===parts[index].toLowerCase());
+    return key===undefined?[]:values(value[key],index+1);
+  };
+  const leaves=values(row,0).filter(value=>value!=null);
+  return leaves.length>0 && leaves.every(value=>Number.isSafeInteger(value)&&value>=-62135596800&&value<=253402300799);
+}
+
 export async function prepareBigQueryRouteRepair(client, options) {
   const {workspaceId,routeId,expectedUpdatedAt,readPayload,readSchema,onStage=()=>{}}=options;
   validateRouteScope(workspaceId,routeId);
@@ -74,15 +94,19 @@ export async function prepareBigQueryRouteRepair(client, options) {
   const payloads=[];
   const issues=new Map();
   const additions=new Set();
+  const epochFields=new Set();
   onStage('validate_retained_payloads');
   for(const row of failures) {
     row.base_event_id=retainedBaseEvent(row,workspaceId);
     const payload=await readPayload(row.r2_key);
     payloads.push(payload);
-    const compatibility=compareBigQuerySchemas(expectedBigQuerySchema([outgoing(payload,graph,state.destination.id)],mode,payloadColumn),schema.fields);
+    const output=outgoing(payload,graph,state.destination.id);
+    const compatibility=compareBigQuerySchemas(expectedBigQuerySchema([output],mode,payloadColumn),schema.fields);
     for(const path of compatibility.additions) additions.add(path);
-    for(const issue of compatibility.conflicts)
+    for(const issue of compatibility.conflicts) {
+      if(validEpochTimestamp(issue,bigQueryRowForEvent(output,mode,payloadColumn),schema.fields)) {epochFields.add(issue.path);continue;}
       issues.set(JSON.stringify([issue.path,issue.kind,issue.expected,issue.existing]),issue);
+    }
   }
   const ordered=[...issues.values()].sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)));
   let candidate=graph;
@@ -104,13 +128,14 @@ export async function prepareBigQueryRouteRepair(client, options) {
       nodeIdSeed:`fix_${hash(repair).slice(0,20)}`,attachedDestinationIds:attached}).graph;
   }
   if(supported) for(const payload of payloads) {
-    if(compareBigQuerySchemas(expectedBigQuerySchema([outgoing(payload,candidate,state.destination.id)],mode,payloadColumn),schema.fields).conflicts.length) supported=false;
+    const output=outgoing(payload,candidate,state.destination.id);
+    if(compareBigQuerySchemas(expectedBigQuerySchema([output],mode,payloadColumn),schema.fields).conflicts.some(issue=>!validEpochTimestamp(issue,bigQueryRowForEvent(output,mode,payloadColumn),schema.fields))) supported=false;
   }
   const requiresNewFields=additions.size>0 && target.schema_evolution!=='add_columns';
   if(requiresNewFields && (!state.destination.binding || additions.size>200)) supported=false;
-  const planHash=hash({state,additions:[...additions].sort(),requiresNewFields,schema:schema.fields,issues:ordered.map(({path,kind,expected,existing})=>({path,kind,expected,existing})),candidate});
+  const planHash=hash({state,epochFields:[...epochFields].sort(),additions:[...additions].sort(),requiresNewFields,schema:schema.fields,issues:ordered.map(({path,kind,expected,existing})=>({path,kind,expected,existing})),candidate});
   return {state,schema,candidate,failures,repairs,supported,planHash,target,requiresNewFields,
-    summary:{plan_hash:planHash,supported,validated_failures:failures.length,
+    summary:{plan_hash:planHash,supported,validated_failures:failures.length,validated_epoch_timestamp_fields:epochFields.size,
       schema_policy:target.schema_evolution==='add_columns'?'add_columns':'manual',additional_fields:additions.size,requires_new_fields:requiresNewFields,
       conflicts:ordered.map(issue=>({field_hash:hash(issue.path).slice(0,12),kind:issue.kind,
         expected:/^(REPEATED )?[A-Z0-9_]+$/.test(issue.expected)?issue.expected:'unknown',
