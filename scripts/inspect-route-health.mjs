@@ -8,7 +8,7 @@ import { controlPlanePgSslOption } from "./control-plane-pg.mjs";
 // print error_message, graph contents, event identifiers, or provider bodies.
 const engineSource = readFileSync(new URL("../packages/shared/src/route-engine.ts", import.meta.url), "utf8");
 const reasons = new Set([...engineSource.matchAll(/new RouteEngineError\(\s*"([a-z_]+)"/g)].map(match => match[1]));
-for (const reason of ["engine_error", "engine_disabled", "max_retries_exceeded", "delivery_dead", "payload_missing", "raw_payload_missing", "router_processing_failed"]) reasons.add(reason);
+for (const reason of ["declarative_engine_error", "engine_disabled", "max_retries_exceeded", "delivery_dead", "payload_missing", "raw_payload_missing", "router_processing_failed"]) reasons.add(reason);
 const safeReason = value => value == null ? null : reasons.has(value) ? value : "unrecognized_code";
 
 export function validateRouteScope(workspaceId, routeId) {
