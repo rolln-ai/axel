@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import pg from "pg";
-import { startRecoveryBackfill, inspectRecoveryBackfill, safeRecoveryError, resumeRecoveryBackfill } from "../recovery-backfill.mjs";
+import { startRecoveryBackfill, inspectRecoveryBackfill, safeRecoveryError, resumeRecoveryBackfill, reconcileRecoveryBackfill } from "../recovery-backfill.mjs";
 import { advanceJob } from "../../apps/delivery-service/src/backfill-job-worker.ts";
 import { databaseServiceAccessProfile } from "../database-service-access-profiles.mjs";
 import { connectDisposablePostgres } from "./postgres-integration-test-helpers.mjs";
@@ -140,6 +140,58 @@ test("recovery backfill skips confirmed deliveries, waits for ambiguous work and
   const summary=(await inspectRecoveryBackfill(client,'ws_a','rt_a'))[0];
   assert.equal(summary.delivered,5);assert.equal(summary.skipped,'2');assert.equal(summary.state,'done');
   assert.deepEqual(await inspectRecoveryBackfill(client,'ws_b','rt_a'),[]);
+
+  const reconcileAsDashboard=async input=>{
+    await client.query('SET ROLE synthetic_dashboard');
+    try{return await reconcileRecoveryBackfill(client,input);}finally{await client.query('RESET ROLE');}
+  };
+  await assert.rejects(reconcileAsDashboard({...resumeOptions,workspaceId:'ws_b'}));
+  await assert.rejects(reconcileAsDashboard({...resumeOptions,expectedUpdatedAt:'2026-09-22T11:00:00Z'}));
+  await client.query("UPDATE backfill_jobs SET state='running' WHERE id=$1",[created.id]);
+  await assert.rejects(reconcileAsDashboard(resumeOptions));
+  await client.query("UPDATE backfill_jobs SET state='done' WHERE id=$1",[created.id]);
+  await client.query("INSERT INTO routes(id,workspace_id,source_id,status) VALUES('rt_extra','ws_a','src_a','disabled')");
+  await assert.rejects(reconcileAsDashboard(resumeOptions));
+  await client.query("DELETE FROM routes WHERE id='rt_extra'");
+  const replay=replayRows.find(row=>row.event_id==='evt_missing');
+  const payload='events/ws_a/2026-09-17/evt_missing';
+  const insertFailure=async (ws,source,route,key,reason='max_retries_exceeded',destination=null,when="now()-interval '2 minutes'",isTest=false)=>
+    (await client.query(`INSERT INTO dead_letters(workspace_id,event_id,source_id,route_id,r2_key,reason,message,errored_at,destination_id,is_test)
+      VALUES($1,'evt_missing',$2,$3,$4,$5,'PRIVATE',${when},$6,$7) RETURNING id::text`,
+      [ws,source,route,key,reason,destination,isTest])).rows[0].id;
+  const valid=await insertFailure('ws_a','src_a','',payload);
+  const excluded=[];
+  excluded.push(await insertFailure('ws_b','src_a','',payload));
+  excluded.push(await insertFailure('ws_a','src_wrong','',payload));
+  excluded.push(await insertFailure('ws_a','src_a','rt_a',payload));
+  excluded.push(await insertFailure('ws_a','src_a','',payload+'-different'));
+  excluded.push(await insertFailure('ws_a','src_a','',payload,'unknown_reason'));
+  excluded.push(await insertFailure('ws_a','src_a','',payload,'max_retries_exceeded','dst_a'));
+  excluded.push(await insertFailure('ws_a','src_a','',payload,'max_retries_exceeded',null,"now()+interval '2 minutes'"));
+  excluded.push(await insertFailure('ws_a','src_a','',payload,'max_retries_exceeded',null,"now()-interval '2 minutes'",true));
+  await client.query("UPDATE replay_requests SET finished_at=now(),state='done' WHERE id=$1",[replay.id]);
+  // A replay marked done is insufficient: require the actual completed claim.
+  assert.equal((await reconcileAsDashboard(resumeOptions)).confirmed_source_failures_resolved,0);
+  const deliveryEvent=`evt_missing#${replay.id}`;
+  await client.query(`INSERT INTO delivery_idempotency(idempotency_key,workspace_id,event_id,route_id,destination_id,state,expires_at)
+    VALUES('synthetic-reconcile','ws_a',$1,'rt_a','dst_a','in_flight',now()+interval '1 day')`,[deliveryEvent]);
+  assert.equal((await reconcileAsDashboard(resumeOptions)).confirmed_source_failures_resolved,0);
+  await client.query("UPDATE delivery_idempotency SET state='completed',destination_id='dst_other' WHERE idempotency_key='synthetic-reconcile'");
+  assert.equal((await reconcileAsDashboard(resumeOptions)).confirmed_source_failures_resolved,0);
+  await client.query("UPDATE delivery_idempotency SET destination_id='dst_a',workspace_id='ws_b' WHERE idempotency_key='synthetic-reconcile'");
+  assert.equal((await reconcileAsDashboard(resumeOptions)).confirmed_source_failures_resolved,0);
+  await client.query("UPDATE delivery_idempotency SET workspace_id='ws_a',updated_at=now()-interval '1 day' WHERE idempotency_key='synthetic-reconcile'");
+  assert.equal((await reconcileAsDashboard(resumeOptions)).confirmed_source_failures_resolved,0);
+  await client.query("UPDATE delivery_idempotency SET updated_at=now() WHERE idempotency_key='synthetic-reconcile'");
+  await client.query("UPDATE replay_requests SET state='failed' WHERE id=$1",[replay.id]);
+  assert.equal((await reconcileAsDashboard(resumeOptions)).confirmed_source_failures_resolved,0);
+  await client.query("UPDATE replay_requests SET state='done' WHERE id=$1",[replay.id]);
+  assert.equal((await reconcileAsDashboard(resumeOptions)).confirmed_source_failures_resolved,1);
+  const resolved=(await client.query('SELECT resolved_by_replay_id FROM dead_letters WHERE id=$1',[valid])).rows[0];
+  assert.equal(resolved.resolved_by_replay_id,replay.id);
+  assert.equal((await client.query('SELECT count(*)::int n FROM dead_letters WHERE id=ANY($1::bigint[]) AND resolved_at IS NOT NULL',[excluded])).rows[0].n,0);
+  assert.equal((await reconcileAsDashboard(resumeOptions)).confirmed_source_failures_resolved,0);
+
 });
 
 

@@ -22,7 +22,7 @@ export async function inspectRouteHealth(client, workspaceId, routeId) {
   await client.query("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
   try {
     await client.query("SET LOCAL statement_timeout = '10s'");
-    const route = (await client.query(`SELECT r.status, r.engine, r.error_reason, r.updated_at
+    const route = (await client.query(`SELECT r.status, r.engine, r.error_reason, r.updated_at, r.source_id
       FROM routes r JOIN sources s ON s.id = r.source_id AND s.workspace_id = r.workspace_id
       WHERE r.workspace_id = $1 AND r.id = $2`, [workspaceId, routeId])).rows[0];
     if (!route) return { route_found: false };
@@ -37,6 +37,9 @@ export async function inspectRouteHealth(client, workspaceId, routeId) {
       FROM dead_letters dl JOIN routes r ON r.id = dl.route_id AND r.workspace_id = dl.workspace_id AND r.source_id = dl.source_id
       WHERE dl.workspace_id = $1 AND dl.route_id = $2 AND dl.resolved_at IS NULL
       GROUP BY dl.reason ORDER BY max(dl.errored_at) DESC LIMIT 20`, [workspaceId, routeId])).rows;
+    const sourceFailures = (await client.query(`SELECT reason, count(*)::int AS count, max(errored_at) AS latest
+      FROM dead_letters WHERE workspace_id=$1 AND source_id=$2 AND route_id='' AND resolved_at IS NULL
+      GROUP BY reason ORDER BY max(errored_at) DESC LIMIT 20`, [workspaceId, route.source_id])).rows;
     return {
       route_found: true,
       status: ["active", "disabled", "errored"].includes(route.status) ? route.status : "unknown",
@@ -44,6 +47,7 @@ export async function inspectRouteHealth(client, workspaceId, routeId) {
       error_reason: safeReason(route.error_reason),
       updated_at: route.updated_at.toISOString(),
       destinations,
+      source_failures_before_routing: sourceFailures.map(row => ({ reason: safeReason(row.reason), count: row.count, latest: row.latest.toISOString() })),
       failures: failures.map(row => ({ reason: safeReason(row.reason), count: row.count, latest: row.latest.toISOString() })),
     };
   } finally {

@@ -11,8 +11,9 @@ on:
           - inspect
           - start
           - resume
+          - reconcile
       job_id:
-        description: Exact failed recovery job to resume after its transient cause is addressed
+        description: Exact recovery job to resume or reconcile after confirmed delivery
         required: false
         type: string
       since:
@@ -36,7 +37,7 @@ on:
         required: false
         type: string
       confirm_production:
-        description: Type start-reviewed-backfill or resume-reviewed-backfill after reviewing delivery health
+        description: Type start-reviewed-backfill, resume-reviewed-backfill, or reconcile-confirmed-source-failures for the selected action
         required: false
         type: string
 
