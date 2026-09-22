@@ -30,7 +30,7 @@ async function loadState(client, workspaceId, routeId, lock = false) {
   if (!route || route.status !== "errored" || route.error_reason !== REASON || !route.graph) fail("route_state_changed");
   const destinations = (await client.query(`SELECT d.id, d.status, d.delivery_paused, d.circuit_state
     FROM route_destinations rd JOIN destinations d ON d.id=rd.destination_id
-    WHERE rd.route_id=$1 AND d.workspace_id=$2 ${lock ? "FOR SHARE OF rd,d" : ""}`, [routeId, workspaceId])).rows;
+    WHERE rd.route_id=$1 AND d.workspace_id=$2 ${lock ? "FOR SHARE OF d" : ""}`, [routeId, workspaceId])).rows;
   // This recovery is intentionally restricted to a single destination.
   if (destinations.length !== 1 || destinations.some(d => d.status !== "active" || d.delivery_paused || d.circuit_state !== "closed")) fail("destination_unavailable");
   const graph = parsePipelineGraph(route.graph, { attached_destination_ids: new Set(destinations.map(d => d.id)) });
