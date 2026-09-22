@@ -29,7 +29,8 @@ export interface ScalarCoercion {
 }
 
 export interface ArrayCollapse {
-  /** Dotted JSON path to the array. `items[].tags` handles nested arrays. */
+  /** Dotted JSON path to the array. Existing strings are already collapsed.
+   * `items[].tags` handles nested arrays. */
   path: string;
   /** Join scalar members, or preserve the complete array as JSON text. */
   format: ArrayCollapseFormat;
@@ -447,6 +448,9 @@ function collapseArrayPath(root: unknown, path: string, field: ArrayCollapse): v
 
     if (index === parts.length - 1) {
       if (current === null || current === undefined) return;
+      // Repair transforms run on mixed-shape events and on replay. A string
+      // already satisfies the target shape; preserve it without encoding twice.
+      if (typeof current === "string") return;
       if (!Array.isArray(current)) {
         throw new RouteEngineError("transform_collapse_array_expected_array", path);
       }

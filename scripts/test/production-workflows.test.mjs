@@ -666,13 +666,13 @@ test("secret mutations cannot race production deploys", () => {
   assert.match(render, /Dispatch Deploy Render Services for the reviewed main commit/);
 });
 
-test("runtime credentials stay in bounded distribution and read-only diagnostic workflows", () => {
+test("runtime credentials stay in bounded distribution, diagnostic, and recovery workflows", () => {
   const consumers = listWorkflowFiles().filter((file) =>
     /secrets\.DATABASE_(?:DASHBOARD|DELIVERY_NATIVE|DELIVERY_WORKERS|PULL_WORKER|DELIVERY_EDGE)_URL/.test(
       read(file),
     ),
   );
-  assert.deepEqual(consumers, [".github/workflows/inspect-route-health.yml", ".github/workflows/sync-database-url.yml"]);
+  assert.deepEqual(consumers, [".github/workflows/inspect-route-health.yml", ".github/workflows/recover-array-collapse-route.yml", ".github/workflows/sync-database-url.yml"]);
 
   const workflow = read(".github/workflows/sync-database-url.yml");
   assert.equal([...workflow.matchAll(/wrangler secret put DATABASE_URL/g)].length, 1);
@@ -689,6 +689,18 @@ test("runtime credentials stay in bounded distribution and read-only diagnostic 
   assert.equal([...diagnostic.matchAll(/secrets\./g)].length, 1);
   assert.deepEqual([...diagnostic.matchAll(/^\s+run: (.*)$/gm)].map(match => match[1]), ["node scripts/inspect-route-health.mjs"]);
   assert.doesNotMatch(diagnostic, /upload-artifact|GITHUB_OUTPUT|GITHUB_ENV|vercel|wrangler/);
+
+  const recovery = read(".github/workflows/recover-array-collapse-route.yml");
+  assert.match(recovery, /^  workflow_dispatch:$/m);
+  assert.match(recovery, /github\.ref == 'refs\/heads\/main'/);
+  assert.match(recovery, /^    environment: Production$/m);
+  assert.match(recovery, /^  contents: read$/m);
+  assert.match(recovery, /^  group: production-deploy$/m);
+  assert.match(recovery, /^          persist-credentials: false$/m);
+  assert.match(recovery, /ROUTE_RECOVERY_CONFIRM: \$\{\{ inputs\.confirm_production \}\}/);
+  assert.match(recovery, /ROUTE_RECOVERY_EXPECTED_UPDATED_AT: \$\{\{ inputs\.expected_updated_at \}\}/);
+  assert.deepEqual([...recovery.matchAll(/^\s+run: (.*)$/gm)].map(match => match[1]), ["node --import tsx --conditions=react-server scripts/recover-array-collapse-route.mjs"]);
+  assert.doesNotMatch(recovery, /upload-artifact|GITHUB_OUTPUT|GITHUB_ENV|vercel|wrangler/);
 });
 
 test("delivery canary settings target only the immutable singleton worker", () => {

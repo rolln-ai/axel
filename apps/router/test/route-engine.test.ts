@@ -250,13 +250,27 @@ describe("runTransform", () => {
     ).toEqual({ items: [{ tags: '["a","b"]' }, { tags: '["c"]' }] });
   });
 
-  it("rejects non-array values and object members in joined text", () => {
+  it.each(["join", "json"] as const)("preserves strings and is idempotent for %s array collapse", format => {
+    const input = { items: [{ tags: ["a", "b"] }, { tags: "already text" }, { tags: "" }, { tags: null }, {}] };
+    const transform = { kind: "collapse_arrays" as const, fields: [{ path: "items[].tags", format }] };
+    const output = runTransform(input, transform);
+    expect(output).toEqual({ items: [{ tags: format === "json" ? '["a","b"]' : "a, b" }, { tags: "already text" }, { tags: "" }, { tags: null }, {}] });
+    expect(runTransform(output, transform)).toEqual(output);
+    expect(input.items[0]?.tags).toEqual(["a", "b"]);
+  });
+
+  it.each([1, false, {}])("rejects unsupported scalar or object array-collapse values: %j", tags => {
+    expect(() => runTransform({ tags }, { kind: "collapse_arrays", fields: [{ path: "tags", format: "json" }] }))
+      .toThrowError(/transform_collapse_array_expected_array: tags/);
+  });
+
+  it("still requires arrays for traversal and scalar members in joined text", () => {
     expect(() =>
       runTransform(
-        { tags: "vip" },
-        { kind: "collapse_arrays", fields: [{ path: "tags", format: "join" }] },
+        { items: "text" },
+        { kind: "collapse_arrays", fields: [{ path: "items[].tags", format: "join" }] },
       ),
-    ).toThrowError(/transform_collapse_array_expected_array: tags/);
+    ).toThrowError(/transform_collapse_array_expected_array: items\[\].tags/);
     expect(() =>
       runTransform(
         { tags: [{ id: 1 }] },
