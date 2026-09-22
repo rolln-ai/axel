@@ -7,7 +7,7 @@ import type { FlowHistoryBucket } from "./source-gap-history";
 
 interface RouteRow {
   id: string; source_id: string; destination_id: string; destination_name: string;
-  paused: boolean; unconditional: boolean; created_at: string;
+  paused: boolean; route_errored: boolean; unconditional: boolean; created_at: string;
 }
 interface DeliveryActivity {
   route_id: string; destination_id: string; last_delivered: string | null;
@@ -21,7 +21,8 @@ export async function loadImpactObservations(workspaceId: string): Promise<Impac
        FROM sources WHERE workspace_id = $1 AND status = 'active'`, [workspaceId])).rows;
   const routes = (await client.query<RouteRow>(
     `SELECT r.id, r.source_id, d.id AS destination_id, d.name AS destination_name,
-            (d.delivery_paused OR d.status = 'disabled' OR d.circuit_state = 'open' OR r.status = 'errored') AS paused,
+            (d.delivery_paused OR d.status = 'disabled' OR d.circuit_state IN ('open', 'disabled')) AS paused,
+            (r.status = 'errored') AS route_errored,
             (r.engine = 'declarative' AND NULLIF(trim(r.filter_expression), '') IS NULL
              AND NULLIF(trim(r.transform_script), '') IS NULL AND r.pipeline_graph IS NULL) AS unconditional,
             GREATEST(r.created_at, d.created_at, r.updated_at)::text AS created_at
@@ -99,12 +100,12 @@ export async function loadImpactObservations(workspaceId: string): Promise<Impac
       const recentFailure = failures.some(f => f.source_id === source.id && f.route_id === route.id
         && f.destination_id === route.destination_id && Number(f.recent_count) > 0);
       const verified = !prior || (lastDelivered !== null && lastDelivered > (timestamp(prior.opened_at) ?? now));
-      observations.push({ key, kind: "delivery_blocked", unhealthy: route.paused || (failedCount > 0 && (Boolean(prior) || recentFailure)) || waitingCount > 0 || !verified,
+      observations.push({ key, kind: "delivery_blocked", unhealthy: route.paused || route.route_errored || (failedCount > 0 && (Boolean(prior) || recentFailure)) || waitingCount > 0 || !verified,
         snapshot: { sourceId: source.id, sourceName: source.name, destinationId: route.destination_id,
           destinationName: route.destination_name, routeId: route.id, lastReceived: flow?.last_received ?? null,
           lastDelivered: lastDelivered ? new Date(lastDelivered).toISOString() : null,
           failedCount, waitingCount, thresholdMinutes: 30,
-          cause: Number(outcome?.schema_failures ?? 0) > 0 ? "schema_mismatch"
+          cause: route.route_errored ? "route_errored" : Number(outcome?.schema_failures ?? 0) > 0 ? "schema_mismatch"
             : Number(outcome?.auth_failures ?? 0) > 0 ? "authorization_failed"
               : route.paused ? "destination_paused" : waitingCount > 0 ? "backlog" : "delivery_failed" },
       });

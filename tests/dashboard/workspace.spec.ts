@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { dashboardFixture, qaPassword } from "./fixtures.mjs";
 import { verifySlowNavigation } from "./navigation";
+import { verifyIncidentRecovery } from "./incident-recovery";
 
 test("sign-in, workspace changes, source isolation, and sign-out", async ({ page, request }, testInfo) => {
   const pageErrors: string[] = [];
@@ -123,6 +124,8 @@ test("sign-in, workspace changes, source isolation, and sign-out", async ({ page
   await page.reload();
   await expect(page.getByRole("button", { name: "Generate webhook URL", exact: true })).toBeVisible();
 
+  // Reuse this real sign-in so the full suite stays inside auth throttling.
+  await test.step("Errored route recovery", () => verifyIncidentRecovery(page, testInfo));
   await page.goto("/inbox");
   await expect(page.getByRole("heading", {name: "Synthetic webhook stopped receiving data", exact: true})).toBeVisible();
   await expect(page.getByText("Monitoring has not completed a recent check. Current data flow is unverified.", {exact: true})).toBeVisible();
@@ -130,14 +133,15 @@ test("sign-in, workspace changes, source isolation, and sign-out", async ({ page
   await page.screenshot({path: incidentScreenshot, fullPage: true});
   await testInfo.attach("pipeline-incident", {path: incidentScreenshot, contentType: "image/png"});
   // A silent source cannot be fixed from the Inbox; it links to the source instead.
-  await expect(page.getByRole("button", {name: "Fix now", exact: true})).toHaveCount(0);
-  await expect(page.getByRole("link", {name: "Check source setup", exact: true})).toBeVisible();
-  await page.getByText("Details", {exact: true}).click();
-  await page.getByRole("button", {name: "Pause reminder emails for 24 hours", exact: true}).click();
-  await expect(page.getByText(/Reminder emails paused until/)).toBeVisible();
+  const silentIncident = page.locator("article").filter({hasText: "Synthetic webhook stopped receiving data"});
+  await expect(silentIncident.getByRole("button", {name: "Fix now", exact: true})).toHaveCount(0);
+  await expect(silentIncident.getByRole("link", {name: "Check source setup", exact: true})).toBeVisible();
+  await silentIncident.getByText("Details", {exact: true}).click();
+  await silentIncident.getByRole("button", {name: "Pause reminder emails for 24 hours", exact: true}).click();
+  await expect(silentIncident.getByText(/Reminder emails paused until/)).toBeVisible();
   await page.reload();
-  await page.getByText("Details", {exact: true}).click();
-  await expect(page.getByRole("button", {name: "Pause reminder emails for 24 hours", exact: true})).toHaveCount(0);
+  await silentIncident.getByText("Details", {exact: true}).click();
+  await expect(silentIncident.getByRole("button", {name: "Pause reminder emails for 24 hours", exact: true})).toHaveCount(0);
   await page.goto("/settings?tab=notifications");
   await expect(page.getByRole("checkbox", {name: /^Data flow incidents/})).toBeChecked();
   await expect(page.getByRole("checkbox", {name: /^Weekly schema observations/})).not.toBeChecked();

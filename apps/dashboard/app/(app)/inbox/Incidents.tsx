@@ -119,6 +119,9 @@ function IncidentCard({ incident, groups, canMutate }: { incident: IncidentRow; 
           <p className="whitespace-pre-line text-xs text-muted-foreground">{message.body}</p>
           <div className="flex flex-wrap gap-4 text-xs">
             <Link className="underline" href={`/sources/${encodeURIComponent(incident.snapshot.sourceId)}?tab=settings`}>Source settings</Link>
+            {incident.snapshot.routeId ? (
+              <Link className="underline" href={`/routes/${encodeURIComponent(incident.snapshot.routeId)}`}>Route</Link>
+            ) : null}
             {incident.snapshot.destinationId ? (
               <Link className="underline" href={`/destinations/${encodeURIComponent(incident.snapshot.destinationId)}`}>Destination</Link>
             ) : null}
@@ -162,6 +165,8 @@ function plainSummary(snapshot: ImpactSnapshot): string {
       return "The destination rejected Axel's credentials. Update them on the destination page, then click Fix now to replay.";
     case "destination_paused":
       return "Delivery to this destination is paused. Resume it on the destination page, then click Fix now to replay.";
+    case "route_errored":
+      return "The route stopped after a processing error. Correct the route and enable it, then click Fix now to replay.";
     case "backlog":
       return "Events have waited over 30 minutes for this destination. Fix now replays any that failed; if the queue is stuck, check the destination.";
     default:
