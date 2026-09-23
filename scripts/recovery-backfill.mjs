@@ -118,14 +118,74 @@ export async function resumeRecoveryBackfill(client, options) {
   } catch(error) {await client.query('ROLLBACK').catch(()=>{});throw error;}
 }
 
+// A route-scoped replay cannot ordinarily resolve a source-wide routing failure.
+// Reconcile only one completed, pinned recovery job on a single-route source,
+// with a completed delivery claim for the exact replay, payload and destination.
+export async function reconcileRecoveryBackfill(client, options) {
+  const { workspaceId, routeId, jobId, expectedUpdatedAt, runUrl } = options;
+  validateRouteScope(workspaceId, routeId);
+  if (!/^bfj_[a-f0-9]{24}$/.test(jobId ?? '') || !Number.isFinite(Date.parse(expectedUpdatedAt))
+    || !/^https:\/\/github\.com\/rolln-ai\/axel\/actions\/runs\/\d+$/.test(runUrl)) fail();
+  await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
+  try {
+    await client.query("SET LOCAL statement_timeout='10s'");
+    await client.query("SET LOCAL lock_timeout='5s'");
+    const job = (await client.query(`SELECT *,recovery_route_updated_at::text AS recovery_route_updated_at
+      FROM backfill_jobs WHERE id=$1 AND workspace_id=$2 AND route_id=$3 FOR UPDATE`,
+      [jobId,workspaceId,routeId])).rows[0];
+    if (!job || job.state !== 'done' || !job.recovery_destination_id
+      || Date.parse(job.recovery_route_updated_at) !== Date.parse(expectedUpdatedAt)
+      || !await recoveryRouteReady(client,job,true)) fail();
+    // Disabled routes count too: a failure before routing has no reliable
+    // evidence that any other configured route was intentionally excluded.
+    const routes = (await client.query(`SELECT id,engine,pipeline_graph FROM routes
+      WHERE workspace_id=$1 AND source_id=$2 FOR SHARE`,[workspaceId,job.source_id])).rows;
+    if (routes.length !== 1 || routes[0].id !== routeId || routes[0].engine !== 'declarative') fail();
+    const graph = routes[0].pipeline_graph;
+    if (graph !== null) {
+      if (!Array.isArray(graph?.nodes)) fail();
+      const leaves = graph.nodes.filter(node => node?.kind === 'destination');
+      if (leaves.length !== 1 || leaves[0].destination_id !== job.recovery_destination_id) fail();
+    }
+    const resolved = await client.query(`WITH confirmed AS (
+      SELECT DISTINCT ON(dl.id) dl.id,rr.id AS replay_id
+      FROM dead_letters dl
+      JOIN replay_requests rr ON rr.workspace_id=dl.workspace_id AND rr.source_id=dl.source_id
+        AND rr.event_id=dl.event_id AND rr.r2_key=dl.r2_key
+        AND rr.backfill_job_id=$3 AND rr.scope='route' AND rr.route_id=$2 AND rr.destination_id IS NULL
+        AND rr.state='done' AND rr.finished_at>=dl.errored_at
+      JOIN delivery_idempotency di ON di.workspace_id=rr.workspace_id
+        AND di.event_id=rr.event_id||'#'||rr.id AND di.route_id=$2 AND di.destination_id=$5
+        AND di.state='completed' AND di.updated_at>=dl.errored_at
+      WHERE dl.workspace_id=$1 AND dl.source_id=$4 AND dl.route_id=''
+        AND dl.destination_id IS NULL AND NOT dl.is_test AND dl.resolved_at IS NULL
+        AND dl.reason IN ('max_retries_exceeded','router_processing_failed')
+      ORDER BY dl.id,rr.finished_at DESC
+    ) UPDATE dead_letters dl SET resolved_at=now(),resolved_by_replay_id=c.replay_id
+      FROM confirmed c WHERE dl.id=c.id AND dl.workspace_id=$1 AND dl.resolved_at IS NULL`,
+      [workspaceId,routeId,jobId,job.source_id,job.recovery_destination_id]);
+    await writeAudit(client,{workspaceId,actorUserId:null,action:'route.recovery_source_failures_reconciled',
+      targetType:'backfill_job',targetId:jobId,metadata:{resolved:resolved.rowCount,run_url:runUrl}});
+    await client.query('COMMIT');
+    return { confirmed_source_failures_resolved: resolved.rowCount };
+  } catch (error) { await client.query('ROLLBACK').catch(()=>{}); throw error; }
+}
+
 async function main() {
   const e=process.env;
-  if (!e.DATABASE_URL || !["inspect","start","resume"].includes(e.RECOVERY_BACKFILL_ACTION)) fail();
+  if (!e.DATABASE_URL || !["inspect","start","resume","reconcile"].includes(e.RECOVERY_BACKFILL_ACTION)) fail();
   const client=new pg.Client({connectionString:e.DATABASE_URL,ssl:controlPlanePgSslOption(e.DATABASE_URL,e.DATABASE_TLS_VERIFY),connectionTimeoutMillis:10_000});
   try {
     await client.connect();
     if(e.RECOVERY_BACKFILL_ACTION==='inspect') {
       console.log(JSON.stringify(await inspectRecoveryBackfill(client,e.ROUTE_HEALTH_WORKSPACE_ID,e.ROUTE_HEALTH_ROUTE_ID)));
+      return;
+    }
+    if(e.RECOVERY_BACKFILL_ACTION==='reconcile') {
+      if(e.RECOVERY_BACKFILL_CONFIRM!=="reconcile-confirmed-source-failures") fail();
+      console.log(JSON.stringify(await reconcileRecoveryBackfill(client,{workspaceId:e.ROUTE_HEALTH_WORKSPACE_ID,
+        routeId:e.ROUTE_HEALTH_ROUTE_ID,jobId:e.RECOVERY_BACKFILL_JOB_ID,expectedUpdatedAt:e.RECOVERY_BACKFILL_EXPECTED_UPDATED_AT,
+        runUrl:`https://github.com/rolln-ai/axel/actions/runs/${e.GITHUB_RUN_ID}`})));
       return;
     }
     if(e.RECOVERY_BACKFILL_ACTION==='resume') {

@@ -35,6 +35,10 @@ test("route diagnostic is read only, isolated, and never exports raw error text"
   await client.query(`INSERT INTO dead_letters (workspace_id,event_id,source_id,route_id,r2_key,reason,message,errored_at) VALUES
     ('ws_a','private_event','src_a','rt_a','private_key','transform_coerce_failed','PRIVATE',now()),
     ('ws_b','private_event','src_b','rt_a','private_key','PRIVATE UNKNOWN CODE','PRIVATE',now())`);
+  await client.query(`INSERT INTO dead_letters (workspace_id,event_id,source_id,route_id,r2_key,reason,message,errored_at) VALUES
+    ('ws_a','private_event','src_a','','private_key','max_retries_exceeded','PRIVATE',now()),
+    ('ws_a','private_event','src_other','','private_key','PRIVATE UNKNOWN CODE','PRIVATE',now()),
+    ('ws_b','private_event','src_a','','private_key','PRIVATE UNKNOWN CODE','PRIVATE',now())`);
   const original = (await client.query("SELECT status,error_reason,updated_at FROM routes ORDER BY id")).rows;
   let sawReadOnly = false;
   const wrappedClient = { query: async (...args) => {
@@ -48,6 +52,9 @@ test("route diagnostic is read only, isolated, and never exports raw error text"
   assert.equal(report.status, "errored");
   assert.equal(report.error_reason, "transform_coerce_failed");
   assert.deepEqual(report.destinations, { total: 1, paused: 0, disabled: 0, circuit_blocked: 0 });
+  assert.equal(report.source_failures_before_routing.length, 1);
+  assert.equal(report.source_failures_before_routing[0].reason, 'max_retries_exceeded');
+  assert.equal(report.source_failures_before_routing[0].count, 1);
   assert.equal(report.failures.length, 1);
   assert.equal(report.failures[0].count, 1);
   assert.equal(/PRIVATE|private_|src_|dst_/.test(JSON.stringify(report)), false);
