@@ -34,6 +34,9 @@ function successfulFetch(requests, overrides = {}) {
     if (url.includes("/queues")) {
       return overrides.queue ?? new Response(null, { status: 403 });
     }
+    if (url.endsWith("/settings")) {
+      return overrides.workerSettings ?? new Response(null, { status: 403 });
+    }
     if (url.includes("/workers/scripts")) {
       return overrides.workers ?? new Response(null, { status: 403 });
     }
@@ -51,7 +54,7 @@ test("dashboard token proves R2 access and rejects Queue and Worker access", asy
     log: (line) => logs.push(line),
   });
 
-  assert.deepEqual(requests.map(({ method }) => method), ["PUT", "GET", "GET", "GET", "DELETE"]);
+  assert.deepEqual(requests.map(({ method }) => method), ["PUT", "GET", "GET", "GET", "GET", "DELETE"]);
   assert.ok(requests.every(({ authorizationMatches }) => authorizationMatches));
   assert.deepEqual(logs, ["dashboard Cloudflare token verified for R2 runtime access only"]);
   assert.doesNotMatch(JSON.stringify({ requests, logs }), new RegExp(TOKEN));
@@ -118,7 +121,7 @@ test("Vercel build probes only the production trust boundary", async () => {
     log: (line) => productionLogs.push(line),
   });
   assert.equal(productionCode, 0);
-  assert.deepEqual(requests.map(({ method }) => method), ["PUT", "GET", "GET", "GET", "DELETE"]);
+  assert.deepEqual(requests.map(({ method }) => method), ["PUT", "GET", "GET", "GET", "GET", "DELETE"]);
   assert.deepEqual(productionLogs, [
     "dashboard Cloudflare token verified for R2 runtime access only",
   ]);
@@ -150,7 +153,7 @@ test("dashboard verifier command dispatches the hosted production probe", async 
     log: (line) => logs.push(line),
   });
   assert.equal(exitCode, 0);
-  assert.deepEqual(requests.map(({ method }) => method), ["PUT", "GET", "GET", "GET", "DELETE"]);
+  assert.deepEqual(requests.map(({ method }) => method), ["PUT", "GET", "GET", "GET", "GET", "DELETE"]);
   assert.deepEqual(logs, [
     "dashboard Cloudflare token verified for R2 runtime access only",
   ]);
@@ -179,7 +182,7 @@ test("dashboard token fails closed when Worker Scripts access is present", async
       env: BASE_ENV,
       apiBase: "https://cloudflare.example.test/client/v4",
       fetchImpl: successfulFetch(requests, {
-        workers: new Response(JSON.stringify({ success: true, result: [] }), { status: 200 }),
+        workers: Response.json({ success: true, result: [{ id: "visible-worker" }], errors: [] }),
       }),
     }),
     /cloudflare_dashboard_r2_token_workers_scripts_permission_present/,
@@ -255,4 +258,65 @@ test("dashboard token CLI collapses arbitrary exception messages", () => {
     dashboardR2PublicErrorCode(new Error("provider-secret-never-log")),
     "cloudflare_dashboard_r2_token_probe_failed",
   );
+});
+
+const EMPTY_WORKER_LIST = { success: true, result: [], errors: [] };
+
+test("R2-only token accepts a filtered empty Worker list plus explicit settings denial", async () => {
+  const requests = [];
+  await verifyDashboardR2Token({
+    env: BASE_ENV,
+    fetchImpl: successfulFetch(requests, { workers: Response.json(EMPTY_WORKER_LIST) }),
+    log: () => {},
+  });
+  assert.match(requests.at(-2).url, /\/workers\/scripts\/axel-r2-denial-[a-f0-9-]+\/settings$/);
+  assert.equal(requests.at(-2).method, "GET");
+  assert.equal(requests.at(-1).method, "DELETE");
+});
+
+test("empty Worker lists never bypass the settings authorization check", async () => {
+  for (const status of [200, 204, 302, 404, 429, 500]) {
+    const requests = [];
+    await assert.rejects(verifyDashboardR2Token({
+      env: BASE_ENV,
+      fetchImpl: successfulFetch(requests, {
+        workers: Response.json(EMPTY_WORKER_LIST),
+        workerSettings: new Response(null, { status }),
+      }),
+    }), /cloudflare_dashboard_r2_(token_workers_scripts_permission_present|workers_scripts_denial_probe_http_)/);
+    assert.equal(requests.at(-1).method, "DELETE");
+  }
+});
+
+test("ambiguous Worker list envelopes fail closed without leaking response data", async () => {
+  const secret = "provider-secret-never-log";
+  for (const value of [null, {}, {success: false, result: [], errors: []},
+    {success: true, result: []}, {success: true, result: {}, errors: []},
+    {...EMPTY_WORKER_LIST, errors: [{message: secret}]},
+    {...EMPTY_WORKER_LIST, padding: secret.repeat(2000)},
+  ]) {
+    const requests = [];
+    const errors = [];
+    const code = await runDashboardR2TokenCli({
+      envFile: "ignored.env", loadEnvFile: () => {}, env: BASE_ENV,
+      fetchImpl: successfulFetch(requests, {workers: Response.json(value)}),
+      errorLog: line => errors.push(line),
+    });
+    assert.equal(code, 1);
+    assert.deepEqual(errors, ["dashboard Cloudflare token verification failed: cloudflare_dashboard_r2_workers_list_probe_invalid"]);
+    assert.equal(requests.at(-1).method, "DELETE");
+    assert.doesNotMatch(JSON.stringify(errors), new RegExp(secret));
+  }
+});
+
+test("stalled Worker list bodies time out, cancel, and clean up R2", {timeout: 1000}, async () => {
+  let cancelled = false;
+  const requests = [];
+  const body = new ReadableStream({cancel() { cancelled = true; }});
+  await assert.rejects(verifyDashboardR2Token({
+    env: BASE_ENV, requestTimeoutMs: 20,
+    fetchImpl: successfulFetch(requests, {workers: new Response(body)}),
+  }), {message: "cloudflare_dashboard_r2_workers_list_probe_invalid"});
+  assert.equal(cancelled, true);
+  assert.equal(requests.at(-1).method, "DELETE");
 });

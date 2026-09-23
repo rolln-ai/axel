@@ -134,7 +134,11 @@ writes or transaction keys when available.
 
 The hosted dashboard uses a dedicated `CLOUDFLARE_R2_API_TOKEN`; the protected
 Vercel deploy proves isolated R2 read/write/delete and rejects any token that
-can list Queues or Worker scripts. Delivery uses a different runtime token for
+can list Queues, see Worker scripts, or access Worker settings. Cloudflare can
+return a successful empty Worker list to an R2-only token, so an empty list
+alone is not authorization evidence. The verifier additionally requires 401/403
+from a settings GET for a random nonexistent Worker; 404 and all other
+non-denial responses fail closed. Delivery uses a different runtime token for
 Queue and R2 operations, while the Worker-deployment/provisioning token remains
 in protected workflows. Source configuration still contains decrypted signing
 material at the edge, and internal edge APIs use deployment-wide shared

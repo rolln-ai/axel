@@ -12,6 +12,7 @@ const PUBLIC_ERROR_CODE_PATTERNS = [
   /^invalid_(?:cloudflare_account_id|raw_payload_bucket)$/,
   /^invalid_vercel_environment_for_dashboard_r2_verification$/,
   /^legacy_cloudflare_api_token_present_in_dashboard_runtime$/,
+  /^cloudflare_dashboard_r2_workers_list_probe_invalid$/,
   /^cloudflare_dashboard_r2_(?:probe_(?:request_failed|read_failed|mismatch)|http_[1-5][0-9]{2}|token_(?:queue|workers_scripts)_permission_present|(?:queue|workers_scripts)_denial_probe_http_[1-5][0-9]{2})$/,
 ];
 
@@ -80,9 +81,57 @@ async function requireDenied(fetchImpl, url, token, capability, timeoutMs) {
   throw new Error(`cloudflare_dashboard_r2_${capability}_denial_probe_http_${response.status}`);
 }
 
+async function requireWorkersDenied(fetchImpl, url, token, timeoutMs) {
+  const response = await fetchBounded(fetchImpl, url, {
+    method: "GET",
+    headers: { authorization: `Bearer ${token}` },
+  }, timeoutMs);
+  if (response.status !== 401 && response.status !== 403) {
+    if (response.status !== 200) {
+      throw new Error(`cloudflare_dashboard_r2_workers_scripts_denial_probe_http_${response.status}`);
+    }
+    // Cloudflare filters this list by token visibility: R2-only tokens can
+    // receive a successful empty list. Bound and validate the envelope; never
+    // retain or log script metadata or provider error messages.
+    let reader;
+    let body;
+    try {
+      body = await consumeBodyBounded(async () => {
+        reader = response.body.getReader();
+        const chunks = [];
+        let bytes = 0;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          bytes += value.byteLength;
+          if (bytes > 16_384) throw new Error();
+          chunks.push(Buffer.from(value));
+        }
+        return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      }, timeoutMs, "cloudflare_dashboard_r2_workers_list_probe_invalid");
+    } finally {
+      void reader?.cancel().catch(() => {});
+    }
+    if (body?.success !== true || !Array.isArray(body.result)
+      || !Array.isArray(body.errors) || body.errors.length !== 0) {
+      throw new Error("cloudflare_dashboard_r2_workers_list_probe_invalid");
+    }
+    if (body.result.length !== 0) {
+      throw new Error("cloudflare_dashboard_r2_token_workers_scripts_permission_present");
+    }
+  }
+  // An empty account can also produce an empty list for a broad token. Require
+  // authorization denial on a random nonexistent Worker: broad credentials
+  // reach resource lookup (404), while the R2-only credential receives 403.
+  // This GET neither creates a Worker nor reads a real Worker's settings.
+  await requireDenied(fetchImpl, `${url}/axel-r2-denial-${randomUUID()}/settings`,
+    token, "workers_scripts", timeoutMs);
+}
+
 /**
  * Prove that Vercel's dashboard credential can read, write, and delete one
- * isolated R2 object but cannot list Queues or Worker scripts. The legacy
+ * isolated R2 object but cannot list Queues, see Worker scripts, or access
+ * Worker settings. The legacy
  * CLOUDFLARE_API_TOKEN variable is rejected so the provisioning credential
  * cannot silently remain in the dashboard runtime.
  */
@@ -134,11 +183,10 @@ export async function verifyDashboardR2Token(options = {}) {
       "queue",
       requestTimeoutMs,
     );
-    await requireDenied(
+    await requireWorkersDenied(
       fetchImpl,
       `${apiBase}/accounts/${account}/workers/scripts`,
       token,
-      "workers_scripts",
       requestTimeoutMs,
     );
   } catch (error) {
