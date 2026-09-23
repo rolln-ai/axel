@@ -205,8 +205,15 @@ export async function beginSourceAuthorizationWithAuthority(
     throw new SourceLookupUnavailableError("source authority request failed", "authority_unavailable");
   }
   if (response.status === 423) {
-    await response.body?.cancel().catch(() => undefined);
-    throw new SourceLookupUnavailableError("source authorization is temporarily fenced", "source_fenced");
+    let fenceKind: "mutation" | "drift" | undefined;
+    try {
+      const body = await readBoundedJsonResponse(response, 1024);
+      if (body && typeof body === "object" && "fence_kind" in body) {
+        const kind = (body as { fence_kind: unknown }).fence_kind;
+        if (kind === "mutation" || kind === "drift") fenceKind = kind;
+      }
+    } catch { /* Body is advisory only; proceed without fence_kind on parse failure. */ }
+    throw new SourceLookupUnavailableError("source authorization is temporarily fenced", "source_fenced", undefined, fenceKind);
   }
   if (response.status === 503) {
     throw await authorityUnavailableError(response);

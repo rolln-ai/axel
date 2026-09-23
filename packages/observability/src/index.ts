@@ -879,6 +879,7 @@ const SENTRY_ALLOWED_TAG_KEYS = new Set([
   "component",
   "controlled_probe",
   "error_code",
+  "fence_kind",
   "field",
   "final_attempt",
   "http_status",
