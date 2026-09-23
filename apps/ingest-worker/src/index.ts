@@ -188,6 +188,7 @@ export default {
       // capture it (unlike the expected queue/R2 backpressure above).
       if (err instanceof SourceLookupUnavailableError) {
         ctx.waitUntil(captureException(sentry, err, {
+          fingerprint: ["source_lookup", err.reason],
           tags: { component: "source_lookup", reason: err.reason, http_status: err.httpStatus },
         }));
         return json(

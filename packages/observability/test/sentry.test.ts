@@ -2,6 +2,27 @@ import { describe, expect, it, vi } from "vitest";
 import { captureException, createSentryClient, installNodeSentryHandlers, isCircuitBreakerOpenError, isCloudflareQueueInternalError, isCloudflareQueueOverloadError, isPoolAcquireTimeout, isTransientFetchError, isTransientPlatformHttpError, isTransientPostgresError, isTransientR2Error, operationalAlertSentryIdentity, sentryClientFromEnv, withPgRetry } from "../src/index.ts";
 
 describe("sentry client", () => {
+  it("separates source lookup reasons without retaining provider text or identifiers", async () => {
+    const events: Array<{ fingerprint: string[]; exception: { values: Array<{ value: string }> } }> = [];
+    const client = createSentryClient({
+      dsn: "https://public@example.sentry.io/12345", service: "ingest-worker",
+      fetchImpl: (async (_url, init) => {
+        events.push(JSON.parse(String(init?.body).trim().split("\n")[2]!));
+        return new Response(null, { status: 200 });
+      }) as typeof fetch,
+    });
+    for (const reason of ["source_fenced", "lookup_timeout", "private-customer-value"]) {
+      const error = Object.assign(new Error("private-provider-response"), { name: "SourceLookupUnavailableError", reason });
+      await client.captureException(error, { fingerprint: ["source_lookup", reason] });
+    }
+    expect(events[0]?.fingerprint).toEqual(["source_lookup", "source_fenced"]);
+    expect(events[1]?.fingerprint).toEqual(["source_lookup", "lookup_timeout"]);
+    expect(events[0]?.exception.values[0]?.value).toBe("source_lookup_source_fenced");
+    expect(events[1]?.exception.values[0]?.value).toBe("source_lookup_lookup_timeout");
+    expect(events[2]?.fingerprint).toEqual(["application_error"]);
+    expect(events[2]?.exception.values[0]?.value).toBe("application_error");
+    expect(JSON.stringify(events)).not.toContain("private-");
+  });
   it("sends Sentry envelopes to the DSN project endpoint", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const fetchImpl: typeof fetch = (async (url, init) => {

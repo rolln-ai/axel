@@ -804,6 +804,12 @@ function safeExceptionType(value: string): string {
 }
 
 function sentryErrorCode(error: unknown): string {
+  if (error instanceof Error && error.name === "SourceLookupUnavailableError") {
+    const reason = (error as Error & { reason?: unknown }).reason;
+    if (typeof reason === "string" && SOURCE_LOOKUP_DIAGNOSTIC_REASONS.has(reason)) {
+      return `source_lookup_${reason}`;
+    }
+  }
   const message = error instanceof Error
     ? error.message
     : typeof error === "string"
@@ -909,8 +915,17 @@ function sanitizeSentryTags(
   return sanitized;
 }
 
+// Only engine-defined reasons may distinguish these issues. Never group on a
+// source identifier, provider response, or the original exception message.
+const SOURCE_LOOKUP_DIAGNOSTIC_REASONS = new Set([
+  "lookup_failed", "lookup_not_configured", "lookup_timeout", "lookup_network",
+  "lookup_http", "lookup_invalid_response", "authority_unavailable", "source_fenced", "authorization_changed",
+]);
+
 function sanitizeSentryFingerprint(fingerprint: readonly string[] | undefined): string[] | undefined {
   if (!fingerprint) return undefined;
+  if (fingerprint.length === 2 && fingerprint[0] === "source_lookup"
+      && SOURCE_LOOKUP_DIAGNOSTIC_REASONS.has(fingerprint[1]!)) return [...fingerprint];
   if (fingerprint.length !== 4 || fingerprint[0] !== "operational_alert") {
     return ["application_error"];
   }

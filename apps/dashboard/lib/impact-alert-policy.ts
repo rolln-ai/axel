@@ -135,12 +135,14 @@ function time(value: string | null): string {
 /** Only controlled templates and configuration labels reach email, never connector free text. */
 export function impactMessage(kind: ImpactKind, snapshot: ImpactSnapshot, phase: ImpactPhase): { title: string; body: string } {
   const source = label(snapshot.sourceName);
+  const routingFailure = kind === "delivery_blocked" && !snapshot.destinationId;
   const target = snapshot.destinationName ? label(snapshot.destinationName) : "its destination";
   const title = phase === "recovered"
     ? `${source}: ${kind === "source_silent" ? "incoming traffic resumed" : "delivery recovered"}`
     : kind === "source_silent" ? `${source} stopped receiving data`
       : snapshot.cause === "schema_mismatch" ? `${source}: ${target} cannot store some events`
-        : `${source}: deliveries to ${target} need attention`;
+        : routingFailure ? `${source}: routing failures need attention`
+          : `${source}: deliveries to ${target} need attention`;
   const action = snapshot.cause === "no_traffic"
     ? `No accepted events within the expected ${snapshot.thresholdMinutes}-minute window.${snapshot.thresholdBasis === "historical_pattern" ? " This window includes recurring quiet periods at comparable times in this source's retained 30-day history." : snapshot.thresholdBasis === "observed_gap" ? " This window covers the longest quiet period in this source's retained 30-day history." : ""} Check that the sender's webhook is enabled and uses this source's current credentials. Requests rejected before ingestion are not available for replay in Axel.`
     : snapshot.cause === "schema_mismatch"
@@ -153,12 +155,14 @@ export function impactMessage(kind: ImpactKind, snapshot: ImpactSnapshot, phase:
           ? "Delivery is paused or the destination is disabled. Review delivery controls and the underlying error before resuming."
           : snapshot.cause === "backlog"
             ? "Accepted events have been waiting over 30 minutes for this destination. Check worker and queue health and destination availability."
-            : "Some accepted events could not be delivered. Open the failed deliveries, correct the cause, then replay the retained events.";
+            : routingFailure
+              ? "Accepted events have unresolved failures recorded before a destination was selected. Review the source's failed events and routing error. Check for a successful recovery before replaying; a retained failure record alone does not prove delivery is still missing."
+              : "Some accepted events could not be delivered. Open the failed deliveries, correct the cause, then replay the retained events.";
   return {
     title: `${phase === "reminder" ? "Still unresolved: " : ""}${title}`,
     body: [
       phase === "recovered" ? "Recovery remained healthy across checks for at least 15 minutes. Historical missing data has not necessarily been backfilled." : action,
-      `Source: ${source}. Destination: ${snapshot.destinationName ? target : "see source routes"}.`,
+      `Source: ${source}. Destination: ${snapshot.destinationName ? target : routingFailure ? "not selected at failure" : "see source routes"}.`,
       `Last accepted event: ${time(snapshot.lastReceived)}. Last successful destination delivery: ${time(snapshot.lastDelivered)}.`,
       `Unresolved failed events: ${snapshot.failedCount}. Events waiting over 30 minutes: ${snapshot.waitingCount}.`,
       phase === "recovered" ? "Review the incident period for any provider-side backfill still needed." : "This is one incident. Further reminders arrive at most once every 24 hours; acknowledgement pauses them for 24 hours.",

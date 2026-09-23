@@ -18,11 +18,18 @@ export function renderImpactEmail(workspace: string, workspaceId: string, kind: 
   const { title, body } = impactMessage(kind, snapshot, phase);
   const link = `${appUrl()}/workspaces/${encodeURIComponent(workspaceId)}/inbox`;
   const settings = `${appUrl()}/settings?tab=notifications`;
+  const sourceLink = `${appUrl()}/sources/${encodeURIComponent(snapshot.sourceId)}`;
+  const filters = new URLSearchParams({ status: "failed", source: snapshot.sourceId });
+  if (snapshot.destinationId) filters.set("destination", snapshot.destinationId);
+  const failuresLink = `${appUrl()}/workspaces/${encodeURIComponent(workspaceId)}/deliveries?${filters}`;
+  const diagnostics = [{ label: "Review source", url: sourceLink },
+    ...(kind === "delivery_blocked" ? [{ label: "Review failed events", url: failuresLink }] : [])];
   return {
     subject: `[${workspace.replace(/[\r\n\t]/g, " ").slice(0, 120)}] ${title}`,
-    text: `${title}\n\n${body}\n\nReview incident: ${link}\nEmail preferences: ${settings}`,
+    text: `${title}\n\n${body}\n\nReview incident: ${link}\n${diagnostics.map(item => `${item.label}: ${item.url}`).join("\n")}\nEmail preferences: ${settings}`,
     html: renderBrandedEmail({ preheader: title,
-      contentHtml: emailHeading(title) + body.split("\n\n").map(p => emailParagraph(escapeHtml(p))).join("") + emailButton(link, "Review incident"),
+      contentHtml: emailHeading(title) + body.split("\n\n").map(p => emailParagraph(escapeHtml(p))).join("") + emailButton(link, "Review incident")
+        + diagnostics.map(item => emailParagraph(`<a href="${escapeHtml(item.url)}">${item.label}</a>`)).join(""),
       footerNote: `You receive incident alerts for ${escapeHtml(workspace)}. <a href="${escapeHtml(settings)}">Email preferences</a>.`,
     }),
   };
