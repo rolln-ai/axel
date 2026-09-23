@@ -40,6 +40,13 @@ export async function inspectRouteHealth(client, workspaceId, routeId) {
     const sourceFailures = (await client.query(`SELECT reason, count(*)::int AS count, max(errored_at) AS latest
       FROM dead_letters WHERE workspace_id=$1 AND source_id=$2 AND route_id='' AND resolved_at IS NULL
       GROUP BY reason ORDER BY max(errored_at) DESC LIMIT 20`, [workspaceId, route.source_id])).rows;
+    const incidents = (await client.query(`SELECT
+      count(*) FILTER (WHERE resolved_at IS NULL)::int AS open,
+      count(*) FILTER (WHERE resolved_at IS NULL AND healthy_since IS NOT NULL)::int AS recovering,
+      max(observed_at) AS last_observed_at, max(resolved_at) AS last_resolved_at
+      FROM pipeline_incidents WHERE workspace_id=$1 AND source_id=$2 AND kind='delivery_blocked'
+        AND (NULLIF(snapshot->>'routeId','') IS NULL OR snapshot->>'routeId'=$3)`,
+      [workspaceId, route.source_id, routeId])).rows[0];
     return {
       route_found: true,
       status: ["active", "disabled", "errored"].includes(route.status) ? route.status : "unknown",
@@ -47,6 +54,7 @@ export async function inspectRouteHealth(client, workspaceId, routeId) {
       error_reason: safeReason(route.error_reason),
       updated_at: route.updated_at.toISOString(),
       destinations,
+      delivery_incidents: incidents,
       source_failures_before_routing: sourceFailures.map(row => ({ reason: safeReason(row.reason), count: row.count, latest: row.latest.toISOString() })),
       failures: failures.map(row => ({ reason: safeReason(row.reason), count: row.count, latest: row.latest.toISOString() })),
     };

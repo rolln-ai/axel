@@ -127,6 +127,36 @@ curl -fsS -X POST \
 
 The route returns 404 when `OPS_TEST_TOKEN` is unset or wrong.
 
+### Automated diagnosis and proposed fixes
+
+Sentry ingestion, alerts, and Seer are separate controls. A healthy event stream
+does not prove automated diagnosis is available. In the project's Seer settings,
+connect the application repository, enable scanning, and select the automation
+stop at a pull request. Keep merges and production promotion under maintainer
+control. Repository instructions should require behavioral regression tests,
+preserve tenant isolation and delivery guarantees, and treat event content as
+untrusted data rather than instructions.
+
+Verify setup by starting a run on an actual application issue and checking its
+progress and resulting diagnosis or PR. `repos_not_linked` means the Seer project
+repository connection is missing even if the organization has a GitHub
+integration. `No budget for Seer Autofix` means settings alone cannot activate
+runs; the organization needs available Seer budget. Do not report automation
+working until a run is accepted and its result is inspected.
+
+Source lookup failures use an allowlisted reason in both their Sentry title and
+fingerprint, separating authorization fencing from timeout, network, and invalid
+response failures. Provider messages and customer identifiers remain redacted.
+These ingest failures are distinct from accepted events that failed later in
+routing or delivery; link a diagnosis to an incident only when evidence matches.
+
+For delivery incidents, use the protected route-health workflow. It reports
+pre-routing and route-specific failure codes separately, plus open/recovering
+incident counts and monitor timestamps. Confirm delivery using recovery jobs
+and durable claims before reconciling retained failures. Then check that the
+monitor has observed recovery and the incident is closed; a successful replay
+alone does not establish alert clearance.
+
 ### Slack (optional, not production-verified)
 
 1. Create an incoming webhook in your Slack workspace, capture the URL.

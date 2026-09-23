@@ -8,6 +8,22 @@ const source: FlowSource = { id: "src_test", name: "Orders", created_at: "2030-0
 const activity = { source_id: source.id, last_received: "2030-01-14 12:00:00.000", samples: 100, typical_gap_seconds: 60 };
 
 describe("impact policy", () => {
+  it("identifies pre-destination failures and links to workspace-scoped diagnostics", () => {
+    const snapshot = { ...sourceSilenceObservation(source, activity, now)!.snapshot,
+      cause: "delivery_failed" as const, failedCount: 2 };
+    const email = renderImpactEmail("Example", "ws_test", "delivery_blocked", snapshot, "reminder");
+    expect(email.subject).toContain("routing failures need attention");
+    expect(email.text).toContain("before a destination was selected");
+    expect(email.text).toContain("Check for a successful recovery before replaying");
+    expect(email.text).toContain("/sources/src_test");
+    expect(email.text).toContain("/workspaces/ws_test/deliveries?status=failed&source=src_test");
+    expect(email.html).toContain("status=failed&amp;source=src_test");
+    const destination = renderImpactEmail("Example", "ws_test", "delivery_blocked",
+      { ...snapshot, destinationId: "dst_test", destinationName: "Warehouse" }, "opened");
+    expect(destination.subject).toContain("deliveries to Warehouse");
+    expect(destination.text).toContain("source=src_test&destination=dst_test");
+    expect(destination.text).not.toContain("before a destination was selected");
+  });
   it("detects source silence even when no failed delivery exists", () => {
     const result = sourceSilenceObservation(source, activity, now)!;
     expect(result.unhealthy).toBe(true);

@@ -40,6 +40,12 @@ test("route diagnostic is read only, isolated, and never exports raw error text"
     ('ws_a','private_event','src_other','','private_key','PRIVATE UNKNOWN CODE','PRIVATE',now()),
     ('ws_b','private_event','src_a','','private_key','PRIVATE UNKNOWN CODE','PRIVATE',now())`);
   const original = (await client.query("SELECT status,error_reason,updated_at FROM routes ORDER BY id")).rows;
+  await client.query(`INSERT INTO pipeline_incidents(id,workspace_id,source_id,incident_key,kind,snapshot,healthy_since,resolved_at) VALUES
+    ('inc_a','ws_a','src_a','routing:src_a:all','delivery_blocked','{"routeId":null}',now(),NULL),
+    ('inc_done','ws_a','src_a','delivery:rt_a:old','delivery_blocked','{"routeId":"rt_a"}',now(),now()),
+    ('inc_other_route','ws_a','src_a','delivery:rt_other:old','delivery_blocked','{"routeId":"rt_other"}',NULL,NULL),
+    ('inc_other_workspace','ws_b','src_b','routing:src_b:all','delivery_blocked','{}',NULL,NULL),
+    ('inc_silent','ws_a','src_a','source:src_a','source_silent','{}',NULL,NULL)`);
   let sawReadOnly = false;
   const wrappedClient = { query: async (...args) => {
     if (args[0].startsWith("SELECT r.status")) {
@@ -57,6 +63,10 @@ test("route diagnostic is read only, isolated, and never exports raw error text"
   assert.equal(report.source_failures_before_routing[0].count, 1);
   assert.equal(report.failures.length, 1);
   assert.equal(report.failures[0].count, 1);
+  assert.equal(report.delivery_incidents.open, 1);
+  assert.equal(report.delivery_incidents.recovering, 1);
+  assert.ok(report.delivery_incidents.last_observed_at);
+  assert.ok(report.delivery_incidents.last_resolved_at);
   assert.equal(/PRIVATE|private_|src_|dst_/.test(JSON.stringify(report)), false);
   assert.deepEqual(await inspectRouteHealth(client, "ws_b", "rt_a"), { route_found: false });
   assert.equal((await inspectRouteHealth(client, "ws_b", "rt_b")).error_reason, "unrecognized_code");
