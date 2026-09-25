@@ -56,6 +56,10 @@ describe("impact policy", () => {
     // still-unhealthy incident keeps reminding.
     expect(incidentTransition({ ...state, acknowledged_until: null, fix_requested_at: "2030-01-14 13:50:00+00" }, false, now)).toBe("recover");
     expect(incidentTransition({ ...state, acknowledged_until: null, fix_requested_at: "2030-01-14 13:50:00+00" }, true, now)).toBe("remind");
+    // "Ignore and close" stops reminders for good but never blocks recovery.
+    const dismissed = { ...state, acknowledged_until: null, dismissed_at: "2030-01-14 13:00:00+00" };
+    expect(incidentTransition(dismissed, true, now)).toBe("observe");
+    expect(incidentTransition({ ...dismissed, healthy_since: "2030-01-14 13:44:00+00" }, false, now)).toBe("recover");
     expect(timestamp("2030-01-14 14:00:00+00")).toBe(now);
     expect(timestamp("1970-01-01 00:00:00")).toBeNull();
   });

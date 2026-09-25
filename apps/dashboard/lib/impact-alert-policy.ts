@@ -110,6 +110,8 @@ export interface IncidentState {
   next_reminder_at: string;
   /** Set when an operator clicked Fix in the Inbox. */
   fix_requested_at?: string | null;
+  /** Set when an operator chose "Ignore and close" in the Inbox. */
+  dismissed_at?: string | null;
 }
 
 export function incidentTransition(state: IncidentState, unhealthy: boolean, now: number): "observe" | "healthy" | "recover" | "remind" {
@@ -121,6 +123,9 @@ export function incidentTransition(state: IncidentState, unhealthy: boolean, now
     const healthySince = timestamp(state.healthy_since);
     return healthySince !== null && now - healthySince >= 15 * 60_000 ? "recover" : "healthy";
   }
+  // A dismissed incident is still observed (so recovery closes it) but
+  // never reminds again; only bringing it back re-arms the reminder.
+  if (timestamp(state.dismissed_at ?? null) !== null) return "observe";
   const acknowledgement = timestamp(state.acknowledged_until);
   if (acknowledgement !== null && acknowledgement > now) return "observe";
   return now >= (timestamp(state.next_reminder_at) ?? Infinity) ? "remind" : "observe";

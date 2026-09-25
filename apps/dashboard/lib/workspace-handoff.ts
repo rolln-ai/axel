@@ -13,3 +13,15 @@ export function workspaceHandoffLocation(requestUrl: string, destPath: string): 
   dest.search = new URL(requestUrl).search;
   return dest;
 }
+
+/**
+ * Server actions POST to whatever URL the browser is on. When the hand-off
+ * URL is what the router kept (a soft navigation that followed the 303, for
+ * example straight after signing in with a `returnTo`), an action would hit
+ * the GET-only hand-off handler and fail with 405. Map such POSTs to the
+ * canonical page so the action runs where it was defined.
+ */
+export function workspaceHandoffActionRewrite(pathname: string): string | null {
+  const match = /^\/workspaces\/[^/]+\/(inbox|deliveries)\/?$/.exec(pathname);
+  return match ? `/${match[1]}` : null;
+}

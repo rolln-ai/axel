@@ -12,6 +12,8 @@ export interface PipelineIncident {
   opened_at: string; observed_at: string; healthy_since: string | null;
   acknowledged_until: string | null; next_reminder_at: string; sequence: number;
   fix_requested_at: string | null;
+  /** "Ignore and close": hidden from the Inbox, no further email. */
+  dismissed_at: string | null;
 }
 
 export function renderImpactEmail(workspace: string, workspaceId: string, kind: ImpactKind, snapshot: ImpactSnapshot, phase: ImpactPhase): Omit<SendArgs, "to"> {
@@ -63,7 +65,7 @@ export async function recordImpactObservations(client: Queryable, workspaceId: s
   for (const observation of observations) {
     const existing = (await client.query<PipelineIncident>(
       `SELECT id, workspace_id, kind, snapshot, opened_at::text, observed_at::text, healthy_since::text,
-              acknowledged_until::text, next_reminder_at::text, sequence, fix_requested_at::text
+              acknowledged_until::text, next_reminder_at::text, sequence, fix_requested_at::text, dismissed_at::text
          FROM pipeline_incidents WHERE workspace_id = $1 AND incident_key = $2 AND resolved_at IS NULL FOR UPDATE`,
       [workspaceId, observation.key])).rows[0];
     if (existing && Date.parse(existing.observed_at) >= observedAt.getTime()) continue;
@@ -90,7 +92,9 @@ export async function recordImpactObservations(client: Queryable, workspaceId: s
         [workspaceId, incident.id, JSON.stringify(observation.snapshot), observedAt, observation.unhealthy, phase, incident.sequence]);
     }
     if (phase) {
-      await enqueuePhase(client, incident, phase);
+      // The operator ignored this incident: it still closes on recovery,
+      // but nobody is emailed about it again.
+      if (!incident.dismissed_at) await enqueuePhase(client, incident, phase);
       changes += 1;
     }
   }

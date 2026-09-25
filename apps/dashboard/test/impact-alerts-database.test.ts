@@ -118,4 +118,26 @@ describe.skipIf(!integration)("incident transactions and recipient retries on Po
     expect((await pool.query("SELECT * FROM alert_email_outbox WHERE user_id = 'u_b' AND phase = 'recovered' AND state = 'cancelled'")).rowCount).toBe(1);
     expect((await pool.query("SELECT * FROM pipeline_incidents WHERE workspace_id = 'ws_b'")).rowCount).toBe(0);
   });
+
+  it("keeps observing an ignored incident without emailing about it, and closes it on recovery", async () => {
+    const outbox = async (where = "true") => (await pool.query(`SELECT * FROM alert_email_outbox WHERE ${where}`)).rowCount ?? 0;
+    const before = await outbox();
+    await record([observation()]);
+    expect((await pool.query("SELECT * FROM pipeline_incidents WHERE resolved_at IS NULL")).rowCount).toBe(1);
+    expect(await outbox()).toBe(before + 1);
+    await pool.query(`UPDATE pipeline_incidents SET dismissed_at = now(), next_reminder_at = now() - interval '1 hour',
+      observed_at = now() - interval '1 minute' WHERE resolved_at IS NULL`);
+    await pool.query("UPDATE alert_email_outbox SET state = 'cancelled', payload = '{}'::jsonb WHERE state = 'pending'");
+    const ignored = (await pool.query<{ id: string }>("SELECT id FROM pipeline_incidents WHERE resolved_at IS NULL")).rows[0]!.id;
+    await record([observation()]);
+    expect(await outbox(`incident_id = '${ignored}' AND phase <> 'opened'`)).toBe(0);
+    await pool.query("UPDATE pipeline_incidents SET healthy_since = now() - interval '16 minutes', observed_at = now() - interval '1 minute' WHERE resolved_at IS NULL");
+    await record([{ ...observation(), unhealthy: false }]);
+    expect((await pool.query("SELECT * FROM pipeline_incidents WHERE resolved_at IS NULL")).rowCount).toBe(0);
+    expect(await outbox(`incident_id = '${ignored}' AND phase <> 'opened'`)).toBe(0);
+    // A later relapse is a fresh incident and alerts again.
+    await record([observation()]);
+    expect((await pool.query("SELECT * FROM pipeline_incidents WHERE resolved_at IS NULL AND dismissed_at IS NULL")).rowCount).toBe(1);
+    expect(await outbox()).toBe(before + 2);
+  });
 });

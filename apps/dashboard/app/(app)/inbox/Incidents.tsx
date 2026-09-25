@@ -7,9 +7,10 @@ import { assignGroupsToIncidents, incidentIsFixable } from "../../../lib/inciden
 import type { InboxGroup } from "../../../lib/inbox";
 import { LocalTime } from "../../_components/LocalTime";
 import { AcknowledgeIncident } from "./AcknowledgeIncident";
+import { DismissIncident } from "./DismissIncident";
 import { FixIncident } from "./FixIncident";
 
-type IncidentRow = Pick<PipelineIncident, "id" | "kind" | "snapshot" | "opened_at" | "acknowledged_until" | "fix_requested_at">;
+type IncidentRow = Pick<PipelineIncident, "id" | "kind" | "snapshot" | "opened_at" | "acknowledged_until" | "fix_requested_at" | "dismissed_at">;
 
 /**
  * One card per open incident, one button per card. Everything the old page
@@ -20,17 +21,20 @@ export async function Incidents({
   workspaceId,
   canMutate,
   groups,
+  view = "open",
 }: {
   workspaceId: string;
   canMutate: boolean;
   /** Active dead-letter groups; each is shown under the incident that owns it. */
   groups: InboxGroup[];
+  /** "open": cards needing attention. "ignored": cards the operator closed, with a way back. */
+  view?: "open" | "ignored";
 }) {
-  let incidents: IncidentRow[];
+  let allIncidents: IncidentRow[];
   let monitor: { checked_at: string | null; unsent: string } | undefined;
   try {
-    incidents = (await db().query<IncidentRow>(
-      `SELECT id, kind, snapshot, opened_at::text, acknowledged_until::text, fix_requested_at::text
+    allIncidents = (await db().query<IncidentRow>(
+      `SELECT id, kind, snapshot, opened_at::text, acknowledged_until::text, fix_requested_at::text, dismissed_at::text
          FROM pipeline_incidents WHERE workspace_id = $1 AND resolved_at IS NULL ORDER BY opened_at DESC`,
       [workspaceId],
     )).rows;
@@ -41,10 +45,31 @@ export async function Incidents({
       [workspaceId],
     )).rows[0];
   } catch {
-    return { node: <p role="alert" className="mb-6 text-sm text-destructive">Incident monitoring is unavailable. Current data flow is unverified.</p>, unassigned: groups };
+    return { node: <p role="alert" className="mb-6 text-sm text-destructive">Incident monitoring is unavailable. Current data flow is unverified.</p>, unassigned: groups, ignored: 0 };
   }
   const stale = !monitor?.checked_at || Date.now() - Date.parse(monitor.checked_at) > 45 * 60_000;
-  const { byIncident, unassigned } = assignGroupsToIncidents(incidents, groups);
+  // Ignored incidents still own their groups, so the failures they cover do
+  // not resurface as "Other failed deliveries" the moment the card is closed.
+  const { byIncident, unassigned } = assignGroupsToIncidents(allIncidents, groups);
+  const ignoredIncidents = allIncidents.filter((incident) => incident.dismissed_at !== null);
+  const incidents = view === "ignored" ? ignoredIncidents : allIncidents.filter((incident) => incident.dismissed_at === null);
+
+  if (view === "ignored") {
+    const node = (
+      <section className="mb-6 space-y-3" aria-label="Ignored">
+        {incidents.length === 0 ? (
+          <div className="rounded-lg border border-border bg-card p-6">
+            <p className="text-sm font-medium">Nothing ignored.</p>
+            <p className="text-xs text-muted-foreground">Alerts you close with "Ignore and close" stay here until they recover or you bring them back.</p>
+          </div>
+        ) : null}
+        {incidents.map((incident) => (
+          <IncidentCard key={incident.id} incident={incident} groups={byIncident.get(incident) ?? []} canMutate={canMutate} ignored />
+        ))}
+      </section>
+    );
+    return { node, unassigned, ignored: ignoredIncidents.length };
+  }
 
   const node = (
     <section className="mb-6 space-y-3" aria-label="Needs attention">
@@ -76,10 +101,10 @@ export async function Incidents({
       ))}
     </section>
   );
-  return { node, unassigned };
+  return { node, unassigned, ignored: ignoredIncidents.length };
 }
 
-function IncidentCard({ incident, groups, canMutate }: { incident: IncidentRow; groups: InboxGroup[]; canMutate: boolean }) {
+function IncidentCard({ incident, groups, canMutate, ignored = false }: { incident: IncidentRow; groups: InboxGroup[]; canMutate: boolean; ignored?: boolean }) {
   const message = impactMessage(incident.kind, incident.snapshot, "opened");
   const acknowledged = incident.acknowledged_until !== null && Date.parse(incident.acknowledged_until) > Date.now();
   const fixable = incidentIsFixable(incident);
@@ -99,17 +124,29 @@ function IncidentCard({ incident, groups, canMutate }: { incident: IncidentRow; 
             {waiting > 0 ? <>{waiting.toLocaleString("en-US")} waiting over 30 minutes. </> : null}
             Detected <LocalTime value={incident.opened_at} />.
             {acknowledged ? <> Reminder emails paused until <LocalTime value={incident.acknowledged_until!} />.</> : null}
+            {ignored && incident.dismissed_at ? <> Ignored <LocalTime value={incident.dismissed_at} />; no more emails about it.</> : null}
           </p>
         </div>
-        {canMutate && fixable ? (
-          <FixIncident incidentId={incident.id} fixRequestedAt={incident.fix_requested_at} />
-        ) : canMutate ? (
-          <Link
-            href={`/sources/${encodeURIComponent(incident.snapshot.sourceId)}?tab=settings`}
-            className="inline-flex h-8 items-center rounded-md border border-border px-3 text-xs font-medium hover:bg-muted/40"
-          >
-            Check source setup
-          </Link>
+        {canMutate ? (
+          <div className="flex flex-wrap items-start justify-end gap-2">
+            {ignored ? (
+              <DismissIncident incidentId={incident.id} mode="restore" />
+            ) : (
+              <>
+                <DismissIncident incidentId={incident.id} mode="dismiss" />
+                {fixable ? (
+                  <FixIncident incidentId={incident.id} fixRequestedAt={incident.fix_requested_at} />
+                ) : (
+                  <Link
+                    href={`/sources/${encodeURIComponent(incident.snapshot.sourceId)}?tab=settings`}
+                    className="inline-flex h-7 items-center rounded-md border border-border px-2.5 text-xs font-medium hover:bg-muted/40"
+                  >
+                    Check source setup
+                  </Link>
+                )}
+              </>
+            )}
+          </div>
         ) : null}
       </div>
 
@@ -148,7 +185,7 @@ function IncidentCard({ incident, groups, canMutate }: { incident: IncidentRow; 
               ))}
             </ul>
           ) : null}
-          {canMutate && !acknowledged ? <AcknowledgeIncident id={incident.id} /> : null}
+          {canMutate && !acknowledged && !ignored ? <AcknowledgeIncident id={incident.id} /> : null}
         </div>
       </details>
     </article>

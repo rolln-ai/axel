@@ -49,3 +49,52 @@ export async function acknowledgeIncidentAction(_state: ActionState, form: FormD
     } catch { return { error: "Could not acknowledge this incident. Try again." }; }
   });
 }
+
+export interface IncidentDismissResult { ok: boolean; error?: string }
+
+/**
+ * "Ignore and close". The card leaves the Inbox and every queued or future
+ * email for this incident stops. Monitoring is untouched: the incident still
+ * resolves on sustained recovery, and a later relapse opens a fresh one.
+ */
+export async function dismissIncidentAction(input: { incidentId: string }): Promise<IncidentDismissResult> {
+  return withWorkspaceMutation<IncidentDismissResult>(
+    { gateError: (error) => ({ ok: false, error }) },
+    async ({ workspaceId, audit }) => {
+      try {
+        const changed = await withTransaction(async client => {
+          const result = await client.query(`UPDATE pipeline_incidents SET dismissed_at = now()
+            WHERE workspace_id = $1 AND id = $2 AND resolved_at IS NULL AND dismissed_at IS NULL RETURNING id`, [workspaceId, input.incidentId]);
+          if (!result.rowCount) return false;
+          await client.query(`UPDATE alert_email_outbox SET state = 'cancelled', payload = '{}'::jsonb
+            WHERE workspace_id = $1 AND incident_id = $2 AND state = 'pending'`, [workspaceId, input.incidentId]);
+          await audit({ action: "incident.dismissed", targetType: "pipeline_incident", targetId: input.incidentId }, client);
+          return true;
+        });
+        revalidatePath("/inbox");
+        return changed ? { ok: true } : { ok: false, error: "This alert is no longer active. Refresh the Inbox." };
+      } catch { return { ok: false, error: "Could not close this alert. Try again." }; }
+    },
+  );
+}
+
+/** Undo "Ignore and close": the card returns and reminders resume in 24 hours. */
+export async function restoreIncidentAction(input: { incidentId: string }): Promise<IncidentDismissResult> {
+  return withWorkspaceMutation<IncidentDismissResult>(
+    { gateError: (error) => ({ ok: false, error }) },
+    async ({ workspaceId, audit }) => {
+      try {
+        const changed = await withTransaction(async client => {
+          const result = await client.query(`UPDATE pipeline_incidents
+            SET dismissed_at = NULL, next_reminder_at = now() + interval '24 hours'
+            WHERE workspace_id = $1 AND id = $2 AND resolved_at IS NULL AND dismissed_at IS NOT NULL RETURNING id`, [workspaceId, input.incidentId]);
+          if (!result.rowCount) return false;
+          await audit({ action: "incident.restored", targetType: "pipeline_incident", targetId: input.incidentId }, client);
+          return true;
+        });
+        revalidatePath("/inbox");
+        return changed ? { ok: true } : { ok: false, error: "This alert is no longer ignored. Refresh the Inbox." };
+      } catch { return { ok: false, error: "Could not bring this alert back. Try again." }; }
+    },
+  );
+}

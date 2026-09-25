@@ -8,11 +8,14 @@ import {
   fixIncidentAction,
   recheckIncidentAction,
   type FixIncidentResult,
+  type RecheckIncidentResult,
 } from "../../../lib/incident-fix-actions";
 
 /** Keep polling this long after a fix before handing off to the 15-minute cron. */
 const POLL_WINDOW_MS = 5 * 60_000;
 const POLL_EVERY_MS = 5_000;
+/** Shown when the action request itself fails rather than the fix. */
+const UNREACHABLE = "Axel did not get a reply from the server. Reload the Inbox and try again.";
 
 type Phase =
   | { kind: "idle" }
@@ -47,7 +50,17 @@ export function FixIncident({
     if (!polling) return;
     let cancelled = false;
     async function tick() {
-      const result = await recheckIncidentAction({ incidentId });
+      let result: RecheckIncidentResult;
+      try {
+        result = await recheckIncidentAction({ incidentId });
+      } catch {
+        if (cancelled) return;
+        // A transport failure (timeout, 405, network) must not unmount the
+        // page: the replays are already queued and the cron still confirms.
+        setPhase({ kind: "error", error: UNREACHABLE });
+        setPolling(false);
+        return;
+      }
       if (cancelled) return;
       if (result.error) {
         setPhase({ kind: "error", error: result.error });
@@ -77,7 +90,13 @@ export function FixIncident({
 
   function onFix() {
     start(async () => {
-      const result: FixIncidentResult = await fixIncidentAction({ incidentId });
+      let result: FixIncidentResult;
+      try {
+        result = await fixIncidentAction({ incidentId });
+      } catch {
+        setPhase({ kind: "error", error: UNREACHABLE });
+        return;
+      }
       if (!result.ok) {
         setPhase({ kind: "error", error: result.error ?? "Could not start the fix." });
         return;
