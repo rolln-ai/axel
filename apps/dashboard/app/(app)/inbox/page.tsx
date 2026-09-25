@@ -27,6 +27,7 @@ export default async function InboxPage({
   const params = await searchParams;
   const showMuted = String(params.muted ?? "") === "1";
   const showResolved = String(params.show ?? "") === "resolved";
+  const showIgnored = String(params.show ?? "") === "ignored";
   const session = await requireSession();
   const workspaceId = session.activeWorkspace.workspace_id;
   const canMutate = session.activeWorkspace.role === "owner" || session.activeWorkspace.role === "admin";
@@ -49,6 +50,22 @@ export default async function InboxPage({
       }
     />
   );
+
+  if (showIgnored) {
+    const { node } = await Incidents({ workspaceId, canMutate, groups: activeGroups, view: "ignored" });
+    return (
+      <>
+        {header}
+        <div className="mb-4 flex flex-wrap items-center gap-2 text-xs">
+          <Link href="/inbox" prefetch={false} className="rounded-md border border-border bg-card px-2.5 py-1 text-muted-foreground hover:text-foreground">
+            ← Needs attention
+          </Link>
+          <span className="rounded-md border border-foreground bg-foreground px-2.5 py-1 text-background">Ignored</span>
+        </div>
+        {node}
+      </>
+    );
+  }
 
   if (showResolved || showMuted) {
     const visible = showResolved ? resolvedGroups : mutedGroups;
@@ -78,7 +95,7 @@ export default async function InboxPage({
   }
 
   // Groups covered by an open incident render under it; the rest get their own list.
-  const { node: incidents, unassigned } = await Incidents({ workspaceId, canMutate, groups: activeGroups });
+  const { node: incidents, unassigned, ignored } = await Incidents({ workspaceId, canMutate, groups: activeGroups });
   // Muted groups still belong to their incident (Fix now lifts the mute), but
   // never get their own list.
   const leftovers = unassigned.filter((g) => g.muted_until === null);
@@ -99,8 +116,13 @@ export default async function InboxPage({
 
       <BillingAlerts workspaceId={workspaceId} userId={session.user.id} />
 
-      {resolvedGroups.length > 0 || mutedGroups.length > 0 ? (
+      {resolvedGroups.length > 0 || mutedGroups.length > 0 || ignored > 0 ? (
         <p className="mt-6 flex flex-wrap gap-4 text-xs text-muted-foreground">
+          {ignored > 0 ? (
+            <Link href="/inbox?show=ignored" prefetch={false} className="hover:text-foreground">
+              Ignored ({ignored})
+            </Link>
+          ) : null}
           {resolvedGroups.length > 0 ? (
             <Link href="/inbox?show=resolved" prefetch={false} className="hover:text-foreground">
               Fixed in the last 24h ({resolvedGroups.length})

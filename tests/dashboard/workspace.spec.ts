@@ -1,7 +1,8 @@
 import { expect, test } from "@playwright/test";
-import { dashboardFixture, qaPassword } from "./fixtures.mjs";
+import { dashboardFixture } from "./fixtures.mjs";
 import { verifySlowNavigation } from "./navigation";
 import { verifyIncidentRecovery } from "./incident-recovery";
+import { signInThroughInboxHandoff, verifyIgnoreAndRestore } from "./inbox-ignore";
 
 test("sign-in, workspace changes, source isolation, and sign-out", async ({ page, request }, testInfo) => {
   const pageErrors: string[] = [];
@@ -10,11 +11,10 @@ test("sign-in, workspace changes, source isolation, and sign-out", async ({ page
   const theme = testInfo.project.name.endsWith("light") ? "light" : "dark";
   await page.addInitScript((value) => localStorage.setItem("theme", value), theme);
 
+  // The one real sign-in of the suite goes through an incident-email link, so
+  // the Fix button is exercised on the URL that link leaves the router on.
+  await test.step("Sign in through the workspace hand-off link", () => signInThroughInboxHandoff(page, testInfo));
   await page.goto("/settings");
-  await expect(page).toHaveURL(/\/login\?/);
-  await page.getByLabel("Email", { exact: true }).fill(fixture.email);
-  await page.getByLabel("Password", { exact: true }).fill(qaPassword);
-  await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await expect(page).toHaveURL(/\/settings$/);
   await expect(page.locator("html")).toHaveClass(new RegExp(`\\b${theme}\\b`));
 
@@ -142,6 +142,7 @@ test("sign-in, workspace changes, source isolation, and sign-out", async ({ page
   await page.reload();
   await silentIncident.getByText("Details", {exact: true}).click();
   await expect(silentIncident.getByRole("button", {name: "Pause reminder emails for 24 hours", exact: true})).toHaveCount(0);
+  await test.step("Ignore and close, then bring back", () => verifyIgnoreAndRestore(page, testInfo));
   await page.goto("/settings?tab=notifications");
   await expect(page.getByRole("checkbox", {name: /^Data flow incidents/})).toBeChecked();
   await expect(page.getByRole("checkbox", {name: /^Weekly schema observations/})).not.toBeChecked();

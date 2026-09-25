@@ -1818,6 +1818,7 @@ CREATE TABLE IF NOT EXISTS pipeline_incidents (
   next_reminder_at timestamptz NOT NULL DEFAULT now() + interval '24 hours',
   sequence integer NOT NULL DEFAULT 0,
   fix_requested_at timestamptz,
+  dismissed_at timestamptz,
   UNIQUE (workspace_id, id)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS pipeline_incidents_open_idx
